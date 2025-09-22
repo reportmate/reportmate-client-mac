@@ -1,0 +1,66 @@
+{
+  "hardware": {
+    "system_info": "SELECT hostname, computer_name, hardware_model, hardware_serial, cpu_brand, cpu_physical_cores, cpu_logical_cores, physical_memory FROM system_info;",
+    "cpu_info": "SELECT device_id, model, family, manufacturer, max_speed FROM cpuid;",
+    "memory_info": "SELECT device_id, size, speed, manufacturer, part_number FROM memory_device_mapped_addresses JOIN memory_devices USING (handle);",
+    "disk_info": "SELECT name, size, type, encryption, encrypted FROM block_devices;",
+    "battery_info": "SELECT health, condition, state, max_capacity, current_capacity, percent_remaining FROM battery;",
+    "platform_info": "SELECT vendor, version, date, revision FROM platform_info;"
+  },
+  "system": {
+    "os_version": "SELECT name, version, major, minor, patch, build, platform, platform_like, arch FROM os_version;",
+    "system_info": "SELECT hostname, uuid, cpu_type, cpu_subtype, cpu_brand, cpu_physical_cores, cpu_logical_cores, physical_memory, hardware_vendor, hardware_model, hardware_version, hardware_serial FROM system_info;",
+    "uptime": "SELECT days, hours, minutes, seconds, total_seconds FROM uptime;",
+    "kernel_info": "SELECT version, arguments, path, device FROM kernel_info;",
+    "startup_items": "SELECT name, path, args, type, source, status FROM startup_items;",
+    "launchd": "SELECT name, path, status, pid, program, program_arguments, watch_paths, queue_directories, inetd_compatibility, start_on_mount, on_demand, disabled, username, groupname, stdout_path, stderr_path, exit_timeout, interval, program_arguments FROM launchd WHERE disabled = 0;"
+  },
+  "network": {
+    "interface_addresses": "SELECT interface, address, mask, broadcast, point_to_point FROM interface_addresses;",
+    "interface_details": "SELECT interface, mac, interface_type, mtu, metric, flags, last_change FROM interface_details;",
+    "routes": "SELECT destination, netmask, gateway, source, flags, interface, mtu, metric, type FROM routes;",
+    "dns_resolvers": "SELECT id, type, address, netmask, options, pid FROM dns_resolvers;",
+    "listening_ports": "SELECT pid, port, protocol, family, address, fd, socket, path FROM listening_ports;",
+    "arp_cache": "SELECT address, mac, interface, permanent FROM arp_cache;",
+    "wifi_networks": "SELECT ssid, network_name, security_type, last_connected, captive_portal, possibly_hidden, roaming, roaming_profile FROM wifi_networks;",
+    "wifi_status": "SELECT interface, ssid, bssid, network_name, country_code, security_type, rssi, noise, channel, cc, transmit_rate FROM wifi_status;"
+  },
+  "security": {
+    "certificates": "SELECT common_name, subject, issuer, ca, self_signed, not_valid_before, not_valid_after, signing_algorithm, key_algorithm, key_strength, key_usage, serial FROM certificates;",
+    "keychain_items": "SELECT label, description, comment, created, modified, type, path FROM keychain_items WHERE type != 'Private Key' AND type != 'Public Key';",
+    "authorization_mechanisms": "SELECT label, plugin, mechanism, privileged, entry FROM authorization_mechanisms;",
+    "authorizations": "SELECT label, modified, allow_root, timeout, version, tries, authenticate_user FROM authorizations;",
+    "gatekeeper": "SELECT assessments_enabled, dev_id_enabled, version, opaque_version FROM gatekeeper;",
+    "sip_config": "SELECT config_flag, enabled, enabled_nvram FROM sip_config;",
+    "secure_boot": "SELECT secure_boot, external_boot, ability, policy FROM secure_boot;",
+    "firewall": "SELECT enable, stealth FROM alf;",
+    "firewall_rules": "SELECT service, process, direction, port, protocol, addresses, content FROM alf_services;"
+  },
+  "applications": {
+    "apps": "SELECT name, path, bundle_executable, bundle_identifier, bundle_name, bundle_short_version, bundle_version, bundle_package_type, environment, element, compiler, development_region, display_name, info_string, minimum_system_version, category, applescript_enabled, copyright FROM apps;",
+    "processes": "SELECT pid, name, path, cmdline, state, cwd, root, uid, gid, euid, egid, suid, sgid, on_disk, wired_size, resident_size, total_size, user_time, system_time, disk_bytes_read, disk_bytes_written, start_time, parent, pgroup, threads, nice, is_elevated_token FROM processes;",
+    "browser_plugins": "SELECT name, identifier, version, sdk, description, development_region, native, path, disabled FROM browser_plugins;",
+    "safari_extensions": "SELECT name, identifier, version, sdk, update_url, author, developer_id, description, path FROM safari_extensions;",
+    "shared_libraries": "SELECT name, path, version FROM shared_libraries;",
+    "package_receipts": "SELECT package_id, version, location, install_time, installer_name, path FROM package_receipts;"
+  },
+  "management": {
+    "managed_policies": "SELECT domain, uuid, name, value, scope, forced, username FROM managed_policies;",
+    "preferences": "SELECT domain, key, subkey, value, forced, username FROM preferences WHERE domain LIKE '%.apple.%' OR domain LIKE 'com.apple.%';",
+    "configuration_profiles": "SELECT identifier, uuid, removal_disallowed, organization, display_name, description, payload_description, payload_display_name, payload_identifier, payload_organization, payload_uuid, payload_version, install_date FROM configuration_profiles;",
+    "device_enrollment": "SELECT enrolled, server_url, username, enrollment_user_id FROM mdm;",
+    "remote_management": "SELECT enrolled, identity_certificate_uuid, topic, hostname, has_ssl, access_rights, enrolled_via_dep FROM alf_services WHERE service = 'RemoteManagement';",
+    "screen_sharing": "SELECT enabled FROM sharing_preferences WHERE name = 'ScreenSharing';",
+    "remote_login": "SELECT enabled FROM sharing_preferences WHERE name = 'RemoteLogin';"
+  },
+  "inventory": {
+    "file_events": "SELECT target_path, category, action, record_type, audit_class, pid, ppid, uid, euid, gid, egid, owner_uid, group_gid, atime, mtime, ctime, md5, sha1, sha256 FROM file_events WHERE path LIKE '/Applications/%' OR path LIKE '/Users/%/Applications/%' OR path LIKE '/System/%' OR path LIKE '/Library/%' LIMIT 100;",
+    "hash": "SELECT path, md5, sha1, sha256 FROM hash WHERE path IN (SELECT path FROM apps WHERE bundle_identifier IS NOT NULL) LIMIT 50;",
+    "disk_encryption": "SELECT name, uuid, encrypted, type, uid, user_uuid, filevault_status, filevault_users FROM disk_encryption;",
+    "mounts": "SELECT device, device_alias, path, type, blocks_size, blocks, blocks_free, blocks_available, inodes, inodes_free, owner, group, permissions, flags FROM mounts;",
+    "usb_devices": "SELECT usb_address, usb_port, vendor, vendor_id, model, model_id, serial, class, subclass, protocol, removable FROM usb_devices;",
+    "pci_devices": "SELECT pci_slot, driver, vendor, vendor_id, model, model_id, class, subclass, subsystem_vendor_id, subsystem_model_id FROM pci_devices;",
+    "system_extensions": "SELECT identifier, version, category, bundle_path, state, enabled FROM system_extensions;",
+    "kernel_extensions": "SELECT name, version, linked_against, path, loaded, idx FROM kernel_extensions WHERE loaded = 1;"
+  }
+}
