@@ -1,0 +1,140 @@
+# Swift / Xcode
+## Build generated
+build/
+DerivedData/
+*.built
+
+## Various settings
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+
+## Other
+*.moved-aside
+*.xccheckout
+*.xcscmblueprint
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcodeproj/project.xcworkspace/
+!*.xcworkspace/contents.xcworkspacedata
+/*.gcno
+
+## Obj-C/Swift specific
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+## Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Swift Package Manager
+.build/
+Packages/
+Package.pins
+Package.resolved
+*.xcodeproj
+
+# CocoaPods
+Pods/
+
+# Carthage
+Carthage/Build
+
+# Accio dependency management
+Dependencies/
+.accio/
+
+# fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# Code Injection
+iOSInjectionProject/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE - VSCode
+.vscode/
+*.code-workspace
+
+# IDE - JetBrains
+.idea/
+*.iml
+
+# ReportMate Mac Client Specific
+## Configuration files with sensitive data
+config.json
+settings.json
+api-config.json
+
+## Logs
+*.log
+logs/
+
+## Cache and temporary files
+cache/
+temp/
+tmp/
+*.tmp
+
+## Runtime generated files
+version.txt
+device-id.txt
+api-keys.encrypted
+client-id.txt
+
+## osquery temporary files
+osquery-*.log
+osquery-temp/
+
+## Test files (temporary)
+test_modules.swift
+
+## Build artifacts
+dist/
+installer/
+*.pkg
+*.dmg
+*.app
+
+## Keychain and certificates (if any)
+*.p12
+*.cer
+*.mobileprovision
+
+## Local development
+local/
+dev/
+
+## Archive/backup files
+*.backup
+*.bak
+*~
+
+## System files
+*.swp
+*.swo
+
+# Network debugging
+*.har
+
+# Profiling
+*.trace
