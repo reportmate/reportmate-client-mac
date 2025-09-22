@@ -30,15 +30,10 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
             ],
-            path: "Sources/ReportMate",
+            path: "Sources",
             resources: [
                 .copy("Resources")
             ]
-        ),
-        .testTarget(
-            name: "ReportMateTests",
-            dependencies: ["ReportMate"],
-            path: "Tests/ReportMateTests"
         ),
     ]
 )
