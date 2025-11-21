@@ -7,6 +7,8 @@ public class ReportMateCore {
     private let configurationManager: ConfigurationManager
     private let dataCollectionService: DataCollectionService
     private let apiClient: APIClient
+    private let cacheService: CacheService
+    private let buildService: BuildService
     
     public init() async throws {
         logger.info("Initializing ReportMate Core...")
@@ -19,6 +21,8 @@ public class ReportMateCore {
         self.dataCollectionService = DataCollectionService(
             configuration: configurationManager.configuration
         )
+        self.cacheService = CacheService()
+        self.buildService = BuildService()
         
         logger.info("ReportMate Core initialized successfully")
     }
@@ -28,10 +32,16 @@ public class ReportMateCore {
     /// Execute complete data collection and transmission
     public func executeDataCollection(
         force: Bool = false,
+        collectOnly: Bool = false,
+        transmitOnly: Bool = false,
+        modulesToRun: [String]? = nil,
         deviceId: String? = nil,
         apiUrl: String? = nil,
-        verbose: Bool = false
+        verboseLevel: VerboseLevel = .error
     ) async -> Result<CollectionSummary, ReportMateError> {
+        
+        // Configure logging level based on verbose setting
+        configureLogging(level: verboseLevel)
         
         logger.info("Starting data collection...")
         
@@ -44,17 +54,55 @@ public class ReportMateCore {
                 configurationManager.setOverride(key: "apiUrl", value: apiUrl)
             }
             
-            // Check if we should skip collection due to recent cache
-            let shouldSkip = await shouldSkipCollection()
-            if !force && shouldSkip {
-                logger.info("Skipping collection - recent cache available")
-                return .success(CollectionSummary(moduleCount: 0, recordCount: 0, cached: true))
+            var collectedData: [String: Any] = [:]
+            var moduleCount = 0
+            
+            // Handle transmit-only mode
+            if transmitOnly {
+                logger.info("Transmit-only mode: loading cached data...")
+                if let cachedData = await cacheService.getCachedData() {
+                    collectedData = cachedData
+                    moduleCount = (cachedData["modules"] as? [String: Any])?.count ?? 0
+                    logger.info("Loaded cached data from \(moduleCount) modules")
+                } else {
+                    logger.warning("No cached data available for transmission")
+                    return .failure(.systemError("No cached data available for transmission"))
+                }
+            } else {
+                // Normal collection mode
+                
+                // Check if we should skip collection due to recent cache
+                let shouldSkip = await shouldSkipCollection()
+                if !force && shouldSkip && !collectOnly {
+                    logger.info("Skipping collection - recent cache available")
+                    return .success(CollectionSummary(moduleCount: 0, recordCount: 0, cached: true))
+                }
+                
+                // Execute data collection (specific modules or all)
+                if let modules = modulesToRun {
+                    collectedData = try await dataCollectionService.collectSpecificModules(modules)
+                    logger.info("Collected data from specified modules: \(modules.joined(separator: ", "))")
+                } else {
+                    collectedData = try await dataCollectionService.collectAllModules()
+                    logger.info("Collected data from all enabled modules")
+                }
+                
+                let moduleResults = collectedData["modules"] as? [String: Any] ?? [:]
+                moduleCount = moduleResults.count
+                
+                // Cache the collected data
+                await cacheService.setCachedData(collectedData)
             }
             
-            // Execute data collection
-            let collectedData = try await dataCollectionService.collectAllModules()
-            let moduleResults = collectedData["modules"] as? [String: Any] ?? [:]
-            logger.info("Collected data from \(moduleResults.count) modules")
+            // Handle collect-only mode
+            if collectOnly {
+                logger.info("Collect-only mode: data cached without transmission")
+                return .success(CollectionSummary(
+                    moduleCount: moduleCount,
+                    recordCount: 0,
+                    cached: true
+                ))
+            }
             
             // Transmit data to API
             let transmissionResult = try await apiClient.transmitData(collectedData)
@@ -67,7 +115,7 @@ public class ReportMateCore {
                 await updateLastCollectionTimestamp()
                 
                 return .success(CollectionSummary(
-                    moduleCount: moduleResults.count,
+                    moduleCount: moduleCount,
                     recordCount: response.recordsProcessed,
                     cached: false
                 ))
@@ -86,7 +134,10 @@ public class ReportMateCore {
     // MARK: - Configuration Testing
     
     /// Test configuration and connectivity
-    public func testConfiguration(verbose: Bool = false) async -> Result<DiagnosticInfo, ReportMateError> {
+    public func testConfiguration(verboseLevel: VerboseLevel = .error) async -> Result<DiagnosticInfo, ReportMateError> {
+        // Configure logging level
+        configureLogging(level: verboseLevel)
+        
         logger.info("Running configuration test...")
         
         do {
@@ -113,6 +164,38 @@ public class ReportMateCore {
         } catch {
             logger.error("Configuration test failed: \(error)")
             return .failure(.configurationError(error))
+        }
+    }
+    
+    // MARK: - Build Operations
+    
+    /// Execute build and signing operations
+    public func executeBuild(
+        sign: Bool = false,
+        version: String? = nil,
+        identity: String? = nil,
+        verboseLevel: VerboseLevel = .error
+    ) async -> Result<BuildInfo, ReportMateError> {
+        
+        // Configure logging level
+        configureLogging(level: verboseLevel)
+        
+        logger.info("Starting build process...")
+        
+        do {
+            let buildService = BuildService()
+            let buildInfo = try await buildService.executeBuild(
+                sign: sign,
+                version: version,
+                identity: identity
+            )
+            
+            logger.info("Build process completed successfully")
+            return .success(buildInfo)
+            
+        } catch {
+            logger.error("Build process failed: \(error)")
+            return .failure(.systemError("Build failed: \(error.localizedDescription)"))
         }
     }
     
@@ -157,6 +240,14 @@ public class ReportMateCore {
     
     // MARK: - Private Methods
     
+    private func configureLogging(level: VerboseLevel) {
+        // Configure the logging system based on verbose level
+        // Note: In a real implementation, this would configure the global logging system
+        // For now, we'll just acknowledge the level parameter
+        _ = level.logLevel // Acknowledge the parameter to avoid unused warning
+        // Swift Logging framework configuration would go here
+    }
+    
     private func shouldSkipCollection() async -> Bool {
         let cacheService = CacheService()
         let lastCollection = await cacheService.getLastCollectionTimestamp()
@@ -190,6 +281,13 @@ public struct DiagnosticInfo: Codable {
     public let enabledModules: [String]
     public let osqueryAvailable: Bool
     public let apiConnectivity: Bool
+}
+
+public struct BuildInfo {
+    public let version: String?
+    public var signed: Bool
+    public var signingIdentity: String?
+    public let outputPath: String
 }
 
 /// Basic system information for CLI display and core functionality
