@@ -1,6 +1,6 @@
 import Foundation
 
-/// Hardware module processor for collecting hardware information
+/// Hardware module processor for collecting comprehensive hardware information
 public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     public init(configuration: ReportMateConfiguration) {
@@ -8,16 +8,61 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     }
     
     public override func collectData() async throws -> ModuleData {
-        let hardwareData = try await collectHardwareInfo()
+        print("=== HARDWARE MODULE COLLECTION ===")
+        print("Collecting comprehensive hardware data for macOS...")
+        print("─────────────────────────────────")
+        
+        let startTime = Date()
+        let hardwareData = try await collectComprehensiveHardwareData()
+        let duration = Date().timeIntervalSince(startTime)
+        
+        print("Hardware data collection completed in \(String(format: "%.2f", duration)) seconds")
         return BaseModuleData(moduleId: moduleId, data: hardwareData)
     }
     
-    private func collectHardwareInfo() async throws -> [String: Any] {
+    public func collectComprehensiveHardwareData() async throws -> [String: Any] {
+        print("Starting comprehensive hardware collection...")
+        
+        var hardwareData: [String: Any] = [:]
+        
+        // Collect system information
+        print("  [1/7] Collecting system information...")
+        hardwareData["system"] = try await collectSystemInfo()
+        
+        // Collect processor information  
+        print("  [2/7] Collecting processor information...")
+        hardwareData["processor"] = try await collectProcessorInfo()
+        
+        // Collect memory information
+        print("  [3/7] Collecting memory information...")
+        hardwareData["memory"] = try await collectMemoryInfo()
+        
+        // Collect storage information
+        print("  [4/7] Collecting storage information...")
+        hardwareData["storage"] = try await collectStorageInfo()
+        
+        // Collect graphics information
+        print("  [5/7] Collecting graphics information...")
+        hardwareData["graphics"] = try await collectGraphicsInfo()
+        
+        // Collect battery information (if available)
+        print("  [6/7] Collecting battery information...")
+        hardwareData["battery"] = try await collectBatteryInfo()
+        
+        // Collect thermal information
+        print("  [7/7] Collecting thermal information...")
+        hardwareData["thermal"] = try await collectThermalInfo()
+        
+        print("Hardware collection completed successfully")
+        return hardwareData
+    }
+    
+    private func collectSystemInfo() async throws -> [String: Any] {
         return try await executeWithFallback(
             osquery: """
             SELECT 
-                cpu_brand, cpu_logical_cores, cpu_physical_cores,
-                physical_memory, hardware_vendor, hardware_model
+                hostname, hardware_serial, hardware_vendor, hardware_model,
+                computer_name, hardware_version
             FROM system_info;
             """,
             bash: "system_profiler SPHardwareDataType -json",
@@ -26,28 +71,381 @@ import json
 import subprocess
 import platform
 
-def get_hardware_info():
+def get_system_info():
     info = {
-        "cpu_brand": platform.processor(),
+        "hostname": platform.node(),
         "platform": platform.platform(),
         "machine": platform.machine(),
         "system": platform.system(),
         "release": platform.release()
     }
     
-    # Try to get more detailed info via system_profiler
+    # Get detailed hardware info via system_profiler
     try:
         result = subprocess.run(['system_profiler', 'SPHardwareDataType', '-json'], 
                                capture_output=True, text=True)
         if result.returncode == 0:
             data = json.loads(result.stdout)
-            info["system_profiler"] = data
+            if data and '_SPHardwareDataType' in data:
+                hw_data = data['_SPHardwareDataType'][0]
+                info.update({
+                    "model_name": hw_data.get('machine_name', ''),
+                    "model_identifier": hw_data.get('machine_model', ''),
+                    "serial_number": hw_data.get('serial_number', ''),
+                    "hardware_uuid": hw_data.get('platform_UUID', '')
+                })
     except:
         pass
     
     return info
 
-print(json.dumps(get_hardware_info()))
+print(json.dumps(get_system_info()))
+"""
+        )
+    }
+    
+    private func collectProcessorInfo() async throws -> [String: Any] {
+        return try await executeWithFallback(
+            osquery: """
+            SELECT 
+                cpu_brand, cpu_logical_cores, cpu_physical_cores,
+                cpu_type, cpu_subtype, cpu_microcode
+            FROM system_info;
+            """,
+            bash: """
+            echo '{'
+            echo '"brand":"'$(sysctl -n machdep.cpu.brand_string)'",'
+            echo '"cores_physical":'$(sysctl -n hw.physicalcpu)','
+            echo '"cores_logical":'$(sysctl -n hw.logicalcpu)','
+            echo '"packages":'$(sysctl -n hw.packages)','
+            echo '"frequency_max":'$(sysctl -n hw.cpufrequency_max 2>/dev/null || echo 0)','
+            echo '"cache_size_l1d":'$(sysctl -n hw.l1dcachesize)','
+            echo '"cache_size_l1i":'$(sysctl -n hw.l1icachesize)','
+            echo '"cache_size_l2":'$(sysctl -n hw.l2cachesize)','
+            echo '"cache_size_l3":'$(sysctl -n hw.l3cachesize)
+            echo '}'
+            """,
+            python: """
+import json
+import subprocess
+import os
+
+def get_cpu_info():
+    info = {}
+    
+    def get_sysctl(key):
+        try:
+            result = subprocess.run(['sysctl', '-n', key], capture_output=True, text=True)
+            return result.stdout.strip() if result.returncode == 0 else None
+        except:
+            return None
+    
+    info['brand'] = get_sysctl('machdep.cpu.brand_string')
+    info['cores_physical'] = int(get_sysctl('hw.physicalcpu') or 0)
+    info['cores_logical'] = int(get_sysctl('hw.logicalcpu') or 0)
+    info['packages'] = int(get_sysctl('hw.packages') or 0)
+    info['cache_size_l1d'] = int(get_sysctl('hw.l1dcachesize') or 0)
+    info['cache_size_l1i'] = int(get_sysctl('hw.l1icachesize') or 0)
+    info['cache_size_l2'] = int(get_sysctl('hw.l2cachesize') or 0)
+    info['cache_size_l3'] = int(get_sysctl('hw.l3cachesize') or 0)
+    
+    return info
+
+print(json.dumps(get_cpu_info()))
+"""
+        )
+    }
+    
+    private func collectMemoryInfo() async throws -> [String: Any] {
+        return try await executeWithFallback(
+            osquery: """
+            SELECT physical_memory FROM system_info;
+            """,
+            bash: """
+            echo '{'
+            echo '"physical_memory":'$(sysctl -n hw.memsize)','
+            echo '"page_size":'$(sysctl -n hw.pagesize)','
+            echo '"memory_pressure":'$(memory_pressure | grep "System-wide memory free percentage" | grep -o '[0-9]*' | head -1 || echo 0)
+            echo '}'
+            """,
+            python: """
+import json
+import subprocess
+import os
+
+def get_memory_info():
+    info = {}
+    
+    def get_sysctl(key):
+        try:
+            result = subprocess.run(['sysctl', '-n', key], capture_output=True, text=True)
+            return result.stdout.strip() if result.returncode == 0 else None
+        except:
+            return None
+    
+    # Physical memory
+    info['physical_memory'] = int(get_sysctl('hw.memsize') or 0)
+    info['page_size'] = int(get_sysctl('hw.pagesize') or 0)
+    
+    # Get memory pressure
+    try:
+        result = subprocess.run(['memory_pressure'], capture_output=True, text=True)
+        if result.returncode == 0:
+            for line in result.stdout.split('\\n'):
+                if 'System-wide memory free percentage' in line:
+                    info['memory_pressure'] = int(line.split(':')[1].strip().rstrip('%'))
+                    break
+    except:
+        info['memory_pressure'] = None
+    
+    # Get vm_stat for more details
+    try:
+        result = subprocess.run(['vm_stat'], capture_output=True, text=True)
+        if result.returncode == 0:
+            vm_data = {}
+            for line in result.stdout.split('\\n'):
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    key = key.strip().replace(' ', '_').lower()
+                    value = value.strip().rstrip('.').replace(' ', '')
+                    try:
+                        vm_data[key] = int(value)
+                    except:
+                        pass
+            info['vm_stats'] = vm_data
+    except:
+        pass
+    
+    return info
+
+print(json.dumps(get_memory_info()))
+"""
+        )
+    }
+    
+    private func collectStorageInfo() async throws -> [String: Any] {
+        return try await executeWithFallback(
+            osquery: """
+            SELECT device, path, size, used, available, percentage 
+            FROM disk_info;
+            """,
+            bash: "df -h | tail -n +2 | awk 'BEGIN{print \"[\"} {print \"{\\\"filesystem\\\":\\\"\"$1\"\\\",\\\"size\\\":\\\"\"$2\"\\\",\\\"used\\\":\\\"\"$3\"\\\",\\\"available\\\":\\\"\"$4\"\\\",\\\"capacity\\\":\\\"\"$5\"\\\",\\\"mount\\\":\\\"\"$9\"\\\"}\"; if(NR<(NF-1)) print \",\"} END{print \"]\"}'",
+            python: """
+import json
+import subprocess
+import os
+
+def get_storage_info():
+    storage_devices = []
+    
+    # Get disk usage info
+    try:
+        result = subprocess.run(['df', '-h'], capture_output=True, text=True)
+        if result.returncode == 0:
+            lines = result.stdout.strip().split('\\n')[1:]  # Skip header
+            for line in lines:
+                parts = line.split()
+                if len(parts) >= 6:
+                    storage_devices.append({
+                        'filesystem': parts[0],
+                        'size': parts[1],
+                        'used': parts[2], 
+                        'available': parts[3],
+                        'capacity': parts[4],
+                        'mount': ' '.join(parts[5:])
+                    })
+    except:
+        pass
+    
+    # Get diskutil info for more details
+    try:
+        result = subprocess.run(['diskutil', 'list'], capture_output=True, text=True)
+        physical_disks = []
+        if result.returncode == 0:
+            current_disk = None
+            for line in result.stdout.split('\\n'):
+                line = line.strip()
+                if line.startswith('/dev/disk'):
+                    if current_disk:
+                        physical_disks.append(current_disk)
+                    current_disk = {'device': line.split()[0], 'partitions': []}
+                elif line and current_disk and not line.startswith('/dev/disk'):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        current_disk['partitions'].append({
+                            'index': parts[0],
+                            'type': parts[1], 
+                            'size': parts[2],
+                            'name': ' '.join(parts[3:]) if len(parts) > 3 else ''
+                        })
+            if current_disk:
+                physical_disks.append(current_disk)
+    except:
+        physical_disks = []
+    
+    return {
+        'mounted_volumes': storage_devices,
+        'physical_disks': physical_disks
+    }
+
+print(json.dumps(get_storage_info()))
+"""
+        )
+    }
+    
+    private func collectGraphicsInfo() async throws -> [String: Any] {
+        return try await executeWithFallback(
+            osquery: "",  // No direct osquery equivalent for macOS graphics
+            bash: "system_profiler SPDisplaysDataType -json",
+            python: """
+import json
+import subprocess
+
+def get_graphics_info():
+    graphics_info = {}
+    
+    # Get display information
+    try:
+        result = subprocess.run(['system_profiler', 'SPDisplaysDataType', '-json'], 
+                               capture_output=True, text=True)
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            if data and '_SPDisplaysDataType' in data:
+                displays = data['_SPDisplaysDataType']
+                graphics_info['displays'] = displays
+                
+                # Extract graphics card info
+                graphics_cards = []
+                for display_group in displays:
+                    if 'spdisplays_ndrvs' in display_group:
+                        for driver in display_group['spdisplays_ndrvs']:
+                            card_info = {
+                                'name': driver.get('sppci_model', 'Unknown'),
+                                'vendor': driver.get('sppci_vendor', 'Unknown'),
+                                'device_id': driver.get('sppci_device_id', ''),
+                                'vendor_id': driver.get('sppci_vendor_id', ''),
+                                'revision': driver.get('sppci_revision_id', ''),
+                                'vram': driver.get('spdisplays_vram', ''),
+                                'bus': driver.get('sppci_bus', ''),
+                                'displays_connected': []
+                            }
+                            
+                            # Add connected displays
+                            if '_spdisplays_displays' in driver:
+                                for display in driver['_spdisplays_displays']:
+                                    display_info = {
+                                        'name': display.get('_name', ''),
+                                        'resolution': display.get('spdisplays_resolution', ''),
+                                        'pixel_depth': display.get('spdisplays_depth', ''),
+                                        'main_display': display.get('spdisplays_main', False),
+                                        'mirror': display.get('spdisplays_mirror', False)
+                                    }
+                                    card_info['displays_connected'].append(display_info)
+                            
+                            graphics_cards.append(card_info)
+                
+                graphics_info['graphics_cards'] = graphics_cards
+    except:
+        graphics_info = {'error': 'Unable to collect graphics information'}
+    
+    return graphics_info
+
+print(json.dumps(get_graphics_info()))
+"""
+        )
+    }
+    
+    private func collectBatteryInfo() async throws -> [String: Any] {
+        return try await executeWithFallback(
+            osquery: "",  // No osquery battery table for macOS
+            bash: "pmset -g batt",
+            python: """
+import json
+import subprocess
+
+def get_battery_info():
+    battery_info = {}
+    
+    try:
+        # Get battery status from pmset
+        result = subprocess.run(['pmset', '-g', 'batt'], capture_output=True, text=True)
+        if result.returncode == 0:
+            output = result.stdout
+            
+            # Parse battery information
+            for line in output.split('\\n'):
+                if 'InternalBattery' in line:
+                    # Extract percentage and charging status
+                    parts = line.split()
+                    for i, part in enumerate(parts):
+                        if '%' in part:
+                            battery_info['percentage'] = int(part.rstrip('%;'))
+                            if i + 1 < len(parts):
+                                battery_info['status'] = parts[i + 1].rstrip(';')
+                            break
+                elif 'AC Power' in line:
+                    battery_info['power_source'] = 'AC Power'
+        
+        # Get more detailed battery info from system_profiler
+        result = subprocess.run(['system_profiler', 'SPPowerDataType', '-json'], 
+                               capture_output=True, text=True)
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            if data and '_SPPowerDataType' in data:
+                power_data = data['_SPPowerDataType']
+                for item in power_data:
+                    if 'sppower_battery_health_info' in item:
+                        health_info = item['sppower_battery_health_info']
+                        battery_info.update({
+                            'cycle_count': health_info.get('sppower_battery_cycle_count', 0),
+                            'condition': health_info.get('sppower_battery_health', ''),
+                            'max_capacity': health_info.get('sppower_battery_max_capacity', 0)
+                        })
+    except:
+        battery_info = None  # No battery present (desktop)
+    
+    return battery_info
+
+print(json.dumps(get_battery_info()))
+"""
+        )
+    }
+    
+    private func collectThermalInfo() async throws -> [String: Any] {
+        return try await executeWithFallback(
+            osquery: "",  // No osquery thermal equivalent
+            bash: "echo '{\"thermal\":\"not_available\"}'",
+            python: """
+import json
+import subprocess
+
+def get_thermal_info():
+    thermal_info = {}
+    
+    try:
+        # Get thermal state (macOS specific)
+        result = subprocess.run(['pmset', '-g', 'therm'], capture_output=True, text=True)
+        if result.returncode == 0:
+            output = result.stdout.strip()
+            if 'No thermal' not in output:
+                thermal_info['thermal_state'] = output
+        
+        # Try to get temperature from powermetrics (requires sudo)
+        try:
+            result = subprocess.run(['powermetrics', '--samplers', 'smc,cpu_power', '-n', '1', '-f', 'plist'],
+                                   capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                # This would need plist parsing, simplified for now
+                thermal_info['powermetrics_available'] = True
+        except:
+            thermal_info['powermetrics_available'] = False
+            
+    except:
+        thermal_info = {'error': 'Unable to collect thermal information'}
+    
+    return thermal_info
+
+print(json.dumps(get_thermal_info()))
 """
         )
     }

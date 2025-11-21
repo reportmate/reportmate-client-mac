@@ -10,6 +10,18 @@ public struct DisplayData: ModuleDataModel, Sendable {
     // Additional display-specific properties
     public let deviceId: String
     
+    // Exclude moduleId from coding since it has a fixed value
+    enum CodingKeys: String, CodingKey {
+        case collectionTimestamp
+        case success
+        case errorMessage
+        case deviceId
+        case displays
+        case displayAdapters
+        case displaySettings
+        case colorProfiles
+    }
+    
     // Display devices and configuration
     public let displays: [DisplayDevice]
     public let displayAdapters: [DisplayAdapter]

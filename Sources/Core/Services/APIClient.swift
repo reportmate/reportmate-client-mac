@@ -252,6 +252,35 @@ public class CacheService {
         }
     }
     
+    /// Cache all collected data (for ReportMateCore compatibility)
+    public func setCachedData(_ data: [String: Any]) async {
+        let cacheFile = cacheDirectory.appendingPathComponent("collected_data.json")
+        
+        do {
+            let jsonData = try JSONSerialization.data(withJSONObject: data)
+            try jsonData.write(to: cacheFile)
+        } catch {
+            print("Warning: Could not cache collected data: \(error)")
+        }
+    }
+    
+    /// Get all cached data (for ReportMateCore compatibility)
+    public func getCachedData() async -> [String: Any]? {
+        let cacheFile = cacheDirectory.appendingPathComponent("collected_data.json")
+        
+        guard FileManager.default.fileExists(atPath: cacheFile.path) else {
+            return nil
+        }
+        
+        do {
+            let data = try Data(contentsOf: cacheFile)
+            return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        } catch {
+            print("Warning: Could not load cached data: \(error)")
+            return nil
+        }
+    }
+    
     /// Load cached data for a module
     public func loadCachedData(for moduleId: String) async -> [String: Any]? {
         let cacheFile = cacheDirectory.appendingPathComponent("\(moduleId)_cache.json")
@@ -290,5 +319,36 @@ public class CacheService {
         } catch {
             print("Warning: Could not clean up cache directory: \(error)")
         }
+    }
+}
+
+/// Build service for packaging and code signing
+public class BuildService {
+    public init() {}
+    
+    public func executeBuild(
+        sign: Bool = false,
+        version: String? = nil,
+        identity: String? = nil
+    ) async throws -> BuildInfo {
+        
+        // This would implement actual build and signing logic
+        // For now, return a mock result
+        let outputPath = "/tmp/ReportMate-build"
+        
+        var buildInfo = BuildInfo(
+            version: version,
+            signed: sign,
+            signingIdentity: identity,
+            outputPath: outputPath
+        )
+        
+        if sign {
+            // Mock signing process
+            buildInfo.signed = true
+            buildInfo.signingIdentity = identity ?? "Default Developer ID"
+        }
+        
+        return buildInfo
     }
 }

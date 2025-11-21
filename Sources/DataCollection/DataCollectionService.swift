@@ -63,6 +63,36 @@ public class DataCollectionService {
         ]
     }
     
+    /// Collect data from specific modules
+    public func collectSpecificModules(_ moduleIds: [String]) async throws -> [String: Any] {
+        var moduleResults: [String: Any] = [:]
+        
+        for moduleId in moduleIds {
+            guard let processor = moduleProcessors[moduleId] else {
+                print("Warning: Module '\(moduleId)' not found, skipping...")
+                continue
+            }
+            
+            do {
+                let moduleData = try await processor.collectData()
+                moduleResults[moduleId] = moduleData
+            } catch {
+                print("Warning: Failed to collect data from module '\(moduleId)': \(error.localizedDescription)")
+                // Continue with other modules instead of failing completely
+            }
+        }
+        
+        // Create device identification
+        let deviceInfo = try await collectDeviceInfo()
+        
+        return [
+            "deviceInfo": deviceInfo,
+            "modules": moduleResults,
+            "collectionTimestamp": Date(),
+            "reportMateVersion": "1.0.0"
+        ]
+    }
+
     /// Collect data from a specific module
     public func collectModule(_ moduleId: String) async throws -> ModuleData? {
         guard let processor = moduleProcessors[moduleId] else {
