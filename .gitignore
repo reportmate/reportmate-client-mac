@@ -85,6 +85,15 @@ config.json
 settings.json
 api-config.json
 
+## Environment files with secrets (munkipkg)
+build/pkg/.env
+build/pkg/.env.local
+build/pkg/.env.*.local
+!build/pkg/.env.example
+
+## Build outputs
+build/pkg/build/
+
 ## Logs
 *.log
 logs/
