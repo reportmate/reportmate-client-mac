@@ -11,8 +11,8 @@ set -e
 # ═══════════════════════════════════════════════════════════════════════════
 
 PROJECT_NAME="ReportMate"
-PRODUCT_NAME="runner"
-BUNDLE_ID="com.reportmate.runner"
+PRODUCT_NAME="managedreportsrunner"
+BUNDLE_ID="com.reportmate.managedreportsrunner"
 PKG_IDENTIFIER="ca.ecuad.reportmate.client"
 TEAM_ID="7TF6CSP83S"  # Emily Carr University team ID
 DEVELOPER_ID_APP_HASH="C0277EBA633F1AA2BC2855E45B3B38A1840053BA"
@@ -373,15 +373,19 @@ if [ "$SKIP_PKG" = false ]; then
     PACKAGE_ROOT="${OUTPUT_DIR}/package_root"
     rm -rf "$PACKAGE_ROOT"
     mkdir -p "$PACKAGE_ROOT/usr/local/reportmate"
-    mkdir -p "$PACKAGE_ROOT/Library/ManagedReports"
+    mkdir -p "$PACKAGE_ROOT/Library/Managed Reports"
     mkdir -p "$PACKAGE_ROOT/Library/LaunchDaemons"
+    mkdir -p "$PACKAGE_ROOT/etc/paths.d"
+    
+    # Add reportmate to PATH
+    echo "/usr/local/reportmate" > "$PACKAGE_ROOT/etc/paths.d/reportmate"
     
     # Copy executable
     cp "${DIST_DIR}/${PRODUCT_NAME}" "$PACKAGE_ROOT/usr/local/reportmate/"
     cp "${DIST_DIR}/version.txt" "$PACKAGE_ROOT/usr/local/reportmate/"
     
     # Create default configuration plist
-    cat > "$PACKAGE_ROOT/Library/ManagedReports/reportmate.plist" << EOF
+    cat > "$PACKAGE_ROOT/Library/Managed Reports/reportmate.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -422,7 +426,7 @@ EOF
     <string>com.github.reportmate</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/reportmate/runner</string>
+        <string>/usr/local/reportmate/managedreportsrunner</string>
         <string>run</string>
     </array>
     <key>StartInterval</key>
@@ -430,9 +434,9 @@ EOF
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>/Library/ManagedReports/logs/reportmate.log</string>
+    <string>/Library/Managed Reports/logs/reportmate.log</string>
     <key>StandardErrorPath</key>
-    <string>/Library/ManagedReports/logs/reportmate.error.log</string>
+    <string>/Library/Managed Reports/logs/reportmate.error.log</string>
 </dict>
 </plist>
 EOF
@@ -563,9 +567,9 @@ if [ "$SKIP_DMG" = false ] && command -v hdiutil &> /dev/null; then
 echo "Installing ReportMate..."
 sudo mkdir -p /usr/local/reportmate
 sudo cp -R "ReportMate/"* /usr/local/reportmate/
-sudo chmod +x /usr/local/reportmate/runner
+sudo chmod +x /usr/local/reportmate/managedreportsrunner
 echo "ReportMate installed successfully!"
-echo "Configure with: sudo /usr/local/reportmate/runner install --api-url YOUR_API_URL"
+echo "Configure with: sudo /usr/local/reportmate/managedreportsrunner install --api-url YOUR_API_URL"
 EOF
     chmod +x "$DMG_DIR/Install.sh"
     

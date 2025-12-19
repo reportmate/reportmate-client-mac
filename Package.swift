@@ -10,7 +10,7 @@ let package = Package(
     ],
     products: [
         .executable(
-            name: "runner",
+            name: "managedreportsrunner",
             targets: ["ReportMate"]
         ),
     ],
