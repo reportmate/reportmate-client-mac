@@ -14,6 +14,8 @@ public struct NetworkInfo: Codable, Sendable {
     public let listeningPorts: [ListeningPort]
     public let arpCache: [ARPEntry]
     public let networkConnections: [NetworkConnection]
+    public let activeConnection: ActiveConnection?
+    public let vpnConnections: [VPNConnection]
     
     public init(
         interfaces: [NetworkInterface] = [],
@@ -22,7 +24,9 @@ public struct NetworkInfo: Codable, Sendable {
         wifiInfo: WiFiInfo? = nil,
         listeningPorts: [ListeningPort] = [],
         arpCache: [ARPEntry] = [],
-        networkConnections: [NetworkConnection] = []
+        networkConnections: [NetworkConnection] = [],
+        activeConnection: ActiveConnection? = nil,
+        vpnConnections: [VPNConnection] = []
     ) {
         self.interfaces = interfaces
         self.routes = routes
@@ -31,6 +35,8 @@ public struct NetworkInfo: Codable, Sendable {
         self.listeningPorts = listeningPorts
         self.arpCache = arpCache
         self.networkConnections = networkConnections
+        self.activeConnection = activeConnection
+        self.vpnConnections = vpnConnections
     }
 }
 
@@ -441,4 +447,50 @@ public enum ConnectionState: String, Codable, Sendable {
     case lastAck = "LAST_ACK"
     case closing = "Closing"
     case unknown = "Unknown"
+}
+
+/// Active network connection information
+public struct ActiveConnection: Codable, Sendable {
+    public let interface: String
+    public let ipAddress: String
+    public let gateway: String?
+    public let connectionType: String
+    public let isPrimary: Bool
+    
+    public init(
+        interface: String,
+        ipAddress: String,
+        gateway: String? = nil,
+        connectionType: String,
+        isPrimary: Bool = true
+    ) {
+        self.interface = interface
+        self.ipAddress = ipAddress
+        self.gateway = gateway
+        self.connectionType = connectionType
+        self.isPrimary = isPrimary
+    }
+}
+
+/// VPN connection information
+public struct VPNConnection: Codable, Sendable {
+    public let name: String
+    public let status: String
+    public let type: String
+    public let serverAddress: String?
+    public let interface: String?
+    
+    public init(
+        name: String,
+        status: String,
+        type: String,
+        serverAddress: String? = nil,
+        interface: String? = nil
+    ) {
+        self.name = name
+        self.status = status
+        self.type = type
+        self.serverAddress = serverAddress
+        self.interface = interface
+    }
 }

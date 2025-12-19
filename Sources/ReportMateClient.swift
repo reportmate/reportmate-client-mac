@@ -6,9 +6,9 @@ import Logging
 @main
 struct ReportMateClient: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "runner",
+        commandName: "managedreportsrunner",
         abstract: "ReportMate - Device data collection and reporting",
-        version: "1.0.0"
+        version: AppVersion.current
     )
     
     // MARK: - Command Options
@@ -49,6 +49,12 @@ struct ReportMateClient: AsyncParsableCommand {
     // MARK: - Main Execution
     
     mutating func run() async throws {
+        // Check for root privileges (required for system data collection and writing to /Library)
+        guard getuid() == 0 else {
+            fputs("ERROR: You must run this as root!\n", stderr)
+            throw ExitCode.failure
+        }
+        
         // Display startup banner
         displayStartupBanner()
         
@@ -130,7 +136,7 @@ struct ReportMateClient: AsyncParsableCommand {
             print("[\(timestamp)] INFO      Verbose logging enabled")
         }
         print("[\(timestamp)] INFO  ─────────────────────────────────")
-        print("[\(timestamp)] INFO  Version: 1.0.0")
+        print("[\(timestamp)] INFO  Version: \(AppVersion.current)")
         print("[\(timestamp)] INFO  Arguments: \(CommandLine.arguments.dropFirst().joined(separator: " "))")
         print("[\(timestamp)] INFO  Verbose Level: \(verbose) (\(getVerboseDescription(verbose)))")
         print("[\(timestamp)] INFO  Platform: \(getSystemPlatform())")
@@ -227,10 +233,11 @@ struct ReportMateClient: AsyncParsableCommand {
         case "applications": return ApplicationsModuleProcessor(configuration: config)
         case "management": return ManagementModuleProcessor(configuration: config)
         case "inventory": return InventoryModuleProcessor(configuration: config)
-        case "displays": return DisplayModuleProcessor(configuration: config)
-        case "peripherals": return PeripheralsModuleProcessor(configuration: config)
-        case "printers": return PrinterModuleProcessor(configuration: config)
+        case "displays", "printers", "peripherals":
+            // Displays and Printers are now part of the unified Peripherals module
+            return PeripheralsModuleProcessor(configuration: config)
         case "installs": return InstallsModuleProcessor(configuration: config)
+        case "profiles": return ProfilesModuleProcessor(configuration: config)
         default: return nil
         }
     }
@@ -258,7 +265,13 @@ struct ReportMateClient: AsyncParsableCommand {
             if let baseData = data as? BaseModuleData {
                 return (module, baseData.data)
             } else {
-                // Fallback if not BaseModuleData (shouldn't happen with current impl)
+                // Generic Codable handling for typed module data (like InventoryData)
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                let jsonData = try encoder.encode(data)
+                if let dict = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                    return (module, dict)
+                }
                 return (module, [:])
             }
             
@@ -324,15 +337,22 @@ struct ReportMateClient: AsyncParsableCommand {
         let completionTimestamp = dateFormatter.string(from: Date())
         print("[\(completionTimestamp)] INFO  Data collection completed")
         
-        // Construct DeviceInfo
+        // Construct DeviceInfo (for backwards compatibility)
         let serialNumber = SystemUtils.getSerialNumber()
         let osVersion = SystemUtils.getOSVersion()
         let model = SystemUtils.getHardwareModel()
         let architecture = SystemUtils.getArchitecture()
         let deviceName = ProcessInfo.processInfo.hostName
         
-        // Use configured device ID or fallback to serial number if not set
-        let finalDeviceId = config.deviceId ?? serialNumber
+        // Use configured device ID or generate a UUID if not set
+        // API requires deviceId to be in UUID format
+        let finalDeviceId: String
+        if let configuredId = config.deviceId, !configuredId.isEmpty {
+            finalDeviceId = configuredId
+        } else {
+            // Generate a stable UUID from the serial number for consistency
+            finalDeviceId = serialNumber.sha256UUID()
+        }
         
         let deviceInfo = DeviceInfo(
             deviceId: finalDeviceId,
@@ -344,11 +364,29 @@ struct ReportMateClient: AsyncParsableCommand {
             osVersion: osVersion,
             architecture: architecture,
             lastSeen: Date(),
-            reportMateVersion: "1.0.0"
+            reportMateVersion: AppVersion.current
         )
         
-        // Create Payload
-        let payload = DeviceDataPayload(
+        // Create EventMetadata matching Windows structure
+        let metadata = EventMetadata(
+            deviceId: finalDeviceId,
+            serialNumber: serialNumber,
+            collectedAt: Date(),
+            clientVersion: AppVersion.current,
+            platform: "macOS",
+            collectionType: "Full",
+            enabledModules: modulesToRun
+        )
+        
+        // Create UnifiedDevicePayload matching Windows format for API
+        let unifiedPayload = UnifiedDevicePayload(
+            metadata: metadata,
+            events: [],
+            modules: collectedData
+        )
+        
+        // Also keep legacy payload for backwards compatibility/debugging
+        let legacyPayload = DeviceDataPayload(
             deviceInfo: deviceInfo,
             collectionTimestamp: Date(),
             modules: collectedData
@@ -362,7 +400,8 @@ struct ReportMateClient: AsyncParsableCommand {
         var payloadDict: [String: Any]?
         
         do {
-            let jsonData = try encoder.encode(payload)
+            // Use unified payload for API transmission
+            let jsonData = try encoder.encode(unifiedPayload)
             if let jsonString = String(data: jsonData, encoding: .utf8) {
                 print("\n=== COLLECTED DATA PAYLOAD ===")
                 print(jsonString)

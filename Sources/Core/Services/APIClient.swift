@@ -40,14 +40,15 @@ public class APIClient {
             return .failure(.invalidConfiguration("API URL not configured"))
         }
         
-        var request = URLRequest(url: url.appendingPathComponent("devices/data"))
+        var request = URLRequest(url: url.appendingPathComponent("api/events"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = TimeInterval(configuration.timeout)
         
-        // Add authentication if available
+        // Add authentication headers (must match Windows client: X-API-Key and X-Client-Passphrase)
         if let apiKey = configuration.apiKey {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
+            request.setValue(apiKey, forHTTPHeaderField: "X-Client-Passphrase")
         }
         
         do {
@@ -61,10 +62,43 @@ public class APIClient {
             }
             
             if httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 {
+                // Try to parse the response, but don't fail if format differs
+                // The API might return different response formats
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
-                let transmissionResponse = try decoder.decode(TransmissionResponse.self, from: data)
-                return .success(transmissionResponse)
+                
+                // First try the expected format
+                if let transmissionResponse = try? decoder.decode(TransmissionResponse.self, from: data) {
+                    return .success(transmissionResponse)
+                }
+                
+                // If that fails, try to parse as generic success response
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    // Check for various success indicators
+                    let isSuccess = (json["success"] as? Bool) ?? 
+                                   (json["status"] as? String == "success") ??
+                                   (json["ok"] as? Bool) ?? 
+                                   true // Assume success if 2xx status
+                    
+                    let message = (json["message"] as? String) ?? 
+                                 (json["detail"] as? String) ?? 
+                                 String(data: data, encoding: .utf8)
+                    
+                    return .success(TransmissionResponse(
+                        success: isSuccess,
+                        recordsProcessed: (json["recordsProcessed"] as? Int) ?? 1,
+                        message: message,
+                        timestamp: Date()
+                    ))
+                }
+                
+                // Fallback: treat any 2xx as success
+                return .success(TransmissionResponse(
+                    success: true,
+                    recordsProcessed: 1,
+                    message: String(data: data, encoding: .utf8),
+                    timestamp: Date()
+                ))
             } else {
                 let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
                 return .failure(.httpError(httpResponse.statusCode, errorMessage))
@@ -83,6 +117,13 @@ public struct TransmissionResponse: Codable {
     public let recordsProcessed: Int
     public let message: String?
     public let timestamp: Date
+    
+    public init(success: Bool, recordsProcessed: Int, message: String?, timestamp: Date) {
+        self.success = success
+        self.recordsProcessed = recordsProcessed
+        self.message = message
+        self.timestamp = timestamp
+    }
 }
 
 public enum APIError: Error, LocalizedError {
@@ -148,7 +189,7 @@ public class SystemInfoService {
             osVersion: osVersion,
             architecture: architecture,
             serialNumber: serialNumber,
-            reportMateVersion: "1.0.0",
+            reportMateVersion: AppVersion.current,
             configurationSource: configurationSource
         )
     }
@@ -172,20 +213,20 @@ public class SystemInfoService {
         }
         
         // Check if configuration comes from Configuration Profiles
-        let profileDefaults = UserDefaults(suiteName: "com.reportmate.client")
+        let profileDefaults = UserDefaults(suiteName: "com.github.reportmate")
         if profileDefaults?.object(forKey: "ApiUrl") != nil {
             return "Configuration Profiles"
         }
         
         // Check if system plist exists
-        let systemConfigPath = "/Library/Application Support/ReportMate/reportmate.plist"
+        let systemConfigPath = "/Library/Managed Reports/reportmate.plist"
         if FileManager.default.fileExists(atPath: systemConfigPath) {
             return "System Configuration"
         }
         
         // Check if user plist exists
         let userConfigPath = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/ReportMate/reportmate.plist")
+            .appendingPathComponent("Library/Managed Reports/reportmate.plist")
         if FileManager.default.fileExists(atPath: userConfigPath.path) {
             return "User Configuration"
         }
@@ -199,8 +240,8 @@ public class CacheService {
     private let cacheDirectory: URL
     
     public init() {
-        let appSupportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        self.cacheDirectory = appSupportDir.appendingPathComponent("ReportMate/cache")
+        // Use system-wide cache directory matching Munki: /Library/Managed Reports
+        self.cacheDirectory = URL(fileURLWithPath: "/Library/Managed Reports/cache")
         
         // Create cache directory if it doesn't exist
         try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)

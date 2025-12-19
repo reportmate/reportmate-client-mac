@@ -16,6 +16,9 @@ public struct SecurityInfo: Codable, Sendable {
     public let keychainItems: [KeychainItem]
     public let authorizationRights: [AuthorizationRight]
     public let trustedExecutables: [TrustedExecutable]
+    public let firmwarePassword: FirmwarePasswordStatus?
+    public let ssh: SSHStatus?
+    public let tcc: [TCCEntry]
     
     public init(
         systemIntegrityProtection: SIPStatus,
@@ -26,7 +29,10 @@ public struct SecurityInfo: Codable, Sendable {
         certificates: [Certificate] = [],
         keychainItems: [KeychainItem] = [],
         authorizationRights: [AuthorizationRight] = [],
-        trustedExecutables: [TrustedExecutable] = []
+        trustedExecutables: [TrustedExecutable] = [],
+        firmwarePassword: FirmwarePasswordStatus? = nil,
+        ssh: SSHStatus? = nil,
+        tcc: [TCCEntry] = []
     ) {
         self.systemIntegrityProtection = systemIntegrityProtection
         self.gatekeeper = gatekeeper
@@ -37,6 +43,9 @@ public struct SecurityInfo: Codable, Sendable {
         self.keychainItems = keychainItems
         self.authorizationRights = authorizationRights
         self.trustedExecutables = trustedExecutables
+        self.firmwarePassword = firmwarePassword
+        self.ssh = ssh
+        self.tcc = tcc
     }
 }
 
@@ -404,4 +413,41 @@ public enum QuarantineStatus: String, Codable, Sendable {
     case quarantined = "Quarantined"
     case approved = "Approved"
     case unknown = "Unknown"
+}
+
+/// Firmware Password status
+public struct FirmwarePasswordStatus: Codable, Sendable {
+    public let enabled: Bool
+    public let details: String?
+    
+    public init(enabled: Bool, details: String? = nil) {
+        self.enabled = enabled
+        self.details = details
+    }
+}
+
+/// SSH status
+public struct SSHStatus: Codable, Sendable {
+    public let enabled: Bool
+    public let details: String?
+    
+    public init(enabled: Bool, details: String? = nil) {
+        self.enabled = enabled
+        self.details = details
+    }
+}
+
+/// TCC Entry information
+public struct TCCEntry: Codable, Sendable {
+    public let service: String
+    public let client: String
+    public let allowed: Bool
+    public let promptCount: Int?
+    
+    public init(service: String, client: String, allowed: Bool, promptCount: Int? = nil) {
+        self.service = service
+        self.client = client
+        self.allowed = allowed
+        self.promptCount = promptCount
+    }
 }
