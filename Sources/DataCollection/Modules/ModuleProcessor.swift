@@ -45,7 +45,11 @@ open class BaseModuleProcessor: ModuleProcessor, @unchecked Sendable {
                 let osqueryService = OSQueryService(configuration: configuration)
                 if await osqueryService.isAvailable() {
                     let results = try await osqueryService.executeQuery(osqueryCmd)
-                    return ["osquery": results]
+                    // Unwrap single result, or return as items
+                    if results.count == 1, let first = results.first {
+                        return first
+                    }
+                    return ["items": results]
                 }
             } catch {
                 print("OSQuery failed, trying bash fallback: \(error)")
@@ -56,7 +60,18 @@ open class BaseModuleProcessor: ModuleProcessor, @unchecked Sendable {
         if let bashCmd = bash {
             do {
                 let output = try await BashService.execute(bashCmd)
-                return ["bash": output]
+                
+                // Try to parse as JSON
+                if let data = output.data(using: .utf8),
+                   let jsonObject = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+                    if let dict = jsonObject as? [String: Any] {
+                        return dict
+                    } else if let array = jsonObject as? [Any] {
+                        return ["items": array]
+                    }
+                }
+                
+                return ["output": output]
             } catch {
                 print("Bash failed, trying python fallback: \(error)")
             }

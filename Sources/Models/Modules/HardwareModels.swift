@@ -14,6 +14,8 @@ public struct HardwareInfo: Codable, Sendable {
     public let batteryInfo: BatteryInfo?
     public let platformInfo: PlatformInfo
     public let thermalInfo: ThermalInfo?
+    public let usbDevices: [USBDevice]
+    public let npu: NPUInfo?
     
     public init(
         systemInfo: SystemHardwareInfo,
@@ -22,7 +24,9 @@ public struct HardwareInfo: Codable, Sendable {
         storageInfo: [StorageDevice],
         batteryInfo: BatteryInfo? = nil,
         platformInfo: PlatformInfo,
-        thermalInfo: ThermalInfo? = nil
+        thermalInfo: ThermalInfo? = nil,
+        usbDevices: [USBDevice] = [],
+        npu: NPUInfo? = nil
     ) {
         self.systemInfo = systemInfo
         self.cpuInfo = cpuInfo
@@ -31,6 +35,8 @@ public struct HardwareInfo: Codable, Sendable {
         self.batteryInfo = batteryInfo
         self.platformInfo = platformInfo
         self.thermalInfo = thermalInfo
+        self.usbDevices = usbDevices
+        self.npu = npu
     }
 }
 
@@ -409,4 +415,17 @@ public enum ThermalState: String, Codable, Sendable {
     case fair = "Fair"
     case serious = "Serious"
     case critical = "Critical"
+}
+
+/// Neural Processing Unit information
+public struct NPUInfo: Codable, Sendable {
+    public let name: String
+    public let cores: Int
+    public let performance: String? // e.g. "18 TOPS"
+    
+    public init(name: String, cores: Int, performance: String? = nil) {
+        self.name = name
+        self.cores = cores
+        self.performance = performance
+    }
 }
