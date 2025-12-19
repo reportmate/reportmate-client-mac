@@ -5,7 +5,7 @@
 
 # Configuration
 PROJECT_NAME = ReportMate
-BINARY_NAME = runner
+BINARY_NAME = managedreportsrunner
 VERSION ?= $(shell date +%Y.%m.%d.%H%M)
 
 # Default target

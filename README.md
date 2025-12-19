@@ -152,7 +152,7 @@ After deployment, files are organized following macOS conventions:
 ### Standard Installation
 ```
 /usr/local/reportmate/
-├── runner                          # Main executable
+├── managedreportsrunner            # Main executable
 ├── version.plist                   # Version information
 └── config/
     ├── reportmate.plist           # Default configuration
@@ -170,7 +170,7 @@ After deployment, files are organized following macOS conventions:
 
 ### Binaries (`/usr/local/reportmate/`)
 
-- `runner` - Main ReportMate executable (Swift binary)
+- `managedreportsrunner` - Main ReportMate executable (Swift binary)
 - `version.plist` - Build and version information
 - `config/` - Default configuration files
 
@@ -222,7 +222,7 @@ After deployment, files are organized following macOS conventions:
 ### Standard Installation
 ```
 /usr/local/reportmate/
-├── runner                          # Main executable
+├── managedreportsrunner            # Main executable
 ├── version.plist                   # Version information
 └── config/
     ├── reportmate.plist           # Default configuration
@@ -242,16 +242,16 @@ After deployment, files are organized following macOS conventions:
 
 ```bash
 # Run data collection (default action)
-/usr/local/reportmate/runner run [--force] [--device-id ID] [--api-url URL]
+/usr/local/reportmate/managedreportsrunner run [--force] [--device-id ID] [--api-url URL]
 
 # Test configuration and connectivity  
-/usr/local/reportmate/runner test [--verbose]
+/usr/local/reportmate/managedreportsrunner test [--verbose]
 
 # Display system information
-/usr/local/reportmate/runner info [--json]
+/usr/local/reportmate/managedreportsrunner info [--json]
 
 # Install and configure
-sudo /usr/local/reportmate/runner install --api-url URL [--device-id ID] [--api-key KEY]
+sudo /usr/local/reportmate/managedreportsrunner install --api-url URL [--device-id ID] [--api-key KEY]
 ```
 
 ## Configuration Management
@@ -347,7 +347,7 @@ The build script automatically detects available Developer ID certificates:
 security find-identity -v -p codesigning
 
 # Sign with specific identity
-codesign --sign "Developer ID Application: Your Name" --force --options runtime build/runner
+codesign --sign "Developer ID Application: Your Name" --force --options runtime build/managedreportsrunner
 ```
 
 ### Development Workflow
@@ -390,11 +390,11 @@ make test
 ./test.sh --integration
 
 # Manual testing
-swift run runner test --verbose
+swift run managedreportsrunner test --verbose
 
 # Test binary directly
-.build/release/runner --help
-.build/release/runner test --verbose
+.build/release/managedreportsrunner --help
+.build/release/managedreportsrunner test --verbose
 ```
 
 #### Local Installation for Testing
@@ -404,7 +404,7 @@ swift run runner test --verbose
 make install
 
 # Test installation
-/usr/local/reportmate/runner info
+/usr/local/reportmate/managedreportsrunner info
 ```
 
 ### Build Environment Variables
@@ -469,7 +469,7 @@ VERSION=1.0.0 API_URL=https://api.reportmate.com ./build.sh --sign
 
 1. **Permission Denied**
    ```bash
-   chmod +x /usr/local/reportmate/runner
+   chmod +x /usr/local/reportmate/managedreportsrunner
    ```
 
 2. **osquery Not Found**
