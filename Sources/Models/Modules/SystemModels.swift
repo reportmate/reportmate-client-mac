@@ -7,13 +7,14 @@ import Foundation
 
 /// System module information structure (comprehensive system data for module processing)
 public struct SystemModuleInfo: Codable, Sendable {
-    public let osVersion: OSVersionInfo
+    public let operatingSystem: OSVersionInfo
     public let systemDetails: SystemDetails
-    public let uptimeInfo: UptimeInfo
+    public let uptime: Int
+    public let uptimeString: String
     public let kernelInfo: KernelInfo
-    public let startupItems: [StartupItem]
-    public let launchdServices: [LaunchdService]
-    public let environmentVariables: [String: String]
+    public let scheduledTasks: [StartupItem]
+    public let services: [LaunchdService]
+    public let environment: [String: String]
     public let systemConfiguration: SystemConfiguration
     
     public init(
@@ -26,13 +27,14 @@ public struct SystemModuleInfo: Codable, Sendable {
         environmentVariables: [String: String] = [:],
         systemConfiguration: SystemConfiguration
     ) {
-        self.osVersion = osVersion
+        self.operatingSystem = osVersion
         self.systemDetails = systemDetails
-        self.uptimeInfo = uptimeInfo
+        self.uptime = uptimeInfo.totalSeconds
+        self.uptimeString = uptimeInfo.displayString
         self.kernelInfo = kernelInfo
-        self.startupItems = startupItems
-        self.launchdServices = launchdServices
-        self.environmentVariables = environmentVariables
+        self.scheduledTasks = startupItems
+        self.services = launchdServices
+        self.environment = environmentVariables
         self.systemConfiguration = systemConfiguration
     }
 }
@@ -83,11 +85,14 @@ public struct SystemDetails: Codable, Sendable {
     public let localHostname: String
     public let systemUUID: String
     public let currentUser: String
-    public let bootTime: Date
+    public let bootTime: String  // ISO8601 string for flexibility
     public let timeZone: String
     public let locale: String
     public let systemIntegrityProtection: Bool
     public let secureBootLevel: String?
+    public let keyboardLayouts: [String]?
+    public let rosetta2Installed: Bool?
+    public let rosetta2Status: String?
     
     public init(
         hostname: String,
@@ -95,11 +100,14 @@ public struct SystemDetails: Codable, Sendable {
         localHostname: String,
         systemUUID: String,
         currentUser: String,
-        bootTime: Date,
+        bootTime: String,
         timeZone: String,
         locale: String,
         systemIntegrityProtection: Bool,
-        secureBootLevel: String? = nil
+        secureBootLevel: String? = nil,
+        keyboardLayouts: [String]? = nil,
+        rosetta2Installed: Bool? = nil,
+        rosetta2Status: String? = nil
     ) {
         self.hostname = hostname
         self.computerName = computerName
@@ -111,6 +119,9 @@ public struct SystemDetails: Codable, Sendable {
         self.locale = locale
         self.systemIntegrityProtection = systemIntegrityProtection
         self.secureBootLevel = secureBootLevel
+        self.keyboardLayouts = keyboardLayouts
+        self.rosetta2Installed = rosetta2Installed
+        self.rosetta2Status = rosetta2Status
     }
 }
 
@@ -348,7 +359,10 @@ public struct SoftwareUpdateSettings: Codable, Sendable {
     public let automaticInstallAppUpdates: Bool
     public let automaticInstallSecurityUpdates: Bool
     public let automaticInstallConfigDataUpdates: Bool
-    public let lastCheckDate: Date?
+    public let lastCheckDate: String?  // ISO8601 string
+    public let lastCheckTime: String?  // Alternate field name from Python
+    public let lastFullCheckTime: String?  // From Python script
+    public let pendingUpdates: [[String: AnyCodable]]?  // From Python script
     
     public init(
         automaticCheckEnabled: Bool = true,
@@ -357,7 +371,10 @@ public struct SoftwareUpdateSettings: Codable, Sendable {
         automaticInstallAppUpdates: Bool = false,
         automaticInstallSecurityUpdates: Bool = false,
         automaticInstallConfigDataUpdates: Bool = false,
-        lastCheckDate: Date? = nil
+        lastCheckDate: String? = nil,
+        lastCheckTime: String? = nil,
+        lastFullCheckTime: String? = nil,
+        pendingUpdates: [[String: AnyCodable]]? = nil
     ) {
         self.automaticCheckEnabled = automaticCheckEnabled
         self.automaticDownloadEnabled = automaticDownloadEnabled
@@ -366,6 +383,9 @@ public struct SoftwareUpdateSettings: Codable, Sendable {
         self.automaticInstallSecurityUpdates = automaticInstallSecurityUpdates
         self.automaticInstallConfigDataUpdates = automaticInstallConfigDataUpdates
         self.lastCheckDate = lastCheckDate
+        self.lastCheckTime = lastCheckTime
+        self.lastFullCheckTime = lastFullCheckTime
+        self.pendingUpdates = pendingUpdates
     }
 }
 

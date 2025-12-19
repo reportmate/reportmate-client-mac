@@ -28,7 +28,7 @@ public class ConfigurationManager {
         apiKey: String? = nil
     ) throws {
         
-        let systemConfigPath = "/Library/Application Support/ReportMate/reportmate.plist"
+        let systemConfigPath = "/Library/Managed Reports/reportmate.plist"
         
         // Ensure directory exists
         let systemConfigDir = URL(fileURLWithPath: systemConfigPath).deletingLastPathComponent()
@@ -96,19 +96,19 @@ public class ConfigurationManager {
     
     private static func loadUserPlist() -> [String: Any]? {
         let userConfigPath = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/ReportMate/reportmate.plist")
+            .appendingPathComponent("Library/Managed Reports/reportmate.plist")
         
         return loadPlist(at: userConfigPath)
     }
     
     private static func loadSystemPlist() -> [String: Any]? {
-        let systemConfigPath = URL(fileURLWithPath: "/Library/Application Support/ReportMate/reportmate.plist")
+        let systemConfigPath = URL(fileURLWithPath: "/Library/Managed Reports/reportmate.plist")
         return loadPlist(at: systemConfigPath)
     }
     
     private static func loadConfigurationProfiles() -> [String: Any]? {
         // Check for Configuration Profile managed preferences
-        let profileDefaults = UserDefaults(suiteName: "com.reportmate.client")
+        let profileDefaults = UserDefaults(suiteName: "com.github.reportmate")
         
         guard let profileDefaults = profileDefaults else { return nil }
         

@@ -18,7 +18,8 @@ public class DataCollectionService {
             "security": SecurityModuleProcessor(configuration: configuration),
             "applications": ApplicationsModuleProcessor(configuration: configuration),
             "management": ManagementModuleProcessor(configuration: configuration),
-            "inventory": InventoryModuleProcessor(configuration: configuration)
+            "inventory": InventoryModuleProcessor(configuration: configuration),
+            "profiles": ProfilesModuleProcessor(configuration: configuration)
         ]
     }
     
@@ -59,7 +60,7 @@ public class DataCollectionService {
             "deviceInfo": deviceInfo,
             "modules": moduleResults,
             "collectionTimestamp": Date(),
-            "reportMateVersion": "1.0.0"
+            "reportMateVersion": AppVersion.current
         ]
     }
     
@@ -89,7 +90,7 @@ public class DataCollectionService {
             "deviceInfo": deviceInfo,
             "modules": moduleResults,
             "collectionTimestamp": Date(),
-            "reportMateVersion": "1.0.0"
+            "reportMateVersion": AppVersion.current
         ]
     }
 
@@ -132,7 +133,7 @@ public class DataCollectionService {
             osVersion: osVersion,
             architecture: ProcessInfo.processInfo.machineArchitecture,
             lastSeen: Date(),
-            reportMateVersion: "1.0.0"
+            reportMateVersion: AppVersion.current
         )
     }
     
