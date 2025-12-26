@@ -85,7 +85,7 @@ swift build --configuration release
 ./build.sh --verbose
 ```
 
-**📦 Output Packages:**
+**Output Packages:**
 
 The build process creates three deployment formats:
 
