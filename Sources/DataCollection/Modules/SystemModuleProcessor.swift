@@ -20,6 +20,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         async let launchItemsData = collectLaunchItems()
         async let launchdServicesData = collectLaunchdServices()
         async let softwareUpdatesData = collectSoftwareUpdates()
+        async let pendingAppleUpdatesData = collectPendingAppleUpdates()
         async let systemConfigData = collectSystemConfiguration()
         async let environmentData = collectEnvironment()
         
@@ -31,6 +32,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let launchItems = try await launchItemsData
         let launchdServices = try await launchdServicesData
         let softwareUpdates = try await softwareUpdatesData
+        let pendingUpdates = try await pendingAppleUpdatesData
         let systemConfig = try await systemConfigData
         let environment = try await environmentData
         
@@ -43,6 +45,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "kernelInfo": kernelInfo,
             "scheduledTasks": launchItems,
             "services": launchdServices,
+            "pendingAppleUpdates": pendingUpdates,
             "environment": environment,
             "systemConfiguration": systemConfig
         ]
@@ -389,7 +392,11 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         // Get the raw launchctl list
         let launchctlResult = try await executeWithFallback(
             osquery: nil,
-            bash: "echo '['; " + bashScript + " echo ']'",
+            bash: """
+                echo '['
+                \(bashScript)
+                echo ']'
+                """,
             python: nil
         )
         
@@ -542,6 +549,111 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             return items
         }
         return []
+    }
+    
+    // MARK: - Pending Apple Updates (macadmins extension: pending_apple_updates)
+    
+    private func collectPendingAppleUpdates() async throws -> [[String: Any]] {
+        // macadmins extension: pending_apple_updates table provides structured update info
+        let osqueryScript = """
+            SELECT 
+                display_name,
+                product_key,
+                version,
+                install_date,
+                is_recommended,
+                is_security,
+                reboot_required
+            FROM pending_apple_updates;
+        """
+        
+        // Fallback to bash softwareupdate command
+        let bashScript = """
+            # Get pending software updates (no-scan uses cached results)
+            updates_output=$(softwareupdate --list --no-scan 2>/dev/null)
+            
+            if echo "$updates_output" | grep -q "No new software available"; then
+                echo "[]"
+                exit 0
+            fi
+            
+            echo "["
+            first=true
+            current_name=""
+            current_version=""
+            current_size=""
+            current_recommended="false"
+            current_restart="false"
+            
+            echo "$updates_output" | while IFS= read -r line; do
+                # New update starts with *
+                if echo "$line" | grep -q "^\\s*\\*"; then
+                    # Output previous if exists
+                    if [ -n "$current_name" ]; then
+                        if [ "$first" = "false" ]; then echo ","; fi
+                        first=false
+                        echo "{\\"name\\": \\"$current_name\\", \\"version\\": \\"$current_version\\", \\"size\\": \\"$current_size\\", \\"recommended\\": $current_recommended, \\"restart_required\\": $current_restart}"
+                    fi
+                    current_name=$(echo "$line" | sed 's/^[[:space:]]*\\*[[:space:]]*//' | cut -d',' -f1)
+                    current_version=""
+                    current_size=""
+                    current_recommended="false"
+                    current_restart="false"
+                elif echo "$line" | grep -qi "Version:"; then
+                    current_version=$(echo "$line" | sed 's/.*Version:[[:space:]]*//')
+                elif echo "$line" | grep -qi "Size:"; then
+                    current_size=$(echo "$line" | sed 's/.*Size:[[:space:]]*//')
+                elif echo "$line" | grep -qi "Recommended:.*YES"; then
+                    current_recommended="true"
+                elif echo "$line" | grep -qi "Restart:.*YES"; then
+                    current_restart="true"
+                fi
+            done
+            
+            # Output last item
+            if [ -n "$current_name" ]; then
+                if [ "$first" = "false" ]; then echo ","; fi
+                echo "{\\"name\\": \\"$current_name\\", \\"version\\": \\"$current_version\\", \\"size\\": \\"$current_size\\", \\"recommended\\": $current_recommended, \\"restart_required\\": $current_restart}"
+            fi
+            echo "]"
+        """
+        
+        let result = try await executeWithFallback(
+            osquery: osqueryScript,
+            bash: bashScript,
+            python: nil
+        )
+        
+        var updates: [[String: Any]] = []
+        
+        if let items = result["items"] as? [[String: Any]] {
+            // Normalize macadmins extension format
+            updates = items.map { item in
+                var normalized: [String: Any] = [:]
+                
+                normalized["name"] = item["display_name"] as? String ?? item["product_key"] as? String ?? ""
+                normalized["productKey"] = item["product_key"] as? String ?? ""
+                normalized["version"] = item["version"] as? String ?? ""
+                normalized["installDate"] = item["install_date"] as? String ?? ""
+                
+                // Parse boolean flags
+                let isRecommended = item["is_recommended"] as? String ?? "0"
+                normalized["recommended"] = (isRecommended == "1" || isRecommended == "true")
+                
+                let isSecurity = item["is_security"] as? String ?? "0"
+                normalized["isSecurity"] = (isSecurity == "1" || isSecurity == "true")
+                
+                let rebootRequired = item["reboot_required"] as? String ?? "0"
+                normalized["restartRequired"] = (rebootRequired == "1" || rebootRequired == "true")
+                
+                return normalized
+            }
+        } else if let items = result as? [[String: Any]] {
+            // Bash fallback format
+            updates = items
+        }
+        
+        return updates
     }
     
     // MARK: - System Configuration (bash: defaults read for preferences)
