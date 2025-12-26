@@ -40,19 +40,20 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         return BaseModuleData(moduleId: moduleId, data: managementData)
     }
     
-    // MARK: - MDM Enrollment Status (osquery: mdm + bash)
+    // MARK: - MDM Enrollment Status (osquery: mdm table via macadmins extension + bash fallback)
     
     private func collectMDMEnrollmentStatus() async throws -> [String: Any] {
-        // osquery mdm table provides enrollment info
+        // Try osquery with macadmins extension mdm table first
         let osqueryScript = """
             SELECT 
                 enrolled,
                 server_url,
-                payload_identifier,
-                install_date,
-                dep_capable,
+                checkin_url,
+                access_rights,
+                installed_from_dep,
                 user_approved,
-                access_rights
+                dep_capable,
+                has_scep_payload
             FROM mdm;
         """
         
@@ -105,48 +106,12 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             echo "}"
         """
         
-        // Try osquery first
-        let osqueryResult = try? await executeWithFallback(
+        // Use executeWithFallback which tries osquery (with extension), then bash
+        return try await executeWithFallback(
             osquery: osqueryScript,
-            bash: nil,
-            python: nil
-        )
-        
-        // Get bash result for additional details
-        let bashResult = try await executeWithFallback(
-            osquery: nil,
             bash: bashScript,
             python: nil
         )
-        
-        // Merge results, preferring osquery for enrollment status
-        var result = bashResult
-        
-        if let osq = osqueryResult {
-            let enrolled = (osq["enrolled"] as? String == "1") ||
-                          (osq["enrolled"] as? Bool == true)
-            result["enrolled"] = enrolled
-            
-            if let serverUrl = osq["server_url"] as? String, !serverUrl.isEmpty {
-                result["serverUrl"] = serverUrl
-            }
-            
-            if let payloadId = osq["payload_identifier"] as? String, !payloadId.isEmpty {
-                result["enrollmentIdentifier"] = payloadId
-            }
-            
-            result["userApproved"] = (osq["user_approved"] as? String == "1") ||
-                                    (osq["user_approved"] as? Bool == true)
-            
-            result["depCapable"] = (osq["dep_capable"] as? String == "1") ||
-                                  (osq["dep_capable"] as? Bool == true)
-            
-            if let installDate = osq["install_date"] as? String {
-                result["enrollmentDate"] = installDate
-            }
-        }
-        
-        return result
     }
     
     // MARK: - DEP Configuration (bash: profiles)
