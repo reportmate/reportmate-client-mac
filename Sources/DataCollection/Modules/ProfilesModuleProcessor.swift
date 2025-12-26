@@ -37,18 +37,23 @@ public class ProfilesModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         return BaseModuleData(moduleId: moduleId, data: profilesData)
     }
     
-    // MARK: - Configuration Profiles (bash: profiles command)
+    // MARK: - Configuration Profiles (macadmins extension: macos_profiles, fallback: profiles command)
     
     private func collectConfigurationProfiles() async throws -> [[String: Any]] {
-        // osquery managed_policies for MDM-deployed profiles
+        // macadmins extension: macos_profiles table provides comprehensive profile data
         let osqueryScript = """
             SELECT 
-                domain,
-                name,
-                value,
-                manual
-            FROM managed_policies
-            WHERE domain != '';
+                display_name,
+                identifier,
+                uuid,
+                install_date,
+                organization,
+                description,
+                verified,
+                payload_count,
+                scope
+            FROM macos_profiles
+            ORDER BY install_date DESC;
         """
         
         // Pure bash + awk solution for profile parsing (NO Python)
@@ -118,35 +123,34 @@ public class ProfilesModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         var profiles: [[String: Any]] = []
         
         if let items = result["items"] as? [[String: Any]] {
-            profiles = items
-        }
-        
-        // Transform osquery managed_policies to profile format if needed
-        return profiles.map { profile in
-            if let domain = profile["domain"] as? String, !domain.isEmpty {
-                // osquery format - managed policy
-                return [
-                    "identifier": domain,
-                    "displayName": profile["name"] as? String ?? domain,
-                    "organization": "",
-                    "installDate": "",
-                    "uuid": "",
-                    "scope": (profile["manual"] as? String == "1") ? "manual" : "managed",
-                    "verified": true
-                ]
-            } else {
-                // profiles command format
-                return [
-                    "identifier": profile["identifier"] as? String ?? "",
-                    "displayName": profile["displayName"] as? String ?? "",
-                    "organization": profile["organization"] as? String ?? "",
-                    "installDate": profile["installDate"] as? String ?? "",
-                    "uuid": profile["uuid"] as? String ?? "",
-                    "scope": profile["scope"] as? String ?? "system",
-                    "verified": (profile["verified"] as? Bool == true)
-                ]
+            // macadmins extension format - normalize field names
+            profiles = items.map { item in
+                var normalized: [String: Any] = [:]
+                
+                normalized["identifier"] = item["identifier"] as? String ?? ""
+                normalized["displayName"] = item["display_name"] as? String ?? ""
+                normalized["organization"] = item["organization"] as? String ?? ""
+                normalized["description"] = item["description"] as? String ?? ""
+                normalized["uuid"] = item["uuid"] as? String ?? ""
+                normalized["installDate"] = item["install_date"] as? String ?? ""
+                normalized["scope"] = (item["scope"] as? String)?.capitalized ?? "Unknown"
+                
+                // Parse verified status
+                let verifiedStr = item["verified"] as? String ?? "0"
+                normalized["verified"] = (verifiedStr == "1" || verifiedStr == "true")
+                
+                // Parse payload count
+                if let payloadCount = item["payload_count"] as? String {
+                    normalized["payloadCount"] = Int(payloadCount) ?? 0
+                } else if let payloadCount = item["payload_count"] as? Int {
+                    normalized["payloadCount"] = payloadCount
+                }
+                
+                return normalized
             }
         }
+        
+        return profiles
     }
     
     // MARK: - System Extensions (osquery: system_extensions)
