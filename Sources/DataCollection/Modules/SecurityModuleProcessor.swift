@@ -25,6 +25,10 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         async let mrtStatus = collectMRTStatus()
         async let secureEnclaveStatus = collectSecureEnclaveStatus()
         async let activationLockStatus = collectActivationLockStatus()
+        async let fileVaultUsers = collectFileVaultUsers()
+        async let authdbData = collectAuthDB()
+        async let sofaUnpatchedCVEs = collectSofaUnpatchedCVEs()
+        async let sofaSecurityRelease = collectSofaSecurityReleaseInfo()
         
         // Await all results
         let sip = try await sipStatus
@@ -39,6 +43,10 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let mrt = try await mrtStatus
         let secureEnclave = try await secureEnclaveStatus
         let activationLock = try await activationLockStatus
+        let fvUsers = try await fileVaultUsers
+        let authdb = try await authdbData
+        let unpatchedCVEs = try await sofaUnpatchedCVEs
+        let securityRelease = try await sofaSecurityRelease
         
         // Build security data dictionary
         let securityData: [String: Any] = [
@@ -46,6 +54,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "gatekeeper": gatekeeper,
             "firewall": firewall,
             "fileVault": fileVault,
+            "fileVaultUsers": fvUsers,
             "xprotect": xprotect,
             "ssh": ssh,
             "secureBoot": secureBoot,
@@ -53,7 +62,10 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "rootUser": rootUser,
             "mrt": mrt,
             "secureEnclave": secureEnclave,
-            "activationLock": activationLock
+            "activationLock": activationLock,
+            "authorizationDB": authdb,
+            "unpatchedCVEs": unpatchedCVEs,
+            "securityReleaseInfo": securityRelease
         ]
         
         return BaseModuleData(moduleId: moduleId, data: securityData)
@@ -377,6 +389,64 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "deferred": deferred,
             "enabledUsers": enabledUsers
         ]
+    }
+    
+    // MARK: - FileVault Users (macadmins extension: filevault_users)
+    
+    private func collectFileVaultUsers() async throws -> [[String: Any]] {
+        // macadmins extension: filevault_users table provides detailed user information
+        let osqueryScript = """
+            SELECT 
+                username,
+                uid,
+                user_guid,
+                user_uuid,
+                passphrase_required
+            FROM filevault_users;
+        """
+        
+        let bashScript = """
+            # Get FileVault enabled users using fdesetup
+            if [ "$(fdesetup status 2>/dev/null | grep -c 'FileVault is On')" -eq 0 ]; then
+                echo '[]'
+                exit 0
+            fi
+            
+            users_list=$(fdesetup list 2>/dev/null || echo "")
+            
+            echo '['
+            first=true
+            while IFS=, read -r username uuid; do
+                if [ -n "$username" ]; then
+                    [ "$first" = false ] && echo ','
+                    first=false
+                    # Get UID from dscl
+                    uid=$(dscl . -read /Users/"$username" UniqueID 2>/dev/null | awk '{print $2}' || echo "")
+                    echo "{"
+                    echo "  \\"username\\": \\"$username\\","
+                    echo "  \\"uid\\": \\"$uid\\","
+                    echo "  \\"user_uuid\\": \\"$uuid\\","
+                    echo "  \\"passphrase_required\\": \\"true\\""
+                    echo -n "}"
+                fi
+            done <<< "$users_list"
+            echo '\n]'
+        """
+        
+        let result = try await executeWithFallback(
+            osquery: osqueryScript,
+            bash: bashScript,
+            python: nil
+        )
+        
+        // Return users array
+        if let items = result["items"] as? [[String: Any]] {
+            return items
+        } else if let items = result as? [[String: Any]] {
+            return items
+        }
+        
+        return []
     }
     
     // MARK: - XProtect Status (osquery: xprotect_entries + bash for version)
@@ -785,6 +855,203 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             osquery: nil,
             bash: bashScript,
             python: nil
+        )
+    }
+    
+    // MARK: - Authorization Database (extension: authdb)
+    
+    private func collectAuthDB() async throws -> [[String: Any]] {
+        // macadmins extension: authdb table
+        // Query common rights for security auditing
+        let osqueryScript = """
+            SELECT 
+                name,
+                rule_class,
+                rule_type,
+                comment,
+                shared,
+                timeout,
+                tries
+            FROM authdb
+            WHERE name IN (
+                'system.preferences',
+                'system.preferences.security',
+                'system.login.screensaver',
+                'com.apple.Safari.allow-unsigned-app-launch',
+                'system.install.apple-software',
+                'system.install.software',
+                'system.preferences.accounts',
+                'system.preferences.network',
+                'system.preferences.printing'
+            )
+            ORDER BY name;
+        """
+        
+        let bashScript = """
+            # Fallback: Check common security-related rights
+            rights=(
+                "system.preferences"
+                "system.preferences.security"
+                "system.login.screensaver"
+                "system.install.software"
+            )
+            
+            echo "["
+            first=true
+            for right in "${rights[@]}"; do
+                if [ "$first" = true ]; then
+                    first=false
+                else
+                    echo ","
+                fi
+                
+                # Try to read right from authorization database
+                right_info=$(security authorizationdb read "$right" 2>/dev/null || echo "")
+                
+                if [ -n "$right_info" ]; then
+                    rule_class=$(echo "$right_info" | grep -A1 "class" | tail -1 | sed 's/[<>/ ]//g' || echo "unknown")
+                    rule_type=$(echo "$right_info" | grep -A1 "rule" | tail -1 | sed 's/[<>/ ]//g' || echo "unknown")
+                    
+                    echo "  {"
+                    echo "    \\"name\\": \\"$right\\","
+                    echo "    \\"rule_class\\": \\"$rule_class\\","
+                    echo "    \\"rule_type\\": \\"$rule_type\\","
+                    echo "    \\"comment\\": \\"\\","
+                    echo "    \\"shared\\": false,"
+                    echo "    \\"timeout\\": 0,"
+                    echo "    \\"tries\\": 0"
+                    echo -n "  }"
+                fi
+            done
+            echo
+            echo "]"
+        """
+        
+        let result = try await executeWithFallback(
+            osquery: osqueryScript,
+            bash: bashScript
+        )
+        
+        if let items = result["items"] as? [[String: Any]] {
+            return items
+        } else if let items = result as? [[String: Any]] {
+            return items
+        }
+        
+        return []
+    }
+    
+    // MARK: - SOFA Unpatched CVEs (extension: sofa_unpatched_cves)
+    
+    private func collectSofaUnpatchedCVEs() async throws -> [[String: Any]] {
+        // macadmins extension: sofa_unpatched_cves table
+        // Provides CVE information for unpatched vulnerabilities
+        let osqueryScript = """
+            SELECT 
+                os_version,
+                cve,
+                product_name,
+                actively_exploited,
+                release_date
+            FROM sofa_unpatched_cves
+            ORDER BY actively_exploited DESC, release_date DESC
+            LIMIT 50;
+        """
+        
+        let bashScript = """
+            # Fallback: Use softwareupdate to check for security updates
+            os_version=$(sw_vers -productVersion)
+            
+            echo "["
+            
+            # Check for available security updates
+            updates=$(softwareupdate --list --no-scan 2>/dev/null || echo "")
+            
+            if echo "$updates" | grep -qi "security"; then
+                first=true
+                while IFS= read -r line; do
+                    if echo "$line" | grep -qi "security"; then
+                        if [ "$first" = true ]; then
+                            first=false
+                        else
+                            echo ","
+                        fi
+                        
+                        update_name=$(echo "$line" | sed 's/^[* ]*//' | sed 's/-.*//')
+                        
+                        echo "  {"
+                        echo "    \\"os_version\\": \\"$os_version\\","
+                        echo "    \\"cve\\": \\"Unknown\\","
+                        echo "    \\"product_name\\": \\"$update_name\\","
+                        echo "    \\"actively_exploited\\": false,"
+                        echo "    \\"release_date\\": \\"\\""
+                        echo -n "  }"
+                    fi
+                done <<< "$updates"
+            fi
+            
+            echo
+            echo "]"
+        """
+        
+        let result = try await executeWithFallback(
+            osquery: osqueryScript,
+            bash: bashScript
+        )
+        
+        if let items = result["items"] as? [[String: Any]] {
+            return items
+        } else if let items = result as? [[String: Any]] {
+            return items
+        }
+        
+        return []
+    }
+    
+    // MARK: - SOFA Security Release Info (extension: sofa_security_release_info)
+    
+    private func collectSofaSecurityReleaseInfo() async throws -> [String: Any] {
+        // macadmins extension: sofa_security_release_info table
+        // Provides information about security releases for the current OS
+        let osqueryScript = """
+            SELECT 
+                os_version,
+                release_date,
+                security_release,
+                days_since_release,
+                actively_exploited_count,
+                total_cve_count,
+                update_available
+            FROM sofa_security_release_info
+            LIMIT 1;
+        """
+        
+        let bashScript = """
+            os_version=$(sw_vers -productVersion)
+            build_version=$(sw_vers -buildVersion)
+            
+            # Check for available updates
+            updates=$(softwareupdate --list --no-scan 2>/dev/null || echo "")
+            update_available=false
+            
+            if echo "$updates" | grep -qi "software update"; then
+                update_available=true
+            fi
+            
+            echo "{"
+            echo "  \\"os_version\\": \\"$os_version\\","
+            echo "  \\"release_date\\": \\"\\","
+            echo "  \\"security_release\\": \\"$build_version\\","
+            echo "  \\"days_since_release\\": 0,"
+            echo "  \\"actively_exploited_count\\": 0,"
+            echo "  \\"total_cve_count\\": 0,"
+            echo "  \\"update_available\\": $update_available"
+            echo "}"
+        """
+        
+        return try await executeWithFallback(
+            osquery: osqueryScript,
+            bash: bashScript
         )
     }
 }
