@@ -25,11 +25,23 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     }
     
     public override func collectData() async throws -> ModuleData {
+        // Collect standard network info
         let networkInfo = try await collectNetworkInfo()
+        
+        // Collect extension-based data in parallel
+        async let networkQualityData = collectNetworkQuality()
+        async let wifiNetworkData = collectWiFiNetwork()
+        
+        let networkQuality = try await networkQualityData
+        let wifiNetwork = try await wifiNetworkData
         
         // Convert NetworkInfo to [String: Any]
         let jsonData = try JSONEncoder().encode(networkInfo)
-        let dictionary = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] ?? [:]
+        var dictionary = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] ?? [:]
+        
+        // Add extension data
+        dictionary["networkQuality"] = networkQuality
+        dictionary["currentWiFiNetwork"] = wifiNetwork
         
         return BaseModuleData(moduleId: moduleId, data: dictionary)
     }
@@ -571,5 +583,82 @@ def get_network_info():
 
 print(json.dumps(get_network_info()))
 """#
+    }
+    
+    // MARK: - Extension Tables
+    
+    private func collectNetworkQuality() async throws -> [String: Any] {
+        let osqueryScript = """
+            SELECT dl_throughput, ul_throughput, dl_responsiveness, 
+                   ul_responsiveness, rating
+            FROM network_quality LIMIT 1;
+        """
+        
+        let bashScript = """
+            if ! command -v networkQuality &> /dev/null; then
+                echo '{"error": "Not Available (macOS 12+ required)"}'
+                exit 0
+            fi
+            # Network quality test takes 15-30 seconds and requires active internet
+            # Skip for regular collections, run manually if needed
+            echo '{"status": "skipped", "reason": "Network quality test takes 15-30 seconds, run manually if needed"}'
+        """
+        
+        return try await executeWithFallback(osquery: osqueryScript, bash: bashScript)
+    }
+    
+    private func collectWiFiNetwork() async throws -> [String: Any] {
+        let osqueryScript = """
+            SELECT ssid, bssid, network_name, rssi, noise, channel,
+                   channel_width, channel_band, transmit_rate, security_type, mode
+            FROM wifi_network LIMIT 1;
+        """
+        
+        let bashScript = """
+            # Get WiFi interface
+            wifi_if=$(networksetup -listallhardwareports | awk '/Wi-Fi|AirPort/{getline; print $2}')
+            if [ -z "$wifi_if" ]; then
+                echo '{"error": "No WiFi interface"}'
+                exit 0
+            fi
+            
+            # Check if connected (has IP address)
+            wifi_ip=$(ifconfig "$wifi_if" 2>/dev/null | awk '/inet / {print $2}')
+            if [ -z "$wifi_ip" ]; then
+                echo '{"error": "Not connected to WiFi"}'
+                exit 0
+            fi
+            
+            # Note: SSID access requires Location Services permission on modern macOS
+            # For enterprise deployment, grant Location Services to the app or use MDM profile
+            ssid="[Location Services Required]"
+            
+            # Get additional details from system_profiler
+            wifi_info=$(system_profiler SPAirPortDataType 2>/dev/null)
+            
+            # Extract details from the main WiFi section
+            phy_mode=$(echo "$wifi_info" | awk '/^[[:space:]]*PHY Mode:/ {print $3; exit}')
+            channel=$(echo "$wifi_info" | awk '/^[[:space:]]*Channel:/ {print $2; exit}')
+            channel_band=$(echo "$wifi_info" | awk '/^[[:space:]]*Channel:/ {print $3; exit}' | tr -d '()')
+            country_code=$(echo "$wifi_info" | awk '/^[[:space:]]*Country Code:/ {print $3; exit}')
+            network_type=$(echo "$wifi_info" | awk '/^[[:space:]]*Network Type:/ {print $3; exit}')
+            
+            # Get router IP as identifier
+            router=$(networksetup -getinfo Wi-Fi 2>/dev/null | awk '/Router:/ {print $2}')
+            
+            echo "{"
+            echo "  \\"ssid\\": \\"$ssid\\","
+            echo "  \\"bssid\\": \\"$router\\","
+            echo "  \\"network_name\\": \\"$ssid\\","
+            echo "  \\"channel\\": \\"$channel\\","
+            echo "  \\"channel_band\\": \\"$channel_band\\","
+            echo "  \\"mode\\": \\"$phy_mode\\","
+            echo "  \\"country_code\\": \\"$country_code\\","
+            echo "  \\"network_type\\": \\"$network_type\\","
+            echo "  \\"note\\": \\"SSID access requires Location Services permission - grant to app or deploy via MDM\\""
+            echo "}"
+        """
+        
+        return try await executeWithFallback(osquery: osqueryScript, bash: bashScript)
     }
 }
