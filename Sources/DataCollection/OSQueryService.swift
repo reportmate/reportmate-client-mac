@@ -1,14 +1,33 @@
 import Foundation
 
 /// OSQuery service for macOS
-/// Manages osquery execution with fallbacks to bash and Python
+/// Manages osquery execution with macadmins extension support and fallbacks to bash and Python
 public class OSQueryService {
     private let configuration: ReportMateConfiguration
     private let osqueryPath: String
+    private let extensionPath: String?
+    private var extensionAvailable: Bool = false
+    private var extensionTablesChecked: Bool = false
+    private var availableTables: Set<String> = []
     
     public init(configuration: ReportMateConfiguration) {
         self.configuration = configuration
         self.osqueryPath = configuration.osqueryPath
+        
+        // Determine extension path (bundled or configured)
+        if configuration.extensionEnabled {
+            self.extensionPath = Self.resolveExtensionPath(configured: configuration.osqueryExtensionPath)
+            if let path = extensionPath {
+                print("✅ OSQuery extension found at: \(path)")
+                print("   Extension will be loaded automatically with queries")
+            } else {
+                print("⚠️  OSQuery extension not found - will use bash fallbacks")
+                print("   Searched: Bundle.main.resourcePath/extensions/, /usr/local/bin/, /opt/reportmate/extensions/")
+            }
+        } else {
+            print("ℹ️  OSQuery extension disabled in configuration")
+            self.extensionPath = nil
+        }
     }
     
     /// Check if osquery is available
@@ -30,12 +49,90 @@ public class OSQueryService {
         }
     }
     
+    /// Check if a specific osquery extension table is available
+    public func isTableAvailable(_ tableName: String) async -> Bool {
+        // Check cache first
+        if extensionTablesChecked && availableTables.contains(tableName) {
+            return true
+        }
+        
+        // Query to check table existence
+        let checkQuery = ".tables \(tableName)"
+        do {
+            let result = try await executeQuery(checkQuery)
+            let found = !result.isEmpty
+            if found {
+                availableTables.insert(tableName)
+            }
+            return found
+        } catch {
+            return false
+        }
+    }
+    
+    /// Resolve extension path from configuration or bundled location
+    private static func resolveExtensionPath(configured: String?) -> String? {
+        // 1. Try configured path
+        if let configured = configured, FileManager.default.fileExists(atPath: configured) {
+            return configured
+        }
+        
+        // 2. Try bundled in Resources/extensions/ (SPM executable bundle)
+        // For SPM, the bundle is at .build/release/<Target>_<Target>.bundle/Resources/
+        if let bundlePath = Bundle.main.resourcePath {
+            let bundledExt = "\(bundlePath)/extensions/macadmins_extension.ext"
+            if FileManager.default.fileExists(atPath: bundledExt) {
+                return bundledExt
+            }
+        }
+        
+        // 3. Try relative to executable (for development builds)
+        let executablePath = Bundle.main.executablePath ?? ""
+        let executableDir = (executablePath as NSString).deletingLastPathComponent
+        let relativeToExec = "\(executableDir)/ReportMate_ReportMate.bundle/Resources/extensions/macadmins_extension.ext"
+        if FileManager.default.fileExists(atPath: relativeToExec) {
+            return relativeToExec
+        }
+        
+        // 4. Try standard locations
+        let standardPaths = [
+            "/usr/local/bin/macadmins_extension.ext",
+            "/opt/reportmate/extensions/macadmins_extension.ext"
+        ]
+        
+        for path in standardPaths {
+            if FileManager.default.fileExists(atPath: path) {
+                return path
+            }
+        }
+        
+        return nil
+    }
+    
     /// Execute an osquery SQL query
     public func executeQuery(_ query: String) async throws -> [[String: Any]] {
         return try await withCheckedThrowingContinuation { continuation in
             let task = Process()
             task.executableURL = URL(fileURLWithPath: osqueryPath)
-            task.arguments = ["--json", query]
+            
+            // Build arguments with extension support
+            var arguments = ["--json"]
+            
+            // Load extension if available
+            if let extPath = extensionPath {
+                // Create a unique socket path for this execution
+                let socketPath = "/tmp/osquery-reportmate-\(ProcessInfo.processInfo.processIdentifier).em"
+                
+                arguments.append(contentsOf: [
+                    "--extension", extPath,
+                    "--allow_unsafe",  // Skip ownership check
+                    "--disable_extensions=false",  // Explicitly enable extensions
+                    "--extensions_socket", socketPath  // Use unique socket to avoid conflicts
+                ])
+            }
+            
+            arguments.append(query)
+            task.arguments = arguments
             
             let outputPipe = Pipe()
             let errorPipe = Pipe()
