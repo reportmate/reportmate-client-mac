@@ -33,13 +33,21 @@ open class BaseModuleProcessor: ModuleProcessor, @unchecked Sendable {
     }
     
     /// Execute osquery with fallback to bash/python
+    /// 
+    /// Three-tier fallback strategy:
+    /// 1. Try osquery (with macadmins extension if available - provides mdm, macos_profiles, alt_system_info, etc.)
+    /// 2. Try bash command fallback
+    /// 3. Try python script fallback
+    ///
+    /// The extension is automatically loaded by OSQueryService when available.
+    /// Extension tables: mdm, macos_profiles, filevault_users, alt_system_info, unified_log, pending_apple_updates, etc.
     internal func executeWithFallback(
         osquery: String? = nil,
         bash: String? = nil,
         python: String? = nil
     ) async throws -> [String: Any] {
         
-        // Try osquery first
+        // Try osquery first (extension loaded automatically if available)
         if let osqueryCmd = osquery {
             do {
                 let osqueryService = OSQueryService(configuration: configuration)
@@ -52,7 +60,7 @@ open class BaseModuleProcessor: ModuleProcessor, @unchecked Sendable {
                     return ["items": results]
                 }
             } catch {
-                print("OSQuery failed, trying bash fallback: \(error)")
+                print("⚠️ OSQuery failed (extension tables may not be available), trying bash fallback: \(error)")
             }
         }
         
@@ -73,7 +81,7 @@ open class BaseModuleProcessor: ModuleProcessor, @unchecked Sendable {
                 
                 return ["output": output]
             } catch {
-                print("Bash failed, trying python fallback: \(error)")
+                print("⚠️ Bash fallback failed, trying python fallback: \(error)")
             }
         }
         
@@ -83,7 +91,7 @@ open class BaseModuleProcessor: ModuleProcessor, @unchecked Sendable {
                 let result = try await PythonService.executeScript(pythonScript)
                 return result
             } catch {
-                print("Python fallback failed: \(error)")
+                print("❌ Python fallback failed: \(error)")
                 throw error
             }
         }
