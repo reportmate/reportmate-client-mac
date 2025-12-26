@@ -61,8 +61,8 @@ log_success() { echo -e "${GREEN}✅ $1${NC}"; }
 log_warn()    { echo -e "${YELLOW}⚠️  $1${NC}"; }
 log_error()   { echo -e "${RED}❌ $1${NC}"; }
 log_info()    { echo -e "${CYAN}ℹ️  $1${NC}"; }
-log_header()  { echo -e "${MAGENTA}🚀 $1${NC}"; }
-log_step()    { echo -e "${YELLOW}🔄 $1${NC}"; }
+log_header()  { echo -e "${MAGENTA}$1${NC}"; }
+log_step()    { echo -e "${YELLOW}$1${NC}"; }
 
 # ═══════════════════════════════════════════════════════════════════════════
 # HELP
