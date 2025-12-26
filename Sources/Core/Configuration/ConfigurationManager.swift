@@ -195,6 +195,20 @@ public struct ReportMateConfiguration {
         "applications", "management", "inventory"
     ]
     public var osqueryPath: String = "/usr/local/bin/osqueryi"
+    
+    /// Path to macadmins osquery extension binary
+    /// Default: bundled extension in Resources or /usr/local/bin
+    public var osqueryExtensionPath: String?
+    
+    /// Enable automatic extension loading (default: true)
+    /// When enabled, OSQueryService will load macadmins_extension.ext if available
+    /// This provides: mdm, macos_profiles, alt_system_info, and other macOS tables
+    public var extensionEnabled: Bool = true
+    
+    /// Use alt_system_info table instead of system_info (macOS 15+ compatibility)
+    /// When true, queries will prefer alt_system_info to avoid network permission prompts
+    public var useAltSystemInfo: Bool = true
+    
     public var validateSSL: Bool = true
     public var timeout: Int = 300 // 5 minutes
     
@@ -207,6 +221,9 @@ public struct ReportMateConfiguration {
         if let logLevel = other["LogLevel"] as? String { self.logLevel = logLevel }
         if let modules = other["EnabledModules"] as? [String] { self.enabledModules = modules }
         if let osqueryPath = other["OsqueryPath"] as? String { self.osqueryPath = osqueryPath }
+        if let extensionPath = other["OsqueryExtensionPath"] as? String { self.osqueryExtensionPath = extensionPath }
+        if let extensionEnabled = other["ExtensionEnabled"] as? Bool { self.extensionEnabled = extensionEnabled }
+        if let useAltSystemInfo = other["UseAltSystemInfo"] as? Bool { self.useAltSystemInfo = useAltSystemInfo }
         if let validateSSL = other["ValidateSSL"] as? Bool { self.validateSSL = validateSSL }
         if let timeout = other["Timeout"] as? Int { self.timeout = timeout }
     }
