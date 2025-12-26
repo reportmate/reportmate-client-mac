@@ -56,17 +56,13 @@ public class DataCollectionService {
         // Create device identification
         let deviceInfo = try await collectDeviceInfo()
         
-        return [
-            "deviceInfo": deviceInfo,
-            "modules": moduleResults,
-            "collectionTimestamp": Date(),
-            "reportMateVersion": AppVersion.current
-        ]
+        // Build unified payload structure matching Windows client format
+        return buildUnifiedPayload(deviceInfo: deviceInfo, moduleResults: moduleResults)
     }
     
     /// Collect data from specific modules
     public func collectSpecificModules(_ moduleIds: [String]) async throws -> [String: Any] {
-        var moduleResults: [String: Any] = [:]
+        var moduleResults: [String: ModuleData] = [:]
         
         for moduleId in moduleIds {
             guard let processor = moduleProcessors[moduleId] else {
@@ -86,12 +82,8 @@ public class DataCollectionService {
         // Create device identification
         let deviceInfo = try await collectDeviceInfo()
         
-        return [
-            "deviceInfo": deviceInfo,
-            "modules": moduleResults,
-            "collectionTimestamp": Date(),
-            "reportMateVersion": AppVersion.current
-        ]
+        // Build unified payload structure matching Windows client format
+        return buildUnifiedPayload(deviceInfo: deviceInfo, moduleResults: moduleResults)
     }
 
     /// Collect data from a specific module
@@ -142,6 +134,96 @@ public class DataCollectionService {
         let hostname = ProcessInfo.processInfo.hostName
         let timestamp = Date().timeIntervalSince1970
         return "mac-\(hostname)-\(Int(timestamp))"
+    }
+    
+    /// Build unified payload structure matching Windows client format
+    /// This ensures the Mac API output structure matches what the dashboard expects
+    private func buildUnifiedPayload(deviceInfo: DeviceInfo, moduleResults: [String: ModuleData]) -> [String: Any] {
+        // Create ISO8601 date formatter for consistent timestamp formatting
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        
+        // Build metadata section (matches Windows EventMetadata)
+        let metadata: [String: Any] = [
+            "deviceId": deviceInfo.deviceId,
+            "serialNumber": deviceInfo.serialNumber,
+            "collectedAt": isoFormatter.string(from: Date()),
+            "clientVersion": AppVersion.current,
+            "platform": "macOS",
+            "collectionType": "Full",
+            "enabledModules": configuration.enabledModules,
+            "additional": [
+                "deviceName": deviceInfo.deviceName,
+                "manufacturer": deviceInfo.manufacturer,
+                "model": deviceInfo.model,
+                "osName": deviceInfo.osName,
+                "osVersion": deviceInfo.osVersion,
+                "architecture": deviceInfo.architecture
+            ]
+        ]
+        
+        // Start building the unified payload with metadata and empty events
+        var payload: [String: Any] = [
+            "metadata": metadata,
+            "events": [] as [[String: Any]],
+            // Also include modules dict for backwards compatibility
+            "modules": moduleResults.mapValues { convertModuleDataToDict($0) }
+        ]
+        
+        // Assign module data to top-level fields (mirrors Windows AssignModuleDataToPayload)
+        for (moduleId, moduleData) in moduleResults {
+            let moduleDict = convertModuleDataToDict(moduleData)
+            
+            // Map module IDs to top-level payload keys (matching Windows structure)
+            switch moduleId.lowercased() {
+            case "system":
+                payload["system"] = moduleDict
+            case "hardware":
+                payload["hardware"] = moduleDict
+            case "security":
+                payload["security"] = moduleDict
+            case "network":
+                payload["network"] = moduleDict
+            case "applications":
+                payload["applications"] = moduleDict
+            case "management":
+                payload["management"] = moduleDict
+            case "inventory":
+                payload["inventory"] = moduleDict
+            case "profiles":
+                payload["profiles"] = moduleDict
+            case "installs":
+                payload["installs"] = moduleDict
+            case "displays":
+                payload["displays"] = moduleDict
+            case "printers":
+                payload["printers"] = moduleDict
+            default:
+                // For any unknown modules, add them under their original key
+                payload[moduleId] = moduleDict
+            }
+        }
+        
+        return payload
+    }
+    
+    /// Convert ModuleData to dictionary for JSON serialization
+    private func convertModuleDataToDict(_ moduleData: ModuleData) -> [String: Any] {
+        // Use JSONEncoder to convert the Codable ModuleData to Data, then to dictionary
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        
+        do {
+            let data = try encoder.encode(moduleData)
+            if let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return dict
+            }
+        } catch {
+            print("Warning: Failed to convert module data to dictionary: \(error)")
+        }
+        
+        // Fallback: return empty dict
+        return [:]
     }
 }
 
