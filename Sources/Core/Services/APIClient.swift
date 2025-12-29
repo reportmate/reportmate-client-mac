@@ -76,7 +76,7 @@ public class APIClient {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     // Check for various success indicators
                     let isSuccess = (json["success"] as? Bool) ?? 
-                                   (json["status"] as? String == "success") ??
+                                   (json["status"] as? String == "success" ? true : nil) ??
                                    (json["ok"] as? Bool) ?? 
                                    true // Assume success if 2xx status
                     
