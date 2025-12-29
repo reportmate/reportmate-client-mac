@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.github.reportmate.fourhourly</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>--run-modules</string>
+        <string>applications,inventory,system</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>14400</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-fourhourly.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-fourhourly.error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>AssociatedBundleIdentifiers</key>
+    <string>com.github.reportmate.managedreportsrunner</string>
+</dict>
+</plist>
