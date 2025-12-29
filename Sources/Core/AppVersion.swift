@@ -2,22 +2,10 @@ import Foundation
 
 /// Centralized version management for ReportMate macOS client
 /// Version format: YYYY.MM.DD.HHMM (build timestamp)
+/// This file is auto-generated at build time - do not edit manually
 public enum AppVersion {
-    /// The current application version
-    /// This is automatically set at build time via environment variable or defaults to current timestamp
-    public static var current: String {
-        // Check for build-time version from environment
-        if let envVersion = ProcessInfo.processInfo.environment["REPORTMATE_VERSION"],
-           !envVersion.isEmpty {
-            return envVersion
-        }
-        
-        // Generate timestamp-based version: YYYY.MM.DD.HHMM
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy.MM.dd.HHmm"
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        return formatter.string(from: Date())
-    }
+    /// The current application version (generated at build time)
+    public static let current: String = "2025.12.28.1122"
     
     /// Short version for display
     public static var short: String {

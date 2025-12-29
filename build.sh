@@ -6,17 +6,31 @@
 
 set -e
 
+# Load environment variables from .env if it exists
+if [ -f "${BASH_SOURCE%/*}/.env" ]; then
+    echo "[INFO] Loading configuration from .env"
+    set -a
+    source "${BASH_SOURCE%/*}/.env"
+    set +a
+fi
+
 # ═══════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════
 
 PROJECT_NAME="ReportMate"
 PRODUCT_NAME="managedreportsrunner"
-BUNDLE_ID="com.reportmate.managedreportsrunner"
+BUNDLE_ID="com.github.reportmate.managedreportsrunner"
 PKG_IDENTIFIER="ca.ecuad.reportmate.client"
-TEAM_ID="7TF6CSP83S"  # Emily Carr University team ID
-DEVELOPER_ID_APP_HASH="C0277EBA633F1AA2BC2855E45B3B38A1840053BA"
-APPLE_DEV_ID="Apple Development: Rod Christiansen (A7LDGJ26G8)"
+
+# Signing configuration - must be provided via .env or flags
+# No defaults to avoid exposing personal/org info in public repo
+TEAM_ID="${TEAM_ID:-}"
+SIGNING_IDENTITY_APP="${SIGNING_IDENTITY_APP:-}"
+SIGNING_IDENTITY_INSTALLER="${SIGNING_IDENTITY_INSTALLER:-}"
+SIGNING_TIMESTAMP="${SIGNING_TIMESTAMP:-true}"
+SIGNING_KEYCHAIN="${SIGNING_KEYCHAIN:-}"
+NOTARIZATION_KEYCHAIN_PROFILE="${NOTARIZATION_KEYCHAIN_PROFILE:-}"
 
 # Directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,10 +71,10 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-log_success() { echo -e "${GREEN}✅ $1${NC}"; }
-log_warn()    { echo -e "${YELLOW}⚠️  $1${NC}"; }
-log_error()   { echo -e "${RED}❌ $1${NC}"; }
-log_info()    { echo -e "${CYAN}ℹ️  $1${NC}"; }
+log_success() { echo -e "${GREEN}[OKAY] $1${NC}"; }
+log_warn()    { echo -e "${YELLOW}[WARN] $1${NC}"; }
+log_error()   { echo -e "${RED}[ERROR] $1${NC}"; }
+log_info()    { echo -e "${CYAN}[INFO] $1${NC}"; }
 log_header()  { echo -e "${MAGENTA}$1${NC}"; }
 log_step()    { echo -e "${YELLOW}$1${NC}"; }
 
@@ -265,6 +279,43 @@ fi
 mkdir -p "${OUTPUT_DIR}" "${DIST_DIR}"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# GENERATE VERSION FILE
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Generate AppVersion.swift with hardcoded version at build time
+cat > "${SCRIPT_DIR}/Sources/Core/AppVersion.swift" << EOF
+import Foundation
+
+/// Centralized version management for ReportMate macOS client
+/// Version format: YYYY.MM.DD.HHMM (build timestamp)
+/// This file is auto-generated at build time - do not edit manually
+public enum AppVersion {
+    /// The current application version (generated at build time)
+    public static let current: String = "${VERSION}"
+    
+    /// Short version for display
+    public static var short: String {
+        let parts = current.split(separator: ".")
+        if parts.count >= 3 {
+            return "\\(parts[0]).\\(parts[1]).\\(parts[2])"
+        }
+        return current
+    }
+    
+    /// Build number (HHMM portion or full version)
+    public static var build: String {
+        let parts = current.split(separator: ".")
+        if parts.count >= 4 {
+            return String(parts[3])
+        }
+        return current
+    }
+}
+EOF
+
+log_info "Generated AppVersion.swift with version: ${VERSION}"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # BUILD
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -275,6 +326,9 @@ if [ "$SKIP_BUILD" = false ]; then
     if [ "$VERBOSE" = true ]; then
         BUILD_FLAGS="${BUILD_FLAGS} --verbose"
     fi
+    
+    # Pass version to Swift via environment variable
+    export REPORTMATE_VERSION="$VERSION"
     
     swift build ${BUILD_FLAGS}
     
@@ -327,23 +381,42 @@ cp "$EXECUTABLE_PATH" "${DIST_DIR}/${PRODUCT_NAME}"
 if [ "$SIGN" = true ]; then
     log_step "Code signing..."
     
-    if [ "$DISTRIBUTION" = true ]; then
-        SIGNING_IDENTITY="$DEVELOPER_ID_APP_HASH"
-        ENTITLEMENTS_FILE="${SCRIPT_DIR}/ReportMate-Distribution.entitlements"
-        log_info "Signing for distribution with Developer ID"
-    else
-        SIGNING_IDENTITY="$APPLE_DEV_ID"
-        ENTITLEMENTS_FILE="${SCRIPT_DIR}/ReportMate.entitlements"
-        log_info "Signing for development"
+    # Validate signing identity is provided
+    if [ -z "$SIGNING_IDENTITY_APP" ]; then
+        log_error "SIGNING_IDENTITY_APP not set. Please configure in .env or export it."
+        exit 1
     fi
     
-    codesign --force \
-        --sign "$SIGNING_IDENTITY" \
-        --entitlements "$ENTITLEMENTS_FILE" \
-        --timestamp \
-        --options runtime \
-        ${VERBOSE:+--verbose} \
-        "${DIST_DIR}/${PRODUCT_NAME}"
+    if [ "$DISTRIBUTION" = true ]; then
+        SIGNING_IDENTITY="$SIGNING_IDENTITY_APP"
+        ENTITLEMENTS_FILE="${SCRIPT_DIR}/ReportMate-Distribution.entitlements"
+        log_info "Signing for distribution with: ${SIGNING_IDENTITY}"
+    else
+        SIGNING_IDENTITY="$SIGNING_IDENTITY_APP"
+        ENTITLEMENTS_FILE="${SCRIPT_DIR}/ReportMate.entitlements"
+        log_info "Signing for development with: ${SIGNING_IDENTITY}"
+    fi
+    
+    CODESIGN_ARGS=(
+        --force
+        --sign "$SIGNING_IDENTITY"
+        --entitlements "$ENTITLEMENTS_FILE"
+        --options runtime
+    )
+    
+    if [ "$SIGNING_TIMESTAMP" = "true" ]; then
+        CODESIGN_ARGS+=(--timestamp)
+    fi
+    
+    if [ -n "$SIGNING_KEYCHAIN" ]; then
+        CODESIGN_ARGS+=(--keychain "$SIGNING_KEYCHAIN")
+    fi
+    
+    if [ -n "$VERBOSE" ]; then
+        CODESIGN_ARGS+=(--verbose)
+    fi
+    
+    codesign "${CODESIGN_ARGS[@]}" "${DIST_DIR}/${PRODUCT_NAME}"
     
     # Verify signature
     codesign --verify --verbose=2 "${DIST_DIR}/${PRODUCT_NAME}"
@@ -367,24 +440,335 @@ EOF
 # ═══════════════════════════════════════════════════════════════════════════
 
 if [ "$SKIP_PKG" = false ]; then
-    log_step "Creating PKG installer..."
+    log_step "Creating PKG installer with .app bundle (Outset-style)..."
     
-    # Create package root structure
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CREATE APP BUNDLE STRUCTURE (like macadmins/outset)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
     PACKAGE_ROOT="${OUTPUT_DIR}/package_root"
     rm -rf "$PACKAGE_ROOT"
-    mkdir -p "$PACKAGE_ROOT/usr/local/reportmate"
-    mkdir -p "$PACKAGE_ROOT/Library/Managed Reports"
-    mkdir -p "$PACKAGE_ROOT/Library/LaunchDaemons"
+    
+    # App bundle structure
+    APP_BUNDLE="${PACKAGE_ROOT}/usr/local/reportmate/ReportMate.app"
+    APP_CONTENTS="${APP_BUNDLE}/Contents"
+    APP_MACOS="${APP_CONTENTS}/MacOS"
+    APP_RESOURCES="${APP_CONTENTS}/Resources"
+    APP_LAUNCHDAEMONS="${APP_CONTENTS}/Library/LaunchDaemons"
+    
+    mkdir -p "$APP_MACOS"
+    mkdir -p "$APP_RESOURCES"
+    mkdir -p "$APP_LAUNCHDAEMONS"
+    mkdir -p "$PACKAGE_ROOT/Library/Managed Reports/logs"
     mkdir -p "$PACKAGE_ROOT/etc/paths.d"
     
     # Add reportmate to PATH
     echo "/usr/local/reportmate" > "$PACKAGE_ROOT/etc/paths.d/reportmate"
     
-    # Copy executable
-    cp "${DIST_DIR}/${PRODUCT_NAME}" "$PACKAGE_ROOT/usr/local/reportmate/"
-    cp "${DIST_DIR}/version.txt" "$PACKAGE_ROOT/usr/local/reportmate/"
+    # Copy executable to app bundle
+    cp "${DIST_DIR}/${PRODUCT_NAME}" "$APP_MACOS/"
+    cp "${DIST_DIR}/version.txt" "$APP_RESOURCES/"
     
-    # Create default configuration plist
+    # Create wrapper script for CLI access
+    cat > "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner" << 'WRAPPER'
+#!/bin/sh
+# ReportMate CLI wrapper
+/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner "${@}"
+WRAPPER
+    chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner"
+    
+    # Create Info.plist for app bundle
+    cat > "$APP_CONTENTS/Info.plist" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>managedreportsrunner</string>
+    <key>CFBundleIconFile</key>
+    <string>ReportMate</string>
+    <key>CFBundleIconName</key>
+    <string>ReportMate</string>
+    <key>CFBundleIdentifier</key>
+    <string>${BUNDLE_ID}</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>ReportMate</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${VERSION}</string>
+    <key>CFBundleVersion</key>
+    <string>${VERSION}</string>
+    <key>LSBackgroundOnly</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright 2025 ReportMate Contributors. All rights reserved.</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>
+EOF
+    
+    # Create PkgInfo
+    echo "APPL????" > "$APP_CONTENTS/PkgInfo"
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LAUNCHDAEMONS (embedded in app bundle like Outset)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    # Boot daemon - runs all modules at system startup
+    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.boot.plist" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.github.reportmate.boot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>run</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>LaunchOnlyOnce</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-boot.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-boot.error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>AssociatedBundleIdentifiers</key>
+    <string>com.github.reportmate.managedreportsrunner</string>
+</dict>
+</plist>
+EOF
+
+    # Hourly daemon - security, profiles, network, management
+    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.hourly.plist" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.github.reportmate.hourly</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>--run-modules</string>
+        <string>security,profiles,network,management</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-hourly.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-hourly.error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>AssociatedBundleIdentifiers</key>
+    <string>com.github.reportmate.managedreportsrunner</string>
+</dict>
+</plist>
+EOF
+
+    # 4-hourly daemon - applications, inventory, system
+    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.fourhourly.plist" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.github.reportmate.fourhourly</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>--run-modules</string>
+        <string>applications,inventory,system</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>14400</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-4hourly.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-4hourly.error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>AssociatedBundleIdentifiers</key>
+    <string>com.github.reportmate.managedreportsrunner</string>
+</dict>
+</plist>
+EOF
+
+    # Daily daemon - hardware, displays (at 9 AM)
+    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.daily.plist" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.github.reportmate.daily</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>--run-modules</string>
+        <string>hardware,displays</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-daily.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-daily.error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>AssociatedBundleIdentifiers</key>
+    <string>com.github.reportmate.managedreportsrunner</string>
+</dict>
+</plist>
+EOF
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MODULE SCHEDULES CONFIGURATION
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    cat > "$APP_RESOURCES/module-schedules.json" << 'EOF'
+{
+  "schedules": {
+    "hourly": {
+      "modules": ["security", "profiles", "network", "management"],
+      "interval_seconds": 3600,
+      "launchd_label": "com.github.reportmate.hourly",
+      "description": "Modules that need frequent updates for security monitoring"
+    },
+    "fourhourly": {
+      "modules": ["applications", "inventory", "system"],
+      "interval_seconds": 14400,
+      "launchd_label": "com.github.reportmate.fourhourly",
+      "description": "Modules that change moderately - software and device info"
+    },
+    "daily": {
+      "modules": ["hardware", "displays"],
+      "calendar_interval": {"hour": 9, "minute": 0},
+      "launchd_label": "com.github.reportmate.daily",
+      "description": "Modules that rarely change - physical hardware"
+    },
+    "boot": {
+      "modules": "all",
+      "run_at_load": true,
+      "launch_only_once": true,
+      "launchd_label": "com.github.reportmate.boot",
+      "description": "Full collection at boot to establish baseline"
+    }
+  },
+  "version": "1.0.0",
+  "platform": "macOS"
+}
+EOF
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # APP ICON (Liquid Glass / Tahoe icon pipeline for macOS Sequoia+)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    ICON_SOURCE="${SCRIPT_DIR}/Package/Resources/ReportMate.icon"
+    if [ -d "$ICON_SOURCE" ]; then
+        log_info "Compiling Liquid Glass icon (.icon → Assets.car)"
+        
+        # Create temporary directory for icon compilation
+        ICON_BUILD_DIR="${BUILD_DIR}/icon_assets"
+        mkdir -p "$ICON_BUILD_DIR"
+        
+        # Compile .icon to Assets.car using actool
+        # The .icon directory is the modern Liquid Glass format from Icon Composer
+        xcrun actool "$ICON_SOURCE" \
+            --compile "$ICON_BUILD_DIR" \
+            --app-icon "ReportMate" \
+            --enable-on-demand-resources NO \
+            --development-region en \
+            --target-device mac \
+            --platform macosx \
+            --minimum-deployment-target 14.0 \
+            --include-all-app-icons \
+            --output-partial-info-plist /dev/null 2>&1 || true
+        
+        # Copy compiled Assets.car to app bundle (actool may emit warnings but still produce Assets.car)
+        if [ -f "$ICON_BUILD_DIR/Assets.car" ]; then
+            cp "$ICON_BUILD_DIR/Assets.car" "$APP_RESOURCES/Assets.car"
+            log_success "Icon compiled and installed: Assets.car"
+            
+            # Also copy the .icns fallback if generated (for pre-Sequoia compatibility)
+            if [ -f "$ICON_BUILD_DIR/ReportMate.icns" ]; then
+                cp "$ICON_BUILD_DIR/ReportMate.icns" "$APP_RESOURCES/ReportMate.icns"
+                log_info "Legacy .icns fallback also installed"
+            fi
+        else
+            log_error "Failed to compile icon - Assets.car not generated"
+            exit 1
+        fi
+    else
+        log_warn "Icon not found at ${ICON_SOURCE}"
+    fi
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # DEFAULT CONFIGURATION PLIST
+    # ═══════════════════════════════════════════════════════════════════════════
+    
     cat > "$PACKAGE_ROOT/Library/Managed Reports/reportmate.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -403,6 +787,8 @@ if [ "$SKIP_PKG" = false ]; then
         <string>applications</string>
         <string>management</string>
         <string>inventory</string>
+        <string>profiles</string>
+        <string>displays</string>
     </array>
     <key>OsqueryPath</key>
     <string>/usr/local/bin/osqueryi</string>
@@ -416,38 +802,73 @@ $([ -n "$API_URL" ] && echo "    <key>ApiUrl</key>
 </plist>
 EOF
 
-    # Create LaunchDaemon
-    cat > "$PACKAGE_ROOT/Library/LaunchDaemons/com.github.reportmate.plist" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.github.reportmate</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/reportmate/managedreportsrunner</string>
-        <string>run</string>
-    </array>
-    <key>StartInterval</key>
-    <integer>3600</integer>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/reportmate.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/reportmate.error.log</string>
-</dict>
-</plist>
-EOF
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SIGN THE APP BUNDLE (if signing enabled)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    if [ "$SIGN" = true ]; then
+        log_step "Signing app bundle..."
+        
+        SIGNING_IDENTITY="$SIGNING_IDENTITY_APP"
+        if [ "$DISTRIBUTION" = true ]; then
+            ENTITLEMENTS_FILE="${SCRIPT_DIR}/ReportMate-Distribution.entitlements"
+            log_info "Signing app bundle for distribution"
+        else
+            ENTITLEMENTS_FILE="${SCRIPT_DIR}/ReportMate.entitlements"
+            log_info "Signing app bundle for development"
+        fi
+        
+        CODESIGN_ARGS=(
+            --force
+            --sign "$SIGNING_IDENTITY"
+            --entitlements "$ENTITLEMENTS_FILE"
+            --options runtime
+        )
+        
+        if [ "$SIGNING_TIMESTAMP" = "true" ]; then
+            CODESIGN_ARGS+=(--timestamp)
+        fi
+        
+        if [ -n "$SIGNING_KEYCHAIN" ]; then
+            CODESIGN_ARGS+=(--keychain "$SIGNING_KEYCHAIN")
+        fi
+        
+        if [ -n "$VERBOSE" ]; then
+            CODESIGN_ARGS+=(--verbose)
+        fi
+        
+        # Sign the main executable
+        codesign "${CODESIGN_ARGS[@]}" "$APP_MACOS/${PRODUCT_NAME}"
+        
+        # Sign the app bundle
+        codesign "${CODESIGN_ARGS[@]}" --deep "$APP_BUNDLE"
+        
+        # Verify
+        codesign --verify --verbose=2 "$APP_BUNDLE"
+        log_success "App bundle signed"
+    fi
 
-    # Copy scripts from build/pkg/scripts
+    # Copy scripts from Package/Scripts (new location) or build/pkg/scripts (legacy)
     SCRIPTS_DIR="${OUTPUT_DIR}/scripts"
     rm -rf "$SCRIPTS_DIR"
     mkdir -p "$SCRIPTS_DIR"
     
-    if [ -d "${PKG_DIR}/scripts" ]; then
-        # Load .env file if it exists for variable substitution
+    # Use new Package/Scripts if available, otherwise fall back to legacy
+    PKG_SCRIPTS_DIR="${SCRIPT_DIR}/Package/Scripts"
+    if [ -d "$PKG_SCRIPTS_DIR" ]; then
+        log_info "Using Package/Scripts for installer scripts"
+        for script in "$PKG_SCRIPTS_DIR/"*; do
+            if [ -f "$script" ]; then
+                script_name=$(basename "$script")
+                if [ "$script_name" = "managedreportsrunner" ]; then
+                    continue  # Skip the wrapper script
+                fi
+                cp "$script" "$SCRIPTS_DIR/$script_name"
+                chmod +x "$SCRIPTS_DIR/$script_name"
+            fi
+        done
+    elif [ -d "${PKG_DIR}/scripts" ]; then
+        # Legacy: Load .env file if it exists for variable substitution
         if [ -f "${PKG_DIR}/.env" ]; then
             log_info "Loading environment from ${PKG_DIR}/.env"
             set -a
@@ -455,19 +876,137 @@ EOF
             set +a
         fi
         
-        # Copy and substitute ONLY specific environment variables in scripts
-        # This prevents local bash variables like ${DOMAIN} from being substituted
         SUBST_VARS='${REPORTMATE_CUSTOM_DOMAIN_NAME} ${REPORTMATE_CLIENT_PASSPHRASE} ${REPORTMATE_VERSION}'
         
         for script in "${PKG_DIR}/scripts/"*; do
             if [ -f "$script" ] && [ "$(basename "$script")" != "README.md" ]; then
                 script_name=$(basename "$script")
-                # Substitute only specific environment variables
                 envsubst "$SUBST_VARS" < "$script" > "$SCRIPTS_DIR/$script_name"
                 chmod +x "$SCRIPTS_DIR/$script_name"
             fi
         done
+    else
+        # Create default postinstall script
+        log_info "Creating default postinstall script"
+        cat > "$SCRIPTS_DIR/postinstall" << 'POSTINSTALL_SCRIPT'
+#!/bin/zsh
+# ReportMate Postinstall
+LD_ROOT="/Library/LaunchDaemons"
+APP_PATH="/usr/local/reportmate/ReportMate.app"
+APP_ROOT="${APP_PATH}/Contents"
+LOG_DIR="/Library/Managed Reports/logs"
+
+log_message() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
+
+log_message "Starting ReportMate postinstall..."
+
+mkdir -p "$LOG_DIR"
+chmod 755 "$LOG_DIR"
+
+# Register app bundle
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister "${APP_PATH}"
+
+# LaunchDaemons to install
+DAEMONS=(
+    "com.github.reportmate.boot.plist"
+    "com.github.reportmate.hourly.plist"
+    "com.github.reportmate.fourhourly.plist"
+    "com.github.reportmate.daily.plist"
+)
+
+# Remove legacy daemon
+if [ -e "${LD_ROOT}/com.github.reportmate.plist" ]; then
+    log_message "Removing legacy daemon..."
+    /bin/launchctl bootout system "${LD_ROOT}/com.github.reportmate.plist" 2>/dev/null
+    rm -f "${LD_ROOT}/com.github.reportmate.plist"
+fi
+
+# Unload existing and install new daemons
+for daemon in ${DAEMONS}; do
+    daemon_path="${LD_ROOT}/${daemon}"
+    if [ -e "${daemon_path}" ]; then
+        /bin/launchctl bootout system "${daemon_path}" 2>/dev/null
+        rm -f "${daemon_path}"
     fi
+done
+
+for daemon in ${DAEMONS}; do
+    source_path="${APP_ROOT}/Library/LaunchDaemons/${daemon}"
+    dest_path="${LD_ROOT}/${daemon}"
+    
+    if [ -e "${source_path}" ]; then
+        log_message "Installing: ${daemon}"
+        cp "${source_path}" "${dest_path}"
+        chmod 644 "${dest_path}"
+        chown root:wheel "${dest_path}"
+        /bin/launchctl bootstrap system "${dest_path}"
+    fi
+done
+
+# Make wrapper executable
+chmod 755 /usr/local/reportmate/managedreportsrunner 2>/dev/null
+
+# PATH entry
+echo "/usr/local/reportmate" > /etc/paths.d/reportmate 2>/dev/null
+
+log_message "ReportMate postinstall complete."
+exit 0
+POSTINSTALL_SCRIPT
+        chmod +x "$SCRIPTS_DIR/postinstall"
+        
+        # Create preinstall
+        cat > "$SCRIPTS_DIR/preinstall" << 'PREINSTALL_SCRIPT'
+#!/bin/zsh
+# ReportMate Preinstall
+LD_ROOT="/Library/LaunchDaemons"
+
+log_message() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
+log_message "Starting ReportMate preinstall..."
+
+# Legacy daemon
+[ -e "${LD_ROOT}/com.github.reportmate.plist" ] && {
+    /bin/launchctl bootout system "${LD_ROOT}/com.github.reportmate.plist" 2>/dev/null
+    rm -f "${LD_ROOT}/com.github.reportmate.plist"
+}
+
+# Current daemons
+for daemon in com.github.reportmate.boot com.github.reportmate.hourly com.github.reportmate.fourhourly com.github.reportmate.daily; do
+    daemon_path="${LD_ROOT}/${daemon}.plist"
+    [ -e "${daemon_path}" ] && {
+        /bin/launchctl bootout system "${daemon_path}" 2>/dev/null
+        rm -f "${daemon_path}"
+    }
+done
+
+pkill -f "managedreportsrunner" 2>/dev/null || true
+log_message "ReportMate preinstall complete."
+exit 0
+PREINSTALL_SCRIPT
+        chmod +x "$SCRIPTS_DIR/preinstall"
+    fi
+    
+    # Create component plist to prevent bundle relocation
+    COMPONENT_PLIST="${OUTPUT_DIR}/component.plist"
+    cat > "$COMPONENT_PLIST" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+    <dict>
+        <key>BundleHasStrictIdentifier</key>
+        <true/>
+        <key>BundleIsRelocatable</key>
+        <false/>
+        <key>BundleIsVersionChecked</key>
+        <true/>
+        <key>BundleOverwriteAction</key>
+        <string>upgrade</string>
+        <key>RootRelativeBundlePath</key>
+        <string>usr/local/reportmate/ReportMate.app</string>
+    </dict>
+</array>
+</plist>
+EOF
     
     # Build PKG
     PKG_NAME="ReportMate-${VERSION}.pkg"
@@ -477,21 +1016,41 @@ EOF
              --version "${VERSION}" \
              --install-location "/" \
              --scripts "${SCRIPTS_DIR}" \
+             --component-plist "${COMPONENT_PLIST}" \
              "${DIST_DIR}/${PKG_NAME}"
     
     log_success "PKG created: ${DIST_DIR}/${PKG_NAME}"
     
     # Sign the PKG if distribution
-    if [ "$DISTRIBUTION" = true ]; then
+    if [ "$DISTRIBUTION" = true ] && [ "$SIGN" = true ]; then
         log_step "Signing PKG for distribution..."
+        
+        # Validate installer signing identity is provided
+        if [ -z "$SIGNING_IDENTITY_INSTALLER" ]; then
+            log_error "SIGNING_IDENTITY_INSTALLER not set. Please configure in .env or export it."
+            exit 1
+        fi
+        
         SIGNED_PKG="${DIST_DIR}/ReportMate-${VERSION}-signed.pkg"
         
-        productsign --sign "Developer ID Installer: Emily Carr University (${TEAM_ID})" \
+        PRODUCTSIGN_ARGS=(
+            --sign "$SIGNING_IDENTITY_INSTALLER"
+        )
+        
+        if [ "$SIGNING_TIMESTAMP" = "true" ]; then
+            PRODUCTSIGN_ARGS+=(--timestamp)
+        fi
+        
+        if [ -n "$SIGNING_KEYCHAIN" ]; then
+            PRODUCTSIGN_ARGS+=(--keychain "$SIGNING_KEYCHAIN")
+        fi
+        
+        productsign "${PRODUCTSIGN_ARGS[@]}" \
             "${DIST_DIR}/${PKG_NAME}" \
             "${SIGNED_PKG}"
         
         mv "${SIGNED_PKG}" "${DIST_DIR}/${PKG_NAME}"
-        log_success "PKG signed"
+        log_success "PKG signed with: ${SIGNING_IDENTITY_INSTALLER}"
     fi
 fi
 
@@ -502,11 +1061,21 @@ fi
 if [ "$NOTARIZE" = true ] && [ "$SKIP_PKG" = false ]; then
     log_step "Submitting for notarization..."
     
+    # Validate notarization profile is configured
+    if [ -z "$NOTARIZATION_KEYCHAIN_PROFILE" ]; then
+        log_error "NOTARIZATION_KEYCHAIN_PROFILE not set. Please configure in .env or export it."
+        log_info "Create profile with: xcrun notarytool store-credentials \"PROFILE_NAME\" --apple-id \"you@example.com\" --team-id \"XXXXXXXXXX\""
+        exit 1
+    fi
+    
     PKG_PATH="${DIST_DIR}/ReportMate-${VERSION}.pkg"
     
-    NOTARY_OUTPUT=$(xcrun notarytool submit "$PKG_PATH" \
-        --keychain-profile "notarization_credentials" \
-        --wait 2>&1)
+    NOTARYTOOL_ARGS=(
+        --keychain-profile "$NOTARIZATION_KEYCHAIN_PROFILE"
+        --wait
+    )
+    
+    NOTARY_OUTPUT=$(xcrun notarytool submit "$PKG_PATH" "${NOTARYTOOL_ARGS[@]}" 2>&1)
     
     if echo "$NOTARY_OUTPUT" | grep -q "status: Accepted"; then
         log_success "Notarization accepted!"
@@ -523,7 +1092,7 @@ if [ "$NOTARIZE" = true ] && [ "$SKIP_PKG" = false ]; then
         SUBMISSION_ID=$(echo "$NOTARY_OUTPUT" | grep "id:" | head -1 | awk '{print $2}')
         if [ -n "$SUBMISSION_ID" ]; then
             log_info "Getting detailed log..."
-            xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "notarization_credentials"
+            xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARIZATION_KEYCHAIN_PROFILE"
         fi
         exit 1
     fi
@@ -654,6 +1223,22 @@ if [ "$INSTALL" = true ]; then
         log_success "Binary installed to /usr/local/reportmate/"
     fi
 fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CLEANUP OLD VERSIONS
+# ═══════════════════════════════════════════════════════════════════════════
+
+log_step "Cleaning up old versions..."
+
+# Remove old versioned artifacts (keep only current version)
+find "${DIST_DIR}" -name "ReportMate-*.pkg" ! -name "ReportMate-${VERSION}.pkg" -delete
+find "${DIST_DIR}" -name "ReportMate-*.zip" ! -name "ReportMate-${VERSION}.zip" -delete
+find "${DIST_DIR}" -name "ReportMate-*.dmg" ! -name "ReportMate-${VERSION}.dmg" -delete
+
+# Remove old binaries (keep only the current product name and standard file types)
+find "${DIST_DIR}" -type f -perm +111 ! -name "${PRODUCT_NAME}" ! -name "*.pkg" ! -name "*.zip" ! -name "*.dmg" ! -name "*.txt" -delete
+
+log_success "Old versions cleaned up"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SUMMARY
