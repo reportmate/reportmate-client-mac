@@ -442,8 +442,6 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         // Return users array
         if let items = result["items"] as? [[String: Any]] {
             return items
-        } else if let items = result as? [[String: Any]] {
-            return items
         }
         
         return []
@@ -934,8 +932,6 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         if let items = result["items"] as? [[String: Any]] {
             return items
-        } else if let items = result as? [[String: Any]] {
-            return items
         }
         
         return []
@@ -1000,8 +996,6 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         )
         
         if let items = result["items"] as? [[String: Any]] {
-            return items
-        } else if let items = result as? [[String: Any]] {
             return items
         }
         

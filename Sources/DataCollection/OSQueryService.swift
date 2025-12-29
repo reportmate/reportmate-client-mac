@@ -17,15 +17,7 @@ public class OSQueryService {
         // Determine extension path (bundled or configured)
         if configuration.extensionEnabled {
             self.extensionPath = Self.resolveExtensionPath(configured: configuration.osqueryExtensionPath)
-            if let path = extensionPath {
-                print("✅ OSQuery extension found at: \(path)")
-                print("   Extension will be loaded automatically with queries")
-            } else {
-                print("⚠️  OSQuery extension not found - will use bash fallbacks")
-                print("   Searched: Bundle.main.resourcePath/extensions/, /usr/local/bin/, /opt/reportmate/extensions/")
-            }
         } else {
-            print("ℹ️  OSQuery extension disabled in configuration")
             self.extensionPath = nil
         }
     }

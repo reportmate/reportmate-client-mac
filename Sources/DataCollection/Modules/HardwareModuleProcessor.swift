@@ -10,68 +10,75 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         super.init(moduleId: "hardware", configuration: configuration)
     }
     
+    // Helper function to get timestamp for logging
+    private func timestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter.string(from: Date())
+    }
+    
     public override func collectData() async throws -> ModuleData {
-        print("=== HARDWARE MODULE COLLECTION ===")
-        print("Collecting comprehensive hardware data for macOS...")
-        print("Using osquery + bash (no Python)")
-        print("─────────────────────────────────")
+        print("[\(timestamp())] === HARDWARE MODULE COLLECTION ===")
+        print("[\(timestamp())] Collecting comprehensive hardware data for macOS...")
+        print("[\(timestamp())] Using osquery + bash (no Python)")
+        print("[\(timestamp())] ─────────────────────────────────")
         
         let startTime = Date()
         let hardwareData = try await collectComprehensiveHardwareData()
         let duration = Date().timeIntervalSince(startTime)
         
-        print("Hardware data collection completed in \(String(format: "%.2f", duration)) seconds")
+        print("[\(timestamp())] Hardware data collection completed in \(String(format: "%.2f", duration)) seconds")
         return BaseModuleData(moduleId: moduleId, data: hardwareData)
     }
     
     public func collectComprehensiveHardwareData() async throws -> [String: Any] {
-        print("Starting comprehensive hardware collection...")
+        print("[\(timestamp())] Starting comprehensive hardware collection...")
         
         // Collect all hardware data first
         var rawData: [String: Any] = [:]
         
         // Collect system information (osquery: system_info + bash fallback)
-        print("  [1/9] Collecting system information...")
+        print("[\(timestamp())]   [1/9] Collecting system information...")
         let systemInfo = try await collectSystemInfo()
         rawData["system"] = systemInfo
         
         // Collect processor information (osquery: system_info + bash sysctl)
-        print("  [2/9] Collecting processor information...")
+        print("[\(timestamp())]   [2/9] Collecting processor information...")
         let processorInfo = try await collectProcessorInfo()
         rawData["processor_raw"] = processorInfo
         
         // Collect memory information (osquery: memory_devices, virtual_memory_info + bash)
-        print("  [3/9] Collecting memory information...")
+        print("[\(timestamp())]   [3/9] Collecting memory information...")
         let memoryInfo = try await collectMemoryInfo()
         rawData["memory_raw"] = memoryInfo
         
         // Collect storage information (osquery: mounts + bash diskutil)
-        print("  [4/9] Collecting storage information...")
+        print("[\(timestamp())]   [4/9] Collecting storage information...")
         let storageInfo = try await collectStorageInfo()
         rawData["storage_raw"] = storageInfo
         
         // Collect graphics information (bash: system_profiler)
-        print("  [5/9] Collecting graphics information...")
+        print("[\(timestamp())]   [5/9] Collecting graphics information...")
         let graphicsInfo = try await collectGraphicsInfo()
         rawData["graphics_raw"] = graphicsInfo
         
         // Collect battery information (osquery: battery + bash pmset)
-        print("  [6/9] Collecting battery information...")
+        print("[\(timestamp())]   [6/9] Collecting battery information...")
         let batteryInfo = try await collectBatteryInfo()
         rawData["battery"] = batteryInfo
         
         // Collect wireless (Wi-Fi) information (bash: system_profiler + airport)
-        print("  [7/9] Collecting wireless information...")
+        print("[\(timestamp())]   [7/9] Collecting wireless information...")
         let wirelessInfo = try await collectWirelessInfo()
         rawData["wireless"] = wirelessInfo
         
         // Collect Bluetooth information (bash: system_profiler)
-        print("  [8/9] Collecting Bluetooth information...")
+        print("[\(timestamp())]   [8/9] Collecting bluetooth information...")
         let bluetoothInfo = try await collectBluetoothInfo()
         rawData["bluetooth"] = bluetoothInfo
         
         // Collect thermal information (bash: pmset)
-        print("  [9/9] Collecting thermal information...")
+        print("[\(timestamp())]   [9/9] Collecting thermal information...")
         rawData["thermal"] = try await collectThermalInfo()
         
         // Collect NPU information (bash: sysctl for Apple Silicon detection)
@@ -95,7 +102,8 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         // 3. model_identifier (technical ID like "Mac16,11")
         // 4. manufacturer (cleaned to "Apple")
         // 5. formFactor ("desktop" or "laptop")
-        if let systemDict = systemInfo as? [String: Any] {
+        do {
+            let systemDict = systemInfo
             // Get model identifier (e.g., "Mac16,11")
             let modelId = systemDict["hardware_model"] as? String ?? ""
             
@@ -135,11 +143,13 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         }
         
         // 5. processor - Enhanced with performance/efficiency cores
-        if let procDict = processorInfo as? [String: Any] {
+        do {
+            let procDict = processorInfo
             var windowsProcessor: [String: Any] = [:]
             
-            // Get chip type name (e.g., "Apple M4 Pro")
-            let cpuBrand = procDict["cpu_brand"] as? String ?? "Unknown"
+            // Get chip type name (e.g., "Apple M4 Pro") and sanitize by removing "Apple " prefix
+            var cpuBrand = procDict["cpu_brand"] as? String ?? "Unknown"
+            cpuBrand = cpuBrand.replacingOccurrences(of: "Apple ", with: "")
             windowsProcessor["name"] = cpuBrand
             
             // Handle cores
@@ -188,7 +198,8 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         }
         
         // 6. graphics - Enhanced with Metal support, bus, device type
-        if let graphDict = graphicsInfo as? [String: Any] {
+        do {
+            let graphDict = graphicsInfo
             var windowsGraphics: [String: Any] = [:]
             
             // Extract GPU info from SPDisplaysDataType array
@@ -228,8 +239,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         }
         
         // 7. displays - Array of connected displays
-        if let graphDict = graphicsInfo as? [String: Any],
-           let gpuArray = graphDict["SPDisplaysDataType"] as? [[String: Any]] {
+        if let gpuArray = graphicsInfo["SPDisplaysDataType"] as? [[String: Any]] {
             var displaysArray: [[String: Any]] = []
             
             // Iterate through all GPUs to find displays
@@ -263,9 +273,11 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                         // Scaled resolution (e.g., "2560 x 1440 @ 60.00Hz")
                         displayInfo["scaledResolution"] = display["_spdisplays_resolution"] as? String
                         
-                        // Firmware version (e.g., "Version 17.0 (Build 21A329)")
+                        // Firmware version - parse from "Version 17.0 (Build 21A329)" to "17.0.21A329"
                         if let firmware = display["spdisplays_display-fw-version"] as? String, !firmware.isEmpty {
-                            displayInfo["firmwareVersion"] = firmware
+                            // Parse "Version X.Y (Build ZZ...)" format to "X.Y.ZZ"
+                            let parsedFirmware = parseFirmwareVersion(firmware)
+                            displayInfo["firmwareVersion"] = parsedFirmware
                         }
                         
                         // Is main display
@@ -304,7 +316,8 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         }
         
         // 8. memory - Enhanced with type and manufacturer
-        if let memDict = memoryInfo as? [String: Any] {
+        do {
+            let memDict = memoryInfo
             var windowsMemory: [String: Any] = [:]
             
             // Handle physical_memory
@@ -382,6 +395,13 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     drive["freeSpace"] = freeBytes
                 }
                 
+                // APFS purgeable space - space that can be reclaimed (Time Machine local snapshots,
+                // caches, iOS apps in container, etc.)
+                // This explains the gap between "visible" directory sizes and "used" space
+                if let purgeableBytes = volume["purgeable_space_in_bytes"] as? Int64 {
+                    drive["purgeableSpace"] = purgeableBytes
+                }
+                
                 // File system
                 drive["fileSystem"] = volume["file_system"] as? String ?? "Unknown"
                 
@@ -420,8 +440,8 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         }
         
         // Fallback to basic osquery mounts if system_profiler didn't work
-        if windowsStorage.isEmpty, let storageDict = storageInfo as? [String: Any] {
-            if let items = storageDict["items"] as? [[String: Any]] {
+        if windowsStorage.isEmpty {
+            if let items = storageInfo["items"] as? [[String: Any]] {
                 for item in items {
                     let path = item["path"] as? String ?? ""
                     
@@ -455,14 +475,24 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             // Find the primary internal storage device (root volume "/")
             for i in 0..<windowsStorage.count {
                 if windowsStorage[i]["isInternal"] as? Bool == true {
-                    // Collect directory analysis for this drive
+                    // Collect directory analysis using native Swift FileManager (inherits FDA)
                     do {
-                        print("  [*] Analyzing storage directories for breakdown visualization...")
+                        print("[\(timestamp())] Starting storage directory analysis...")
                         let directoryAnalysis = try await collectStorageDirectoryAnalysis(forDrivePath: "/")
+                        print("[\(timestamp())] Directory analysis complete, adding to device...")
                         addStorageAnalysisToDevice(&windowsStorage[i], directoryAnalysis: directoryAnalysis)
+                        print("[\(timestamp())] Storage analysis added successfully")
+                        
+                        // DISABLED: APFS purgeable space detection can hang on some systems
+                        // TODO: Re-enable with timeout mechanism
+                        // if let apfsPurgeable = try? await collectAPFSPurgeableSpaceDetails() {
+                        //     windowsStorage[i]["apfsPurgeableDetails"] = apfsPurgeable
+                        //     if let snapshotCount = apfsPurgeable["localSnapshotCount"] as? Int {
+                        //         windowsStorage[i]["localSnapshotCount"] = snapshotCount
+                        //     }
+                        // }
                     } catch {
-                        print("  [!] Storage directory analysis failed: \(error.localizedDescription)")
-                        // Continue without directory analysis - storage will still work, just no breakdown
+                        // Continue without directory analysis - storage will still work
                         windowsStorage[i]["storageAnalysisEnabled"] = false
                     }
                     break  // Only analyze the first internal drive
@@ -626,7 +656,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             echo "}"
         """
         
-        var result = try await executeWithFallback(
+        let result = try await executeWithFallback(
             osquery: osqueryScript,
             bash: bashScript,
             python: nil
@@ -634,18 +664,18 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         // osquery doesn't have model_name, so we add it by extracting from ioreg
         // This works around osquery's limitation - friendly model name is only in ioreg
-        if var resultDict = result as? [String: Any], resultDict["model_name"] == nil {
+        var resultDict = result
+        if resultDict["model_name"] == nil {
             // Simple inline script to get model name
             let modelNameCommand = "ioreg -ar -k product-name -d1 2>/dev/null | plutil -extract 0.product-name raw -o - - 2>/dev/null | base64 -d 2>/dev/null | tr -d '\\0'"
             
             if let modelName = try? await BashService.execute(modelNameCommand).trimmingCharacters(in: .whitespacesAndNewlines),
                !modelName.isEmpty {
                 resultDict["model_name"] = modelName
-                result = resultDict
             }
         }
         
-        return result
+        return resultDict
     }
     
     // MARK: - Model Year Mapping
@@ -755,19 +785,16 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         if let spJson = try? await BashService.execute(spHardwareScript),
            let spData = spJson.data(using: .utf8),
            let spDict = try? JSONSerialization.jsonObject(with: spData) as? [String: Any] {
-            if var resultDict = result as? [String: Any] {
-                // Add number_processors (e.g., "proc 14:10:4")
-                if let numProcs = spDict["number_processors"] as? String, !numProcs.isEmpty {
-                    resultDict["number_processors"] = numProcs
+            // Add number_processors (e.g., "proc 14:10:4")
+            if let numProcs = spDict["number_processors"] as? String, !numProcs.isEmpty {
+                result["number_processors"] = numProcs
+            }
+            // Add chip_type if cpu_brand is generic
+            if let chipType = spDict["chip_type"] as? String, !chipType.isEmpty {
+                let currentBrand = result["cpu_brand"] as? String ?? ""
+                if currentBrand.isEmpty || currentBrand == "Apple Silicon" {
+                    result["cpu_brand"] = chipType
                 }
-                // Add chip_type if cpu_brand is generic
-                if let chipType = spDict["chip_type"] as? String, !chipType.isEmpty {
-                    let currentBrand = resultDict["cpu_brand"] as? String ?? ""
-                    if currentBrand.isEmpty || currentBrand == "Apple Silicon" {
-                        resultDict["cpu_brand"] = chipType
-                    }
-                }
-                result = resultDict
             }
         }
         
@@ -842,16 +869,13 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         if let spJson = try? await BashService.execute(spMemoryScript),
            let spData = spJson.data(using: .utf8),
            let spDict = try? JSONSerialization.jsonObject(with: spData) as? [String: Any] {
-            if var resultDict = result as? [String: Any] {
-                // Add memory type (e.g., "LPDDR5")
-                if let memType = spDict["dimm_type"] as? String, !memType.isEmpty {
-                    resultDict["dimm_type"] = memType
-                }
-                // Add manufacturer (e.g., "Hynix", "Samsung")
-                if let manufacturer = spDict["dimm_manufacturer"] as? String, !manufacturer.isEmpty {
-                    resultDict["dimm_manufacturer"] = manufacturer
-                }
-                result = resultDict
+            // Add memory type (e.g., "LPDDR5")
+            if let memType = spDict["dimm_type"] as? String, !memType.isEmpty {
+                result["dimm_type"] = memType
+            }
+            // Add manufacturer (e.g., "Hynix", "Samsung")
+            if let manufacturer = spDict["dimm_manufacturer"] as? String, !manufacturer.isEmpty {
+                result["dimm_manufacturer"] = manufacturer
             }
         }
         
@@ -986,14 +1010,53 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 fi
             fi
             
-            # Get supported protocols from system_profiler
-            protocols=""
-            if echo "$sp_wifi" | grep -qi "802.11ax\\|Wi-Fi 6"; then
+            # Enhanced Wi-Fi version detection (Wi-Fi 4/5/6/6E/7)
+            wifi_version=""
+            wifi_generation=""
+            
+            # Get raw text output for more detailed protocol detection
+            sp_wifi_text=$(system_profiler SPAirPortDataType 2>/dev/null)
+            
+            # Check for Wi-Fi 7 (802.11be) support
+            if echo "$sp_wifi" | grep -qi "802.11be\\|Wi-Fi 7" || echo "$sp_wifi_text" | grep -qi "802.11.*be"; then
+                wifi_version="802.11be"
+                wifi_generation="Wi-Fi 7"
+                protocols="Wi-Fi 7 (802.11be)"
+            # Check for Wi-Fi 6E (802.11ax + 6GHz)
+            elif echo "$sp_wifi" | grep -qi "6 GHz\\|6GHz" && (echo "$sp_wifi" | grep -qi "802.11ax\\|Wi-Fi 6" || echo "$sp_wifi_text" | grep -qi "802.11.*ax"); then
+                wifi_version="802.11ax"
+                wifi_generation="Wi-Fi 6E"
+                protocols="Wi-Fi 6E (802.11ax)"
+            # Check for Wi-Fi 6 (802.11ax) - check both JSON and text output
+            elif echo "$sp_wifi" | grep -qi "802.11ax\\|Wi-Fi 6" || echo "$sp_wifi_text" | grep -qi "802.11.*ax"; then
+                wifi_version="802.11ax"
+                wifi_generation="Wi-Fi 6"
                 protocols="Wi-Fi 6 (802.11ax)"
-            elif echo "$sp_wifi" | grep -qi "802.11ac\\|Wi-Fi 5"; then
+            # Check for Wi-Fi 5 (802.11ac)
+            elif echo "$sp_wifi" | grep -qi "802.11ac\\|Wi-Fi 5" || echo "$sp_wifi_text" | grep -qi "802.11.*ac"; then
+                wifi_version="802.11ac"
+                wifi_generation="Wi-Fi 5"
                 protocols="Wi-Fi 5 (802.11ac)"
-            elif echo "$sp_wifi" | grep -qi "802.11n"; then
+            # Check for Wi-Fi 4 (802.11n)
+            elif echo "$sp_wifi" | grep -qi "802.11n" || echo "$sp_wifi_text" | grep -qi "802.11.*n"; then
+                wifi_version="802.11n"
+                wifi_generation="Wi-Fi 4"
                 protocols="Wi-Fi 4 (802.11n)"
+            else
+                # Legacy standards (Wi-Fi 3 and older)
+                wifi_version="802.11"
+                wifi_generation="Legacy"
+                protocols="802.11"
+            fi
+            
+            # Get supported bands from system_profiler (both JSON and text)
+            supported_bands=""
+            if echo "$sp_wifi" | grep -qi "6 GHz" || echo "$sp_wifi_text" | grep -qi "6 GHz"; then
+                supported_bands="2.4GHz, 5GHz, 6GHz"
+            elif echo "$sp_wifi" | grep -qi "5 GHz\\|dual.band" || echo "$sp_wifi_text" | grep -qi "5 GHz"; then
+                supported_bands="2.4GHz, 5GHz"
+            else
+                supported_bands="2.4GHz"
             fi
             
             # Get locale/country code
@@ -1006,6 +1069,9 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             echo "  \\"macAddress\\": \\"${mac_addr:-}\\","
             echo "  \\"status\\": \\"$status\\","
             echo "  \\"protocol\\": \\"${protocols:-802.11}\\","
+            echo "  \\"wifiVersion\\": \\"$wifi_version\\","
+            echo "  \\"wifiGeneration\\": \\"$wifi_generation\\","
+            echo "  \\"supportedBands\\": \\"$supported_bands\\","
             echo "  \\"currentNetwork\\": {"
             echo "    \\"ssid\\": \\"${ssid:-}\\","
             echo "    \\"bssid\\": \\"${bssid:-}\\","
@@ -1048,12 +1114,40 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             # Parse controller info
             controller_info=$(echo "$sp_bt" | grep -A 50 "controller_properties" 2>/dev/null)
             
-            # Extract Bluetooth version (e.g., "5.3")
+            # Enhanced Bluetooth version detection (5.0, 5.1, 5.2, 5.3, 5.4)
+            bt_version=""
+            
+            # Method 1: Check controller_supportedServices for version string
             bt_version=$(echo "$controller_info" | grep -o '"controller_supportedServices"[^]]*' | grep -o 'Bluetooth [0-9.]*' | head -1 | awk '{print $2}')
+            
+            # Method 2: Check for Bluetooth Core Spec version in controller properties
             if [ -z "$bt_version" ]; then
-                # Try alternate method
+                bt_version=$(echo "$sp_bt" | grep -o '"controller_blueToothCoreSpecVersion"[^,]*' | cut -d'"' -f4)
+            fi
+            
+            # Method 3: Extract from chipset info (may contain version like "5.3")
+            if [ -z "$bt_version" ]; then
                 bt_version=$(echo "$sp_bt" | grep -o '"controller_chipset"[^,]*' | grep -o '[0-9]\\.[0-9]' | head -1)
             fi
+            
+            # Method 4: Parse from LMP version (Link Manager Protocol version maps to BT version)
+            # LMP 11 = BT 5.3, LMP 10 = BT 5.1, LMP 9 = BT 5.0
+            if [ -z "$bt_version" ]; then
+                lmp_version=$(echo "$sp_bt" | grep -o '"controller_LMPVersion"[^,]*' | grep -o '[0-9]*' | head -1)
+                case "$lmp_version" in
+                    12) bt_version="5.4";;
+                    11) bt_version="5.3";;
+                    10) bt_version="5.1";;
+                    9)  bt_version="5.0";;
+                    8)  bt_version="4.2";;
+                    7)  bt_version="4.1";;
+                    6)  bt_version="4.0";;
+                    *)  bt_version="5.0";;  # Default to 5.0 for modern Macs
+                esac
+            fi
+            
+            # Default to 5.0 if still not found (most modern Macs have at least BT 5.0)
+            bt_version="${bt_version:-5.0}"
             
             # Get controller address (MAC)
             bt_address=$(echo "$sp_bt" | grep -o '"controller_address"[^,]*' | cut -d'"' -f4)
@@ -1086,8 +1180,30 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 is_discoverable="false"
             fi
             
-            # Count connected devices
-            connected_count=$(echo "$sp_bt" | grep -c '"device_connected" *: *"attrib_Yes"' || echo "0")
+            # Count connected devices (ensure it's a clean number)
+            connected_count=$(echo "$sp_bt" | grep -o '"device_connected" *: *"attrib_Yes"' 2>/dev/null | wc -l | tr -d ' ')
+            connected_count="${connected_count:-0}"
+            
+            # Get supported features for BT 5.x (LE features, extended advertising, etc.)
+            supports_le=$(echo "$sp_bt" | grep -qi "Low Energy" && echo "true" || echo "false")
+            
+            # Check for specific BT 5.x features
+            supports_extended_advertising="false"
+            supports_2m_phy="false"
+            supports_coded_phy="false"
+            
+            if [ "$bt_version" != "${bt_version#5.}" ]; then
+                # BT 5.x detected, check for specific features
+                if echo "$sp_bt" | grep -qi "Extended Advertising\\|LE Extended"; then
+                    supports_extended_advertising="true"
+                fi
+                if echo "$sp_bt" | grep -qi "2M PHY\\|LE 2M"; then
+                    supports_2m_phy="true"
+                fi
+                if echo "$sp_bt" | grep -qi "Coded PHY\\|LE Coded"; then
+                    supports_coded_phy="true"
+                fi
+            fi
             
             echo "{"
             echo "  \\"isAvailable\\": true,"
@@ -1095,19 +1211,31 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             echo "  \\"manufacturer\\": \\"Apple\\","
             echo "  \\"macAddress\\": \\"${bt_address:-}\\","
             echo "  \\"status\\": \\"$status\\","
-            echo "  \\"bluetoothVersion\\": \\"${bt_version:-5.0}\\","
+            echo "  \\"bluetoothVersion\\": \\"$bt_version\\","
             echo "  \\"firmwareVersion\\": \\"${firmware:-}\\","
             echo "  \\"transport\\": \\"${transport:-}\\","
             echo "  \\"discoverable\\": $is_discoverable,"
-            echo "  \\"connectedDevices\\": $connected_count"
+            echo "  \\"connectedDevices\\": $connected_count,"
+            echo "  \\"supportsLE\\": $supports_le,"
+            echo "  \\"supportsExtendedAdvertising\\": $supports_extended_advertising,"
+            echo "  \\"supports2MPHY\\": $supports_2m_phy,"
+            echo "  \\"supportsCodedPHY\\": $supports_coded_phy"
             echo "}"
         """
-        
-        let result = try await executeWithFallback(
+        var result = try await executeWithFallback(
             osquery: nil,
             bash: bashScript,
             python: nil
         )
+        
+        // If the result is wrapped in "output" (JSON parsing failed), try to unwrap it
+        if let outputString = result["output"] as? String {
+            // Try to parse the JSON string
+            if let outputData = outputString.data(using: .utf8),
+               let unwrapped = try? JSONSerialization.jsonObject(with: outputData) as? [String: Any] {
+                result = unwrapped
+            }
+        }
         
         // Check if Bluetooth is available
         if let available = result["isAvailable"] as? Bool, !available {
@@ -1118,6 +1246,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     }
     
     // MARK: - Battery Info (osquery + bash fallback)
+
     
     private func collectBatteryInfo() async throws -> [String: Any] {
         // osquery battery table provides: cycle_count, designed_capacity, health, etc.
@@ -1314,139 +1443,376 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         )
     }
     
-    // MARK: - Storage Directory Analysis (for directory breakdown like Windows)
+    // MARK: - APFS Purgeable Space Analysis
     
-    private func collectStorageDirectoryAnalysis(forDrivePath: String = "/") async throws -> [[String: Any]] {
-        // Analyze root-level directories on macOS
-        // This mirrors Windows' directory breakdown functionality
-        // Categories: Applications, Users, Library, System, Other
+    /// Get detailed breakdown of APFS purgeable space (local snapshots, caches, etc.)
+    /// This helps explain the gap between visible directory sizes and reported disk usage
+    private func collectAPFSPurgeableSpaceDetails() async throws -> [String: Any] {
         let bashScript = """
-            # Format bytes to human readable
-            format_size() {
-                local size=$1
-                if [ $size -ge 1099511627776 ]; then
-                    printf "%.1f TB" $(echo "scale=1; $size / 1099511627776" | bc)
-                elif [ $size -ge 1073741824 ]; then
-                    printf "%.1f GB" $(echo "scale=1; $size / 1073741824" | bc)
-                elif [ $size -ge 1048576 ]; then
-                    printf "%.1f MB" $(echo "scale=1; $size / 1048576" | bc)
-                elif [ $size -ge 1024 ]; then
-                    printf "%.1f KB" $(echo "scale=1; $size / 1024" | bc)
-                else
-                    printf "%d B" $size
+            # Get APFS container and volume info with purgeable space
+            root_device=$(/usr/sbin/diskutil info / 2>/dev/null | grep "Device Node:" | awk '{print $3}')
+            container_id=$(/usr/sbin/diskutil apfs list 2>/dev/null | grep -B10 "$root_device" | grep "Container Reference:" | head -1 | awk '{print $3}')
+            
+            # Get local snapshots list
+            snapshots=$(/usr/bin/tmutil listlocalsnapshots / 2>/dev/null | grep "com.apple" | wc -l | tr -d ' ')
+            
+            # Get snapshot space estimate using tmutil
+            snapshot_space="0"
+            if command -v tmutil &>/dev/null; then
+                # Get space used by local snapshots
+                snapshot_info=$(/usr/bin/tmutil listlocalsnapshots / 2>/dev/null 2>&1)
+                if [ -n "$snapshot_info" ]; then
+                    snapshot_space=$(echo "$snapshot_info" | wc -l | tr -d ' ')
                 fi
-            }
-            
-            # Get total disk capacity
-            total_capacity=$(df -P / | awk 'NR==2 {print $2 * 512}')
-            
-            # Analyze a directory and output JSON
-            analyze_directory() {
-                local path="$1"
-                local name="$2"
-                local category="$3"
-                local depth="$4"
-                
-                if [ ! -d "$path" ]; then
-                    return
-                fi
-                
-                # Get size using du with better flags
-                # -x: don't cross filesystems (stay on same volume)
-                # -d 0: depth 0 (just the directory itself)
-                local size_output=$(du -x -d 0 -k "$path" 2>/dev/null | cut -f1)
-                local size_bytes=$((${size_output:-0} * 1024))
-                
-                # Count files and subdirectories
-                local file_count=$(find "$path" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
-                local subdir_count=$(find "$path" -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
-                subdir_count=$((subdir_count - 1))  # Exclude the directory itself
-                
-                # Get last modified time
-                local last_modified=$(stat -f "%Sm" -t "%Y-%m-%dT%H:%M:%SZ" "$path" 2>/dev/null || echo "")
-                
-                # Calculate percentage of drive
-                local percentage=0
-                if [ $total_capacity -gt 0 ]; then
-                    percentage=$(echo "scale=2; $size_bytes * 100 / $total_capacity" | bc)
-                fi
-                
-                # Format size
-                local formatted_size=$(format_size $size_bytes)
-                
-                echo "{"
-                echo "  \\"name\\": \\"$name\\","
-                echo "  \\"path\\": \\"$path\\","
-                echo "  \\"size\\": $size_bytes,"
-                echo "  \\"depth\\": $depth,"
-                echo "  \\"category\\": \\"$category\\","
-                echo "  \\"driveRoot\\": \\"/\\","
-                echo "  \\"fileCount\\": $file_count,"
-                echo "  \\"largeFiles\\": [],"
-                echo "  \\"lastModified\\": \\"$last_modified\\","
-                echo "  \\"formattedSize\\": \\"$formatted_size\\","
-                echo "  \\"subdirectories\\": [],"
-                echo "  \\"percentageOfDrive\\": $percentage,"
-                echo "  \\"subdirectoryCount\\": $subdir_count"
-                echo "}"
-            }
-            
-            echo "["
-            
-            # Applications
-            analyze_directory "/Applications" "Applications" "Applications" 1
-            echo ","
-            
-            # Users
-            analyze_directory "/Users" "Users" "Users" 1
-            echo ","
-            
-            # Library (system-wide)
-            analyze_directory "/Library" "Library" "System" 1
-            echo ","
-            
-            # System
-            analyze_directory "/System" "System" "System" 1
-            echo ","
-            
-            # private (contains var, tmp, etc)
-            analyze_directory "/private" "Private" "System" 1
-            echo ","
-            
-            # opt (Homebrew, etc)
-            if [ -d "/opt" ]; then
-                analyze_directory "/opt" "opt" "Applications" 1
-                echo ","
             fi
             
-            # usr/local (Homebrew, etc)
-            analyze_directory "/usr/local" "usr/local" "Applications" 2
+            # Get volume info with purgeable breakdown
+            vol_info=$(/usr/sbin/diskutil info / 2>/dev/null)
+            container_free=$(echo "$vol_info" | grep "Container Free Space:" | awk -F'(' '{print $2}' | awk '{print $1}')
+            volume_free=$(echo "$vol_info" | grep "Volume Free Space:" | awk -F'(' '{print $2}' | awk '{print $1}' | head -1)
+            purgeable=$(echo "$vol_info" | grep "Purgeable Space:" | awk -F'(' '{print $2}' | awk '{print $1}')
             
-            echo "]"
+            echo "{"
+            echo "  \\"localSnapshotCount\\": $snapshots,"
+            echo "  \\"containerFreeBytes\\": \\"${container_free:-0}\\","
+            echo "  \\"volumeFreeBytes\\": \\"${volume_free:-0}\\","
+            echo "  \\"purgeableBytes\\": \\"${purgeable:-0}\\","
+            echo "  \\"containerId\\": \\"${container_id:-unknown}\\""
+            echo "}"
         """
         
-        let result = try await executeWithFallback(
+        return try await executeWithFallback(
             osquery: nil,
             bash: bashScript,
             python: nil
         )
+    }
+    
+    // MARK: - Storage Directory Analysis (Native Swift - inherits FDA permissions)
+    
+    /// Native Swift implementation of storage directory analysis using FileManager
+    /// This inherits Full Disk Access permissions from the signed binary
+    private func collectStorageDirectoryAnalysis(forDrivePath drivePath: String = "/") async throws -> [[String: Any]] {
+        let fileManager = FileManager.default
         
-        // Result should be an array; if dictionary, extract items
-        if let items = result["items"] as? [[String: Any]] {
-            return items
-        } else if let array = result as? [[String: Any]] {
-            return array
+        // Get total disk capacity
+        let totalCapacity: Int64
+        do {
+            let attrs = try fileManager.attributesOfFileSystem(forPath: drivePath)
+            totalCapacity = (attrs[.systemSize] as? Int64) ?? 0
+        } catch {
+            totalCapacity = 0
         }
         
-        return []
+        // Define directories to analyze with their categories
+        struct DirectoryInfo {
+            let path: String
+            let name: String
+            let category: String
+            let depth: Int
+            let analyzeChildren: Bool  // For /Users, we want per-user breakdown
+        }
+        
+        var directoriesToAnalyze: [DirectoryInfo] = [
+            DirectoryInfo(path: "/Applications", name: "Applications", category: "Applications", depth: 1, analyzeChildren: false),
+            DirectoryInfo(path: "/Library", name: "Library", category: "System", depth: 1, analyzeChildren: false),
+            DirectoryInfo(path: "/System", name: "System", category: "System", depth: 1, analyzeChildren: false),
+            DirectoryInfo(path: "/private", name: "Private", category: "System", depth: 1, analyzeChildren: false),
+        ]
+        
+        // Add /opt if it exists
+        if fileManager.fileExists(atPath: "/opt") {
+            directoriesToAnalyze.append(DirectoryInfo(path: "/opt", name: "opt", category: "Applications", depth: 1, analyzeChildren: false))
+        }
+        
+        // Add /usr/local if it exists  
+        if fileManager.fileExists(atPath: "/usr/local") {
+            directoriesToAnalyze.append(DirectoryInfo(path: "/usr/local", name: "usr/local", category: "Applications", depth: 2, analyzeChildren: false))
+        }
+        
+        var results: [[String: Any]] = []
+        
+        // Analyze each directory
+        for dirInfo in directoriesToAnalyze {
+            print("[\(timestamp())] Analyzing directory: \(dirInfo.path)")
+            if let analysis = analyzeDirectory(at: dirInfo.path, name: dirInfo.name, category: dirInfo.category, depth: dirInfo.depth, totalCapacity: totalCapacity) {
+                results.append(analysis)
+                print("[\(timestamp())] Completed: \(dirInfo.path)")
+            } else {
+                print("[\(timestamp())] Skipped (doesn't exist): \(dirInfo.path)")
+            }
+        }
+        
+        // Special handling for /Users - ONLY use fast du command (no FileManager enumeration)
+        print("[\(timestamp())] Starting /Users analysis...")
+        let usersDir = "/Users"
+        if fileManager.fileExists(atPath: usersDir) {
+            print("[\(timestamp())] Getting /Users total size with du (fast)...")
+            
+            // Get total /Users size with fast du command
+            var totalUsersSize: Int64 = 0
+            if let size = await fastDirectorySizeWithDu(path: usersDir) {
+                totalUsersSize = size
+                print("[\(timestamp())] /Users total: \(formatBytes(size))")
+            }
+            
+            // Get individual user folder sizes using fast du command
+            var userBreakdown: [[String: Any]] = []
+            do {
+                let userFolders = try fileManager.contentsOfDirectory(atPath: usersDir)
+                print("[\(timestamp())] Found \(userFolders.count) items in /Users")
+                for userFolder in userFolders {
+                    // Skip hidden folders
+                    if userFolder.hasPrefix(".") { continue }
+                    
+                    let userPath = (usersDir as NSString).appendingPathComponent(userFolder)
+                    var isDir: ObjCBool = false
+                    if fileManager.fileExists(atPath: userPath, isDirectory: &isDir), isDir.boolValue {
+                        print("[\(timestamp())] Getting size for: \(userFolder) (using du)")
+                        // Use fast du command instead of deep enumeration
+                        if let size = await fastDirectorySizeWithDu(path: userPath) {
+                            let userInfo: [String: Any] = [
+                                "name": userFolder,
+                                "path": userPath,
+                                "size": size,
+                                "depth": 2,
+                                "category": "Users",
+                                "driveRoot": "/",
+                                "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity)
+                            ]
+                            userBreakdown.append(userInfo)
+                            print("[\(timestamp())] Completed: \(userFolder) - \(formatBytes(size))")
+                        }
+                    }
+                }
+            } catch {
+                // Continue without user breakdown
+                print("[\(timestamp())] Error listing user folders: \(error)")
+            }
+            
+            // Build /Users analysis without slow FileManager enumeration
+            var usersAnalysis: [String: Any] = [
+                "name": "Users",
+                "path": usersDir,
+                "size": totalUsersSize,
+                "depth": 1,
+                "category": "Users",
+                "driveRoot": "/",
+                "percentageOfDrive": calculatePercentageOfDrive(size: totalUsersSize, capacity: totalCapacity)
+            ]
+            
+            if !userBreakdown.isEmpty {
+                usersAnalysis["subdirectories"] = userBreakdown
+            }
+            results.append(usersAnalysis)
+        }
+        
+        return results
+    }
+    
+    /// Analyze a single directory and return its metadata
+    private func analyzeDirectory(at path: String, name: String, category: String, depth: Int, totalCapacity: Int64) -> [String: Any]? {
+        let fileManager = FileManager.default
+        
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
+            return nil
+        }
+        
+        // Get directory size using native Swift
+        let size = directorySize(at: path)
+        
+        // Get file and subdirectory counts (shallow)
+        var fileCount = 0
+        var subdirCount = 0
+        do {
+            let contents = try fileManager.contentsOfDirectory(atPath: path)
+            for item in contents {
+                let itemPath = (path as NSString).appendingPathComponent(item)
+                var itemIsDir: ObjCBool = false
+                if fileManager.fileExists(atPath: itemPath, isDirectory: &itemIsDir) {
+                    if itemIsDir.boolValue {
+                        subdirCount += 1
+                    } else {
+                        fileCount += 1
+                    }
+                }
+            }
+        } catch {
+            // Permission denied or other error - continue with 0 counts
+        }
+        
+        // Get last modified date
+        var lastModified = ""
+        do {
+            let attrs = try fileManager.attributesOfItem(atPath: path)
+            if let modDate = attrs[.modificationDate] as? Date {
+                lastModified = ISO8601DateFormatter().string(from: modDate)
+            }
+        } catch {
+            // Continue without modification date
+        }
+        
+        // Calculate percentage of drive using clamped helper (prevents >100% values)
+        let percentage = calculatePercentageOfDrive(size: size, capacity: totalCapacity)
+        
+        return [
+            "name": name,
+            "path": path,
+            "size": size,
+            "depth": depth,
+            "category": category,
+            "driveRoot": "/",
+            "fileCount": fileCount,
+            "largeFiles": [] as [[String: Any]],
+            "lastModified": lastModified,
+            "formattedSize": formatSize(size),
+            "subdirectories": [] as [[String: Any]],
+            "percentageOfDrive": round(percentage * 100) / 100,  // Round to 2 decimal places
+            "subdirectoryCount": subdirCount
+        ]
+    }
+    
+    /// Calculate total size of a directory recursively using FileManager
+    /// This inherits FDA permissions from the signed binary
+    /// NOTE: Includes hidden files for accurate sizing, but skips symbolic links
+    /// to avoid double-counting (e.g., /private/var/vm -> /var/vm)
+    private func directorySize(at path: String) -> Int64 {
+        let fileManager = FileManager.default
+        var totalSize: Int64 = 0
+        
+        // Use enumerator for recursive traversal
+        // Include hidden files for accurate size calculation
+        // Skip symbolic links to prevent double-counting
+        guard let enumerator = fileManager.enumerator(
+            at: URL(fileURLWithPath: path),
+            includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
+            options: [],  // Don't skip hidden files - they count toward disk usage!
+            errorHandler: { (url, error) -> Bool in
+                // Continue on errors (permission denied, etc)
+                return true
+            }
+        ) else {
+            return 0
+        }
+        
+        for case let fileURL as URL in enumerator {
+            do {
+                let resourceValues = try fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey])
+                
+                // Skip symbolic links to avoid double-counting
+                if resourceValues.isSymbolicLink == true {
+                    continue
+                }
+                
+                if resourceValues.isRegularFile == true {
+                    totalSize += Int64(resourceValues.fileSize ?? 0)
+                }
+            } catch {
+                // Skip files we can't read
+                continue
+            }
+        }
+        
+        return totalSize
+    }
+    
+    /// Fast directory size calculation using du command (10-100x faster than FileManager for large directories)
+    /// Use this for user home directories which can contain millions of files
+    private func fastDirectorySizeWithDu(path: String) async -> Int64? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/du")
+        process.arguments = ["-sk", path]  // -s = summary only, -k = kilobytes
+        
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()  // Suppress error output
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let output = String(data: data, encoding: .utf8) {
+                // Output format: "123456\t/path/to/directory"
+                let components = output.components(separatedBy: "\t")
+                if let sizeStr = components.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   let sizeKB = Int64(sizeStr) {
+                    return sizeKB * 1024  // Convert KB to bytes
+                }
+            }
+        } catch {
+            return nil
+        }
+        
+        return nil
+    }
+    
+    /// Format bytes to human-readable string
+    private func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB, .useTB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+    
+    /// Format bytes to human-readable string
+    private func formatSize(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB, .useTB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+    
+    /// Calculate percentage of drive, clamped to valid range (0-100%)
+    /// Returns 0 if capacity is invalid, and caps at 100% to prevent impossible values
+    /// caused by measurement errors or double-counting (e.g., symlinks)
+    private func calculatePercentageOfDrive(size: Int64, capacity: Int64) -> Double {
+        guard capacity > 0, size > 0 else { return 0 }
+        
+        let percentage = Double(size) * 100.0 / Double(capacity)
+        
+        // Cap at 100% - any value over 100% indicates measurement error
+        if percentage > 100 {
+            print("⚠️  Calculated percentage \(String(format: "%.2f", percentage))% exceeds 100%, capping to 100% (size: \(size), capacity: \(capacity))")
+            return 100.0
+        }
+        
+        return percentage
     }
     
     /// Adds rootDirectories to a storage device for directory breakdown visualization
     private func addStorageAnalysisToDevice(_ device: inout [String: Any], directoryAnalysis: [[String: Any]]) {
-        // Add storage analysis enabled flag
         device["storageAnalysisEnabled"] = true
         device["lastAnalyzed"] = ISO8601DateFormatter().string(from: Date())
         device["rootDirectories"] = directoryAnalysis
+    }
+    
+    /// Parse display firmware version from "Version X.Y (Build ZZ...)" to "X.Y.ZZ"
+    /// Example: "Version 17.0 (Build 21A329)" -> "17.0.21A329"
+    private func parseFirmwareVersion(_ firmware: String) -> String {
+        // Pattern: "Version X.Y (Build ZZZZZ)"
+        let pattern = "Version\\s+([0-9.]+)\\s+\\(Build\\s+([A-Z0-9]+)\\)"
+        
+        if let regex = try? NSRegularExpression(pattern: pattern),
+           let match = regex.firstMatch(in: firmware, range: NSRange(firmware.startIndex..., in: firmware)) {
+            
+            // Extract version (e.g., "17.0")
+            if let versionRange = Range(match.range(at: 1), in: firmware) {
+                let version = String(firmware[versionRange])
+                
+                // Extract build identifier (e.g., "21A329")
+                if let buildRange = Range(match.range(at: 2), in: firmware) {
+                    let build = String(firmware[buildRange])
+                    
+                    // Return combined format (e.g., "17.0.21A329")
+                    return "\(version).\(build)"
+                }
+            }
+        }
+        
+        // If parsing fails, return original firmware string
+        return firmware
     }
 }
     

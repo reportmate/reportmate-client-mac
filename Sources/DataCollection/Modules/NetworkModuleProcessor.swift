@@ -59,7 +59,6 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         // Unwrap logic
         var rawInterfaces: [RawNetworkInterface] = []
-        var hostname: String? = nil
         var fqdn: String? = nil
         var activeConnection: ActiveConnection? = nil
         var vpnConnections: [VPNConnection] = []
@@ -85,7 +84,7 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 }
             }
             
-            hostname = rawData["hostname"] as? String
+            _ = rawData["hostname"] as? String  // hostname is collected but not currently used
             fqdn = rawData["fqdn"] as? String
             
             if let activeDict = rawData["activeConnection"] as? [String: Any] {
