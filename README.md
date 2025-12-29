@@ -515,24 +515,15 @@ jobs:
 
 ReportMate requires **Full Disk Access** and other privacy permissions to collect comprehensive system data. We provide a Configuration Profile (`.mobileconfig`) for easy deployment:
 
-**Quick Installation:**
-```bash
-# Install via helper script (detects Team ID automatically)
-sudo ./scripts/install-privacy-profile.sh
-
-# Or install manually
-sudo profiles install -path ReportMate-PrivacyPermissions.mobileconfig
-```
-
 **Permissions Granted:**
-- ✅ Full Disk Access (SystemPolicyAllFiles) - Read `/Library/`, `/System/`, `/Users/`, TCC database
-- ✅ System Policy Admin Files - MDM enrollment data, configuration profiles
-- ✅ Apple Events - System automation (optional)
+- Full Disk Access (SystemPolicyAllFiles) - Read `/Library/`, `/System/`, `/Users/`, TCC database
+- System Policy Admin Files - MDM enrollment data, configuration profiles
+- Apple Events - System automation (optional)
 
 **For Enterprise Deployment:**
 Deploy the `ReportMate-PrivacyPermissions.mobileconfig` via your MDM solution (Jamf Pro, Intune, Workspace ONE, etc.) to automatically grant permissions across all managed devices.
 
-**📖 Full Documentation:** See [PRIVACY_PROFILE_README.md](PRIVACY_PROFILE_README.md) for:
+**Full Documentation:** See [PRIVACY_PROFILE_README.md](PRIVACY_PROFILE_README.md) for:
 - Detailed permission explanations
 - MDM deployment guides
 - Team ID configuration
