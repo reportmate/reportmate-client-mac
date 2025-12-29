@@ -354,7 +354,8 @@ struct ReportMateClient: AsyncParsableCommand {
             finalDeviceId = serialNumber.sha256UUID()
         }
         
-        let deviceInfo = DeviceInfo(
+        // Device info captured for potential future use (logging, debugging)
+        _ = DeviceInfo(
             deviceId: finalDeviceId,
             deviceName: deviceName,
             serialNumber: serialNumber,
@@ -382,13 +383,6 @@ struct ReportMateClient: AsyncParsableCommand {
         let unifiedPayload = UnifiedDevicePayload(
             metadata: metadata,
             events: [],
-            modules: collectedData
-        )
-        
-        // Also keep legacy payload for backwards compatibility/debugging
-        let legacyPayload = DeviceDataPayload(
-            deviceInfo: deviceInfo,
-            collectionTimestamp: Date(),
             modules: collectedData
         )
         
