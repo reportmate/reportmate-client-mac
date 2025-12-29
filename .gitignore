@@ -147,3 +147,5 @@ dev/
 
 # Profiling
 *.trace
+# Build configuration with sensitive info
+.env
