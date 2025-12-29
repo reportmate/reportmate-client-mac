@@ -1,0 +1,111 @@
+#!/bin/zsh
+
+#  Postinstall script for ReportMate
+#  Installs LaunchDaemons and configures the client
+#
+#  Based on macadmins/outset pattern
+
+# Configuration
+LD_ROOT="/Library/LaunchDaemons"
+APP_PATH="/usr/local/reportmate/ReportMate.app"
+APP_ROOT="${APP_PATH}/Contents"
+LOG_DIR="/Library/Managed Reports/logs"
+
+log_message() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+log_message "Starting ReportMate postinstall..."
+
+# Ensure we are running as root
+if [ "$EUID" -ne 0 ]; then
+    log_message "ERROR: This script must be run as root"
+    exit 1
+fi
+
+# Create log directory
+mkdir -p "$LOG_DIR"
+chmod 755 "$LOG_DIR"
+
+# Register the app bundle with Launch Services
+log_message "Registering app bundle..."
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister "${APP_PATH}"
+
+# LaunchDaemons to install
+DAEMONS=(
+    "com.github.reportmate.boot.plist"
+    "com.github.reportmate.hourly.plist"
+    "com.github.reportmate.fourhourly.plist"
+    "com.github.reportmate.daily.plist"
+)
+
+# Unload existing daemons if present
+log_message "Removing any existing LaunchDaemons..."
+for daemon in ${DAEMONS}; do
+    daemon_path="${LD_ROOT}/${daemon}"
+    if [ -e "${daemon_path}" ]; then
+        log_message "  Unloading: ${daemon}"
+        /bin/launchctl bootout system "${daemon_path}" 2>/dev/null
+        rm -f "${daemon_path}"
+    fi
+done
+
+# Copy LaunchDaemons from app bundle
+log_message "Installing LaunchDaemons..."
+for daemon in ${DAEMONS}; do
+    source_path="${APP_ROOT}/Library/LaunchDaemons/${daemon}"
+    dest_path="${LD_ROOT}/${daemon}"
+    
+    if [ -e "${source_path}" ]; then
+        log_message "  Installing: ${daemon}"
+        cp "${source_path}" "${dest_path}"
+        chmod 644 "${dest_path}"
+        chown root:wheel "${dest_path}"
+        
+        # Load the daemon
+        /bin/launchctl bootstrap system "${dest_path}"
+    else
+        log_message "  WARNING: Source not found: ${source_path}"
+    fi
+done
+
+# Make the wrapper script executable
+WRAPPER_SCRIPT="/usr/local/reportmate/managedreportsrunner"
+if [ -e "${WRAPPER_SCRIPT}" ]; then
+    chmod 755 "${WRAPPER_SCRIPT}"
+fi
+
+# Set up PATH (create paths.d entry)
+echo "/usr/local/reportmate" > /etc/paths.d/reportmate 2>/dev/null || true
+
+# Set preferences if API_URL and API_KEY are provided
+DOMAIN="com.github.reportmate"
+PREFS_PATH="/Library/Preferences/${DOMAIN}"
+
+# Check for environment variables (injected by munkipkg or similar)
+if [ -n "${REPORTMATE_API_URL}" ]; then
+    log_message "Setting ApiUrl..."
+    defaults write "$PREFS_PATH" ApiUrl -string "${REPORTMATE_API_URL}"
+fi
+
+if [ -n "${REPORTMATE_API_KEY}" ]; then
+    log_message "Setting ApiKey..."
+    defaults write "$PREFS_PATH" ApiKey -string "${REPORTMATE_API_KEY}"
+fi
+
+# Ensure preferences file has correct permissions
+PLIST_PATH="${PREFS_PATH}.plist"
+if [ -f "$PLIST_PATH" ]; then
+    chmod 644 "$PLIST_PATH"
+fi
+
+# Reload preferences
+killall cfprefsd 2>/dev/null
+
+log_message "ReportMate postinstall complete."
+
+# Run boot collection immediately (optional - remove if not desired)
+# log_message "Running initial collection..."
+# "${APP_ROOT}/MacOS/managedreportsrunner" run &
+
+exit 0
