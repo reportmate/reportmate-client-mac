@@ -31,7 +31,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let kernelInfo = try await kernelData
         let launchItems = try await launchItemsData
         let launchdServices = try await launchdServicesData
-        let softwareUpdates = try await softwareUpdatesData
+        _ = try await softwareUpdatesData  // Collected but not used; pendingAppleUpdates provides this data
         let pendingUpdates = try await pendingAppleUpdatesData
         let systemConfig = try await systemConfigData
         let environment = try await environmentData
@@ -475,7 +475,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     "rootDirectory": details["root_directory"] as Any,
                     "standardOutPath": details["stdout_path"] as Any,
                     "standardErrorPath": details["stderr_path"] as Any,
-                    "exitTimeout": nil as Int?,
+                    "exitTimeout": Optional<Int>.none as Any,
                     "startInterval": Int(details["start_interval"] as? String ?? "") as Any,
                     "watchPaths": watchPaths,
                     "queueDirectories": queueDirs
@@ -648,9 +648,6 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 
                 return normalized
             }
-        } else if let items = result as? [[String: Any]] {
-            // Bash fallback format
-            updates = items
         }
         
         return updates
