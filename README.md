@@ -511,4 +511,32 @@ jobs:
 3. **Sandboxing**: Evaluate sandboxing requirements
 4. **Permissions**: Binary requires admin privileges for full data collection
 
+### Privacy Permissions
+
+ReportMate requires **Full Disk Access** and other privacy permissions to collect comprehensive system data. We provide a Configuration Profile (`.mobileconfig`) for easy deployment:
+
+**Quick Installation:**
+```bash
+# Install via helper script (detects Team ID automatically)
+sudo ./scripts/install-privacy-profile.sh
+
+# Or install manually
+sudo profiles install -path ReportMate-PrivacyPermissions.mobileconfig
+```
+
+**Permissions Granted:**
+- ✅ Full Disk Access (SystemPolicyAllFiles) - Read `/Library/`, `/System/`, `/Users/`, TCC database
+- ✅ System Policy Admin Files - MDM enrollment data, configuration profiles
+- ✅ Apple Events - System automation (optional)
+
+**For Enterprise Deployment:**
+Deploy the `ReportMate-PrivacyPermissions.mobileconfig` via your MDM solution (Jamf Pro, Intune, Workspace ONE, etc.) to automatically grant permissions across all managed devices.
+
+**📖 Full Documentation:** See [PRIVACY_PROFILE_README.md](PRIVACY_PROFILE_README.md) for:
+- Detailed permission explanations
+- MDM deployment guides
+- Team ID configuration
+- Troubleshooting steps
+- Verification commands
+
 This project represents a complete rewrite optimized for macOS while maintaining compatibility with the ReportMate ecosystem. The build system provides a complete solution for developing, testing, and distributing the ReportMate macOS client with comprehensive tooling for code signing, packaging, and deployment.
