@@ -115,10 +115,11 @@ public class ConfigurationManager {
         var config: [String: Any] = [:]
         
         // Map Configuration Profile keys to internal configuration
+        // Passphrase is for device-to-api authentication
         let keyMappings: [String: String] = [
             "ApiUrl": "ApiUrl",
             "DeviceId": "DeviceId", 
-            "ApiKey": "ApiKey",
+            "Passphrase": "Passphrase",
             "CollectionInterval": "CollectionInterval",
             "LogLevel": "LogLevel",
             "EnabledModules": "EnabledModules"
@@ -141,7 +142,7 @@ public class ConfigurationManager {
         let envMappings: [String: String] = [
             "REPORTMATE_API_URL": "ApiUrl",
             "REPORTMATE_DEVICE_ID": "DeviceId",
-            "REPORTMATE_API_KEY": "ApiKey", 
+            "REPORTMATE_PASSPHRASE": "Passphrase",
             "REPORTMATE_COLLECTION_INTERVAL": "CollectionInterval",
             "REPORTMATE_LOG_LEVEL": "LogLevel"
         ]
@@ -187,7 +188,9 @@ public class ConfigurationManager {
 public struct ReportMateConfiguration {
     public var apiUrl: String?
     public var deviceId: String?
-    public var apiKey: String?
+    /// Client passphrase for API authentication (X-Client-Passphrase header)
+    /// Configured via REPORTMATE_PASSPHRASE environment variable or Passphrase plist key
+    public var passphrase: String?
     public var collectionInterval: Int = 3600 // 1 hour default
     public var logLevel: String = "info"
     public var enabledModules: [String] = [
@@ -216,7 +219,7 @@ public struct ReportMateConfiguration {
     mutating func merge(with other: [String: Any]) {
         if let apiUrl = other["ApiUrl"] as? String { self.apiUrl = apiUrl }
         if let deviceId = other["DeviceId"] as? String { self.deviceId = deviceId }
-        if let apiKey = other["ApiKey"] as? String { self.apiKey = apiKey }
+        if let passphrase = other["Passphrase"] as? String { self.passphrase = passphrase }
         if let interval = other["CollectionInterval"] as? Int { self.collectionInterval = interval }
         if let logLevel = other["LogLevel"] as? String { self.logLevel = logLevel }
         if let modules = other["EnabledModules"] as? [String] { self.enabledModules = modules }
