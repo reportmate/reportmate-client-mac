@@ -78,29 +78,10 @@ fi
 # Set up PATH (create paths.d entry)
 echo "/usr/local/reportmate" > /etc/paths.d/reportmate 2>/dev/null || true
 
-# Set preferences if API_URL and API_KEY are provided
-DOMAIN="com.github.reportmate"
-PREFS_PATH="/Library/Preferences/${DOMAIN}"
-
-# Check for environment variables (injected by munkipkg or similar)
-if [ -n "${REPORTMATE_API_URL}" ]; then
-    log_message "Setting ApiUrl..."
-    defaults write "$PREFS_PATH" ApiUrl -string "${REPORTMATE_API_URL}"
-fi
-
-if [ -n "${REPORTMATE_API_KEY}" ]; then
-    log_message "Setting ApiKey..."
-    defaults write "$PREFS_PATH" ApiKey -string "${REPORTMATE_API_KEY}"
-fi
-
-# Ensure preferences file has correct permissions
-PLIST_PATH="${PREFS_PATH}.plist"
-if [ -f "$PLIST_PATH" ]; then
-    chmod 644 "$PLIST_PATH"
-fi
-
-# Reload preferences
-killall cfprefsd 2>/dev/null
+# Note: API credentials (REPORTMATE_API_URL, REPORTMATE_PASSPHRASE) are configured
+# by the separate ReportMatePrefs package, not this package.
+# This keeps credential management separate from client binary installation.
+# See: clients/macintosh/ReportMatePrefs/
 
 log_message "ReportMate postinstall complete."
 
