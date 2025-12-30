@@ -45,10 +45,9 @@ public class APIClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = TimeInterval(configuration.timeout)
         
-        // Add authentication headers (must match Windows client: X-API-Key and X-Client-Passphrase)
-        if let apiKey = configuration.apiKey {
-            request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
-            request.setValue(apiKey, forHTTPHeaderField: "X-Client-Passphrase")
+        // Add authentication header
+        if let passphrase = configuration.passphrase {
+            request.setValue(passphrase, forHTTPHeaderField: "X-Client-Passphrase")
         }
         
         do {
