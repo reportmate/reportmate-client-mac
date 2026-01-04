@@ -71,7 +71,7 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-log_success() { echo -e "${GREEN}[OKAY] $1${NC}"; }
+log_success() { echo -e "${GREEN}[SUCCESS] $1${NC}"; }
 log_warn()    { echo -e "${YELLOW}[WARN] $1${NC}"; }
 log_error()   { echo -e "${RED}[ERROR] $1${NC}"; }
 log_info()    { echo -e "${CYAN}[INFO] $1${NC}"; }
@@ -423,17 +423,7 @@ if [ "$SIGN" = true ]; then
     log_success "Code signing complete"
 fi
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CREATE VERSION FILE
-# ═══════════════════════════════════════════════════════════════════════════
-
-cat > "${DIST_DIR}/version.txt" << EOF
-Version: ${VERSION}
-Build Date: $(date -u)
-Build Host: $(hostname)
-Swift Version: ${SWIFT_VERSION}
-Configuration: ${CONFIGURATION}
-EOF
+# Version info embedded in binary via AppVersion.swift
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PKG INSTALLER
@@ -467,7 +457,6 @@ if [ "$SKIP_PKG" = false ]; then
     
     # Copy executable to app bundle
     cp "${DIST_DIR}/${PRODUCT_NAME}" "$APP_MACOS/"
-    cp "${DIST_DIR}/version.txt" "$APP_RESOURCES/"
     
     # Create wrapper script for CLI access
     cat > "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner" << 'WRAPPER'
@@ -726,7 +715,7 @@ EOF
     # APP ICON (Liquid Glass / Tahoe icon pipeline for macOS Sequoia+)
     # ═══════════════════════════════════════════════════════════════════════════
     
-    ICON_SOURCE="${SCRIPT_DIR}/Package/Resources/ReportMate.icon"
+    ICON_SOURCE="${SCRIPT_DIR}/packages/client/Resources/ReportMate.icon"
     if [ -d "$ICON_SOURCE" ]; then
         log_info "Compiling Liquid Glass icon (.icon → Assets.car)"
         
@@ -848,15 +837,15 @@ EOF
         log_success "App bundle signed"
     fi
 
-    # Copy scripts from Package/Scripts (new location) or build/pkg/scripts (legacy)
+    # Copy scripts from packages/client/Scripts (new location) or build/pkg/scripts (legacy)
     SCRIPTS_DIR="${OUTPUT_DIR}/scripts"
     rm -rf "$SCRIPTS_DIR"
     mkdir -p "$SCRIPTS_DIR"
     
-    # Use new Package/Scripts if available, otherwise fall back to legacy
-    PKG_SCRIPTS_DIR="${SCRIPT_DIR}/Package/Scripts"
+    # Use new packages/client/Scripts if available, otherwise fall back to legacy
+    PKG_SCRIPTS_DIR="${SCRIPT_DIR}/packages/client/Scripts"
     if [ -d "$PKG_SCRIPTS_DIR" ]; then
-        log_info "Using Package/Scripts for installer scripts"
+        log_info "Using packages/client/Scripts for installer scripts"
         for script in "$PKG_SCRIPTS_DIR/"*; do
             if [ -f "$script" ]; then
                 script_name=$(basename "$script")
@@ -1108,7 +1097,7 @@ if [ "$SKIP_ZIP" = false ]; then
     ZIP_NAME="ReportMate-${VERSION}.zip"
     
     cd "${DIST_DIR}"
-    zip -r "${ZIP_NAME}" "${PRODUCT_NAME}" version.txt
+    zip -r "${ZIP_NAME}" "${PRODUCT_NAME}"
     cd "${SCRIPT_DIR}"
     
     log_success "ZIP created: ${DIST_DIR}/${ZIP_NAME}"
@@ -1128,7 +1117,6 @@ if [ "$SKIP_DMG" = false ] && command -v hdiutil &> /dev/null; then
     mkdir -p "$DMG_DIR/ReportMate"
     
     cp "${DIST_DIR}/${PRODUCT_NAME}" "$DMG_DIR/ReportMate/"
-    cp "${DIST_DIR}/version.txt" "$DMG_DIR/ReportMate/"
     
     # Create install script
     cat > "$DMG_DIR/Install.sh" << 'EOF'
