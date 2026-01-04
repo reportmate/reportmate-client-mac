@@ -161,9 +161,9 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             
             // Handle logical processors
             if let logicalStr = procDict["cpu_logical_cores"] as? String, let logical = Int(logicalStr) {
-                windowsProcessor["logicalProcessors"] = logical
+                windowsProcessor["logical_cores"] = logical
             } else if let logical = procDict["cpu_logical_cores"] as? Int {
-                windowsProcessor["logicalProcessors"] = logical
+                windowsProcessor["logical_cores"] = logical
             }
             
             // Parse performance/efficiency cores from system_profiler (format: "proc 14:10:4")
@@ -177,8 +177,8 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                        let perfRange = Range(match.range(at: 2), in: numberProcs),
                        let effRange = Range(match.range(at: 3), in: numberProcs) {
                         windowsProcessor["cores"] = Int(numberProcs[totalRange])
-                        windowsProcessor["performanceCores"] = Int(numberProcs[perfRange])
-                        windowsProcessor["efficiencyCores"] = Int(numberProcs[effRange])
+                        windowsProcessor["performance_cores"] = Int(numberProcs[perfRange])
+                        windowsProcessor["efficiency_cores"] = Int(numberProcs[effRange])
                     }
                 }
             }
@@ -217,16 +217,16 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     windowsGraphics["bus"] = bus.replacingOccurrences(of: "spdisplays_", with: "").capitalized
                 }
                 
-                // Device type (e.g., "spdisplays_gpu" -> "GPU")
+                // Device type (e.g., "spdisplays_gpu" -> "GPU") - snake_case to match osquery
                 if let deviceType = firstGpu["sppci_device_type"] as? String {
-                    windowsGraphics["deviceType"] = deviceType.replacingOccurrences(of: "spdisplays_", with: "").uppercased()
+                    windowsGraphics["device_type"] = deviceType.replacingOccurrences(of: "spdisplays_", with: "").uppercased()
                 }
                 
-                // Metal support (e.g., "spdisplays_metal4" -> "Metal 4")
+                // Metal support (e.g., "spdisplays_metal4" -> "Metal 4") - snake_case
                 if let metalSupport = firstGpu["spdisplays_mtlgpufamilysupport"] as? String {
                     // Convert "spdisplays_metal4" to "Metal 4"
                     let metalVersion = metalSupport.replacingOccurrences(of: "spdisplays_metal", with: "")
-                    windowsGraphics["metalSupport"] = "Metal \(metalVersion)"
+                    windowsGraphics["metal_support"] = "Metal \(metalVersion)"
                 }
                 
                 // Vendor (e.g., "sppci_vendor_Apple" -> "Apple")
@@ -252,37 +252,37 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                         displayInfo["name"] = display["_name"] as? String ?? "Unknown Display"
                         
                         // Serial number - use human-readable serial (spdisplays_display-serial-number)
-                        // NOT the hex version (_spdisplays_display-serial-number)
+                        // NOT the hex version (_spdisplays_display-serial-number) - snake_case
                         if let serial = display["spdisplays_display-serial-number"] as? String, !serial.isEmpty {
-                            displayInfo["serialNumber"] = serial
+                            displayInfo["serial_number"] = serial
                         }
                         
-                        // Display type (Retina LCD, etc.)
+                        // Display type (Retina LCD, etc.) - snake_case
                         if let displayType = display["spdisplays_display_type"] as? String {
                             // Clean up "spdisplays_retinaLCD" -> "Retina LCD"
                             var cleanType = displayType.replacingOccurrences(of: "spdisplays_", with: "")
                             // Add space before LCD
                             cleanType = cleanType.replacingOccurrences(of: "retinaLCD", with: "Retina LCD")
                             cleanType = cleanType.replacingOccurrences(of: "retina", with: "Retina")
-                            displayInfo["displayType"] = cleanType
+                            displayInfo["display_type"] = cleanType
                         }
                         
                         // Resolution - use pixel resolution for display (e.g., "5120 x 2880")
                         displayInfo["resolution"] = display["_spdisplays_pixels"] as? String ?? "Unknown"
                         
-                        // Scaled resolution (e.g., "2560 x 1440 @ 60.00Hz")
-                        displayInfo["scaledResolution"] = display["_spdisplays_resolution"] as? String
+                        // Scaled resolution (e.g., "2560 x 1440 @ 60.00Hz") - snake_case
+                        displayInfo["scaled_resolution"] = display["_spdisplays_resolution"] as? String
                         
-                        // Firmware version - parse from "Version 17.0 (Build 21A329)" to "17.0.21A329"
+                        // Firmware version - parse from "Version 17.0 (Build 21A329)" to "17.0.21A329" - snake_case
                         if let firmware = display["spdisplays_display-fw-version"] as? String, !firmware.isEmpty {
                             // Parse "Version X.Y (Build ZZ...)" format to "X.Y.ZZ"
                             let parsedFirmware = parseFirmwareVersion(firmware)
-                            displayInfo["firmwareVersion"] = parsedFirmware
+                            displayInfo["firmware_version"] = parsedFirmware
                         }
                         
-                        // Is main display
+                        // Is main display - snake_case
                         let isMain = display["spdisplays_main"] as? String == "spdisplays_yes"
-                        displayInfo["isMainDisplay"] = isMain
+                        displayInfo["is_main_display"] = isMain
                         
                         // Mirror status
                         let isMirrored = display["spdisplays_mirror"] as? String == "spdisplays_on"
@@ -292,13 +292,13 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                         let isOnline = display["spdisplays_online"] as? String == "spdisplays_yes"
                         displayInfo["online"] = isOnline
                         
-                        // Ambient brightness support
+                        // Ambient brightness support - snake_case
                         let hasAmbient = display["spdisplays_ambient_brightness"] as? String == "spdisplays_yes"
-                        displayInfo["ambientBrightnessEnabled"] = hasAmbient
+                        displayInfo["ambient_brightness_enabled"] = hasAmbient
                         
-                        // Connection type (if available)
+                        // Connection type (if available) - snake_case
                         if let connType = display["spdisplays_connection_type"] as? String {
-                            displayInfo["connectionType"] = connType.replacingOccurrences(of: "spdisplays_", with: "")
+                            displayInfo["connection_type"] = connType.replacingOccurrences(of: "spdisplays_", with: "")
                         }
                         
                         // Display type (internal/external) - Studio Display is external, built-in is internal
@@ -322,11 +322,11 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             
             // Handle physical_memory
             if let memStr = memDict["physical_memory"] as? String, let memBytes = Int64(memStr) {
-                windowsMemory["totalPhysical"] = memBytes
+                windowsMemory["physical_memory"] = memBytes
             } else if let memBytes = memDict["physical_memory"] as? Int64 {
-                windowsMemory["totalPhysical"] = memBytes
+                windowsMemory["physical_memory"] = memBytes
             } else if let memBytes = memDict["physical_memory"] as? Int {
-                windowsMemory["totalPhysical"] = Int64(memBytes)
+                windowsMemory["physical_memory"] = Int64(memBytes)
             }
             
             // Memory type (e.g., "LPDDR5")
@@ -384,26 +384,26 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 // Volume/drive name
                 drive["name"] = volumeName.isEmpty ? "Unknown" : volumeName
                 
-                // Device name (actual hardware name like "APPLE SSD AP2048Z")
-                drive["deviceName"] = deviceName
+                // Device name (actual hardware name like "APPLE SSD AP2048Z") - snake_case
+                drive["device_name"] = deviceName
                 
-                // Capacity and free space
+                // Capacity and free space (snake_case to match osquery)
                 if let sizeBytes = volume["size_in_bytes"] as? Int64 {
-                    drive["capacity"] = sizeBytes
+                    drive["size"] = sizeBytes
                 }
                 if let freeBytes = volume["free_space_in_bytes"] as? Int64 {
-                    drive["freeSpace"] = freeBytes
+                    drive["free_space"] = freeBytes
                 }
                 
                 // APFS purgeable space - space that can be reclaimed (Time Machine local snapshots,
                 // caches, iOS apps in container, etc.)
                 // This explains the gap between "visible" directory sizes and "used" space
                 if let purgeableBytes = volume["purgeable_space_in_bytes"] as? Int64 {
-                    drive["purgeableSpace"] = purgeableBytes
+                    drive["purgeable_space"] = purgeableBytes
                 }
                 
-                // File system
-                drive["fileSystem"] = volume["file_system"] as? String ?? "Unknown"
+                // File system (snake_case to match osquery)
+                drive["file_system"] = volume["file_system"] as? String ?? "Unknown"
                 
                 // Physical drive details
                 // Medium type (ssd, hdd, etc.)
@@ -413,21 +413,21 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 // Protocol/interface (Apple Fabric, USB, SATA, etc.)
                 drive["interface"] = physicalDrive["protocol"] as? String ?? "Unknown"
                 
-                // Internal vs External
+                // Internal vs External (snake_case to match osquery)
                 let isInternal = physicalDrive["is_internal_disk"] as? String == "yes"
-                drive["isInternal"] = isInternal
+                drive["is_internal"] = isInternal
                 
-                // SMART status (Verified, Failing, etc.)
+                // SMART status (Verified, Failing, etc.) - snake_case to match osquery
                 let smartStatus = physicalDrive["smart_status"] as? String ?? "Unknown"
                 if smartStatus == "Verified" {
                     drive["health"] = "Good"
-                    drive["smartStatus"] = "Verified"
+                    drive["smart_status"] = "Verified"
                 } else if smartStatus == "N/A" || smartStatus == "Unknown" {
                     drive["health"] = "Unknown"
-                    drive["smartStatus"] = "Not Supported"
+                    drive["smart_status"] = "Not Supported"
                 } else {
                     drive["health"] = smartStatus
-                    drive["smartStatus"] = smartStatus
+                    drive["smart_status"] = smartStatus
                 }
                 
                 // Detachable
@@ -455,12 +455,12 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                         let blockSize = Int64(item["blocks_size"] as? String ?? "4096") ?? (item["blocks_size"] as? Int64 ?? 4096)
                         
                         drive["name"] = "Macintosh HD"
-                        drive["capacity"] = blocks * blockSize
-                        drive["freeSpace"] = blocksFree * blockSize
+                        drive["size"] = blocks * blockSize
+                        drive["free_space"] = blocksFree * blockSize
                         drive["type"] = "SSD"
                         drive["interface"] = item["type"] as? String ?? "APFS"
                         drive["health"] = "Good"
-                        drive["isInternal"] = true
+                        drive["is_internal"] = true
                         
                         windowsStorage.append(drive)
                         break
@@ -474,7 +474,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         if !windowsStorage.isEmpty {
             // Find the primary internal storage device (root volume "/")
             for i in 0..<windowsStorage.count {
-                if windowsStorage[i]["isInternal"] as? Bool == true {
+                if windowsStorage[i]["is_internal"] as? Bool == true {
                     // Collect directory analysis using native Swift FileManager (inherits FDA)
                     do {
                         print("[\(timestamp())] Starting storage directory analysis...")
@@ -501,7 +501,8 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             hardwareData["storage"] = windowsStorage
         }
         
-        // 10. battery
+        // 10. battery - Pass through raw osquery format (snake_case)
+        // osquery battery table fields: cycle_count, percent_remaining, health, charging, etc.
         hardwareData["battery"] = batteryInfo
         
         // 11. displays (already added above if present)
@@ -1248,7 +1249,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     // MARK: - Battery Info (osquery + bash fallback)
 
     
-    private func collectBatteryInfo() async throws -> [String: Any] {
+private func collectBatteryInfo() async throws -> [String: Any] {
         // osquery battery table provides: cycle_count, designed_capacity, health, etc.
         let osqueryScript = """
             SELECT charged, charging, current_capacity, designed_capacity, 
