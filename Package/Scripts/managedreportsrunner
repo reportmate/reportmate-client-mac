@@ -1,5 +1,0 @@
-#!/bin/sh
-# ReportMate CLI wrapper
-# This script allows calling the ReportMate binary from PATH
-
-/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner "${@}"
