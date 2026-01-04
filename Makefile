@@ -28,11 +28,11 @@ help:
 # Build targets
 build:
 	@echo "Building $(PROJECT_NAME) in debug mode..."
-	swift build
+	@./build.sh --debug --skip-pkg --skip-zip --skip-dmg
 
 release:
 	@echo "Building $(PROJECT_NAME) in release mode..."
-	swift build --configuration release
+	@./build.sh --skip-pkg --skip-zip --skip-dmg
 
 # Test targets
 test:
