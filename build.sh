@@ -30,7 +30,8 @@ SIGNING_IDENTITY_APP="${SIGNING_IDENTITY_APP:-}"
 SIGNING_IDENTITY_INSTALLER="${SIGNING_IDENTITY_INSTALLER:-}"
 SIGNING_TIMESTAMP="${SIGNING_TIMESTAMP:-true}"
 SIGNING_KEYCHAIN="${SIGNING_KEYCHAIN:-}"
-NOTARIZATION_KEYCHAIN_PROFILE="${NOTARIZATION_KEYCHAIN_PROFILE:-}"
+NOTARIZATION_APPLE_ID="${NOTARIZATION_APPLE_ID:-}"
+NOTARIZATION_PASSWORD="${NOTARIZATION_PASSWORD:-}"
 
 # Directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1087,17 +1088,23 @@ fi
 if [ "$NOTARIZE" = true ] && [ "$SKIP_PKG" = false ]; then
     log_step "Submitting for notarization..."
     
-    # Validate notarization profile is configured
-    if [ -z "$NOTARIZATION_KEYCHAIN_PROFILE" ]; then
-        log_error "NOTARIZATION_KEYCHAIN_PROFILE not set. Please configure in .env or export it."
-        log_info "Create profile with: xcrun notarytool store-credentials \"PROFILE_NAME\" --apple-id \"you@example.com\" --team-id \"XXXXXXXXXX\""
+    # Validate notarization credentials are configured
+    if [ -z "$NOTARIZATION_APPLE_ID" ] || [ -z "$NOTARIZATION_PASSWORD" ] || [ -z "$TEAM_ID" ]; then
+        log_error "Notarization credentials not set. Please configure in .env:"
+        log_info "  NOTARIZATION_APPLE_ID=\"your@email.com\""
+        log_info "  NOTARIZATION_PASSWORD=\"xxxx-xxxx-xxxx-xxxx\""
+        log_info "  TEAM_ID=\"XXXXXXXXXX\""
+        log_info ""
+        log_info "Generate app-specific password at: https://appleid.apple.com/account/manage"
         exit 1
     fi
     
     PKG_PATH="${DIST_DIR}/ReportMate-${VERSION}.pkg"
     
     NOTARYTOOL_ARGS=(
-        --keychain-profile "$NOTARIZATION_KEYCHAIN_PROFILE"
+        --apple-id "$NOTARIZATION_APPLE_ID"
+        --password "$NOTARIZATION_PASSWORD"
+        --team-id "$TEAM_ID"
         --wait
     )
     
@@ -1118,7 +1125,7 @@ if [ "$NOTARIZE" = true ] && [ "$SKIP_PKG" = false ]; then
         SUBMISSION_ID=$(echo "$NOTARY_OUTPUT" | grep "id:" | head -1 | awk '{print $2}')
         if [ -n "$SUBMISSION_ID" ]; then
             log_info "Getting detailed log..."
-            xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARIZATION_KEYCHAIN_PROFILE"
+            xcrun notarytool log "$SUBMISSION_ID" --apple-id "$NOTARIZATION_APPLE_ID" --password "$NOTARIZATION_PASSWORD" --team-id "$TEAM_ID"
         fi
         exit 1
     fi
