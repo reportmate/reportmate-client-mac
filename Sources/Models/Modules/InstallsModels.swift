@@ -9,25 +9,115 @@ public struct InstallsData: ModuleDataModel, Sendable {
     
     public let deviceId: String
     
-    // Cimian Integration
+    // Cimian Integration (cross-platform: macOS and Windows)
     public var cimian: CimianInfo?
     public var cacheStatus: [String: AnyCodable] = [:]
     public var cimianSnapshot: [String: AnyCodable]?
     public var bootstrapModeActive: Bool = false
+    
+    // Munki Integration (macOS only - via macadmins osquery extension)
+    public var munki: MunkiInfo?
     
     public init(
         deviceId: String,
         collectionTimestamp: Date = Date(),
         success: Bool = true,
         errorMessage: String? = nil,
-        cimian: CimianInfo? = nil
+        cimian: CimianInfo? = nil,
+        munki: MunkiInfo? = nil
     ) {
         self.deviceId = deviceId
         self.collectionTimestamp = collectionTimestamp
         self.success = success
         self.errorMessage = errorMessage
         self.cimian = cimian
+        self.munki = munki
     }
+}
+
+// MARK: - Munki Models (macOS only - via macadmins osquery extension)
+
+/// Munki managed software information from macadmins osquery extension
+/// Reference: https://github.com/macadmins/osquery-extension
+/// Tables: munki_info, munki_installs
+public struct MunkiInfo: Codable, Sendable {
+    // Core installation status
+    public var isInstalled: Bool = false
+    public var version: String = ""
+    public var status: String = "Unknown"  // Active, Inactive, Error
+    
+    // Munki configuration (from munki_info table)
+    public var clientIdentifier: String?
+    public var manifestName: String?
+    public var softwareRepoURL: String?
+    
+    // Run state (from munki_info table)
+    public var lastRun: Date?
+    public var lastRunSuccess: Bool = false
+    public var consoleUser: String?
+    public var startTime: String?
+    public var endTime: String?
+    
+    // Run errors/warnings (from munki_info table)
+    public var errors: String?
+    public var warnings: String?
+    public var problemInstalls: String?
+    
+    // Managed items (from munki_installs table)
+    public var items: [MunkiItem] = []
+    
+    // Computed properties for dashboard compatibility
+    public var pendingPackages: [String] {
+        items.filter { $0.status == "Pending" }.map { $0.name }
+    }
+    
+    public var installedItems: [MunkiItem] {
+        items.filter { $0.status == "Installed" }
+    }
+    
+    // Reports metadata
+    public var reports: [String: MunkiReportFileInfo] = [:]
+    public var logs: [String] = []
+    
+    public init() {}
+}
+
+/// Munki package item from munki_installs table
+/// Maps directly to macadmins osquery extension munki_installs columns
+public struct MunkiItem: Codable, Sendable {
+    public var id: String = ""
+    public var name: String = ""
+    public var displayName: String = ""
+    public var version: String = ""            // Version Munki wants to install
+    public var installedVersion: String = ""    // Currently installed version
+    public var status: String = "Unknown"       // Installed, Pending, Removed (mapped from 'installed' column)
+    public var installedSize: Int = 0
+    public var endTime: String = ""            // Last Munki run end time for this item
+    
+    // Enhanced fields for ReportMate dashboard compatibility
+    public var type: String = "munki"
+    public var lastUpdate: String = ""
+    public var itemSize: String?
+    
+    public init() {}
+    
+    public init(name: String, displayName: String? = nil, version: String = "", installedVersion: String = "", installed: Bool = false) {
+        self.id = name.lowercased().replacingOccurrences(of: " ", with: "-")
+        self.name = name
+        self.displayName = displayName ?? name
+        self.version = version
+        self.installedVersion = installedVersion
+        self.status = installed ? "Installed" : "Pending"
+        self.type = "munki"
+    }
+}
+
+/// Munki report file info for metadata tracking
+public struct MunkiReportFileInfo: Codable, Sendable {
+    public var size: String?
+    public var mtime: String?
+    
+    public init() {}
 }
 
 public struct CimianInfo: Codable, Sendable {
