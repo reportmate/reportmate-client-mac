@@ -86,18 +86,28 @@ public class OSQueryService {
             return relativeToExec
         }
         
-        // 4. Try standard locations
-        let standardPaths = [
-            "/usr/local/bin/macadmins_extension.ext",
-            "/opt/reportmate/extensions/macadmins_extension.ext"
+        // 4. Try standard installation location (installed by .pkg)
+        let installedPath = "/usr/local/reportmate/macadmins_extension.ext"
+        if FileManager.default.fileExists(atPath: installedPath) {
+            return installedPath
+        }
+
+        // 5. Try development source paths (for local builds)
+        let devSourcePaths = [
+            // Relative to working directory
+            "Sources/Resources/extensions/macadmins_extension.ext",
+            "../Sources/Resources/extensions/macadmins_extension.ext"
         ]
-        
-        for path in standardPaths {
-            if FileManager.default.fileExists(atPath: path) {
-                return path
+
+        // Get current working directory to try relative paths
+        let cwd = FileManager.default.currentDirectoryPath
+        for devPath in devSourcePaths {
+            let fullPath = "\(cwd)/\(devPath)"
+            if FileManager.default.fileExists(atPath: fullPath) {
+                return fullPath
             }
         }
-        
+
         return nil
     }
     
@@ -112,14 +122,19 @@ public class OSQueryService {
             
             // Load extension if available
             if let extPath = extensionPath {
-                // Create a unique socket path for this execution
-                let socketPath = "/tmp/osquery-reportmate-\(ProcessInfo.processInfo.processIdentifier).em"
-                
+                // Use a unique socket path per query to avoid stale socket conflicts
+                let uniqueId = UUID().uuidString.prefix(8)
+                let socketPath = "/tmp/osquery-rm-\(uniqueId).em"
+
+                // Clean up any stale socket file
+                try? FileManager.default.removeItem(atPath: socketPath)
+
                 arguments.append(contentsOf: [
                     "--extension", extPath,
-                    "--allow_unsafe",  // Skip ownership check
-                    "--disable_extensions=false",  // Explicitly enable extensions
-                    "--extensions_socket", socketPath  // Use unique socket to avoid conflicts
+                    "--extensions_socket", socketPath,
+                    "--extensions_timeout", "30",
+                    "--extensions_require", "macadmins_extension",  // Wait for extension to register
+                    "--allow_unsafe"  // Skip ownership check
                 ])
             }
             

@@ -503,7 +503,22 @@ if [ "$SKIP_PKG" = false ]; then
 /usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner "${@}"
 WRAPPER
     chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner"
-    
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # OSQUERY MACADMINS EXTENSION
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    EXTENSION_SOURCE="${SCRIPT_DIR}/Sources/Resources/extensions/macadmins_extension.ext"
+    if [ -f "$EXTENSION_SOURCE" ]; then
+        log_info "Bundling macadmins osquery extension..."
+        cp "$EXTENSION_SOURCE" "$PACKAGE_ROOT/usr/local/reportmate/"
+        chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/macadmins_extension.ext"
+        log_success "Extension bundled: macadmins_extension.ext"
+    else
+        log_warn "macadmins extension not found at: $EXTENSION_SOURCE"
+        log_info "Download from: https://github.com/macadmins/osquery-extension/releases"
+    fi
+
     # Create Info.plist for app bundle
     cat > "$APP_CONTENTS/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -819,6 +834,10 @@ EOF
     </array>
     <key>OsqueryPath</key>
     <string>/usr/local/bin/osqueryi</string>
+    <key>OsqueryExtensionPath</key>
+    <string>/usr/local/reportmate/macadmins_extension.ext</string>
+    <key>ExtensionEnabled</key>
+    <true/>
     <key>ValidateSSL</key>
     <true/>
     <key>Timeout</key>
@@ -930,6 +949,45 @@ log_message "Starting ReportMate postinstall..."
 mkdir -p "$LOG_DIR"
 chmod 755 "$LOG_DIR"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# INSTALL OSQUERY IF MISSING
+# ═══════════════════════════════════════════════════════════════════════════
+
+OSQUERY_PATH="/usr/local/bin/osqueryi"
+OSQUERY_VERSION="5.21.0"  # Pin to known compatible version with macadmins extension
+
+if [ ! -f "$OSQUERY_PATH" ]; then
+    log_message "osquery not found, installing..."
+
+    # Determine architecture
+    ARCH=$(uname -m)
+    if [ "$ARCH" = "arm64" ]; then
+        PKG_URL="https://github.com/osquery/osquery/releases/download/${OSQUERY_VERSION}/osquery-${OSQUERY_VERSION}.pkg"
+    else
+        PKG_URL="https://github.com/osquery/osquery/releases/download/${OSQUERY_VERSION}/osquery-${OSQUERY_VERSION}.pkg"
+    fi
+
+    TEMP_PKG="/tmp/osquery-${OSQUERY_VERSION}.pkg"
+
+    log_message "Downloading osquery ${OSQUERY_VERSION}..."
+    if /usr/bin/curl -L -s -o "$TEMP_PKG" "$PKG_URL"; then
+        log_message "Installing osquery..."
+        if /usr/sbin/installer -pkg "$TEMP_PKG" -target / >/dev/null 2>&1; then
+            log_message "osquery installed successfully"
+        else
+            log_message "WARNING: osquery installation failed"
+        fi
+        rm -f "$TEMP_PKG"
+    else
+        log_message "WARNING: Failed to download osquery"
+    fi
+else
+    log_message "osquery already installed at $OSQUERY_PATH"
+fi
+
+# Make extension executable
+chmod 755 /usr/local/reportmate/macadmins_extension.ext 2>/dev/null
+
 # Register app bundle
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister "${APP_PATH}"
 
@@ -973,7 +1031,15 @@ done
 # Make wrapper executable
 chmod 755 /usr/local/reportmate/managedreportsrunner 2>/dev/null
 
-# PATH entry
+# Create/update symlink in /usr/local/bin to ensure the latest binary is used
+# This handles upgrades where an old binary might exist in /usr/local/bin
+log_message "Creating symlink in /usr/local/bin..."
+mkdir -p /usr/local/bin
+rm -f /usr/local/bin/managedreportsrunner 2>/dev/null
+ln -sf "${APP_PATH}/Contents/MacOS/managedreportsrunner" /usr/local/bin/managedreportsrunner
+log_message "Symlink created: /usr/local/bin/managedreportsrunner -> ${APP_PATH}/Contents/MacOS/managedreportsrunner"
+
+# PATH entry (keep for backward compatibility with wrapper)
 echo "/usr/local/reportmate" > /etc/paths.d/reportmate 2>/dev/null
 
 log_message "ReportMate postinstall complete."

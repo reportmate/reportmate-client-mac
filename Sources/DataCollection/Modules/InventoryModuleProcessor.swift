@@ -112,7 +112,13 @@ print(json.dumps(get_inventory_info()))
             let parts = trimmedLine.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
             if parts.count == 2 {
                 let key = parts[0]
-                let value = parts[1]
+                var value = parts[1]
+                // Strip quotes from YAML values
+                if value.hasPrefix("\"") && value.hasSuffix("\"") && value.count >= 2 {
+                    value = String(value.dropFirst().dropLast())
+                } else if value.hasPrefix("'") && value.hasSuffix("'") && value.count >= 2 {
+                    value = String(value.dropFirst().dropLast())
+                }
                 results[key] = value
             }
         }

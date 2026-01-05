@@ -1,0 +1,666 @@
+# ReportMate macOS Client Build Workflow
+# Replicates build.sh for CI/CD builds
+name: Build macOS Client
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (leave empty for auto YYYY.MM.DD.HHMM)'
+        required: false
+        type: string
+      configuration:
+        description: 'Build configuration'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      sign:
+        description: 'Code sign the build'
+        required: true
+        default: true
+        type: boolean
+      notarize:
+        description: 'Notarize for distribution (requires signing)'
+        required: true
+        default: false
+        type: boolean
+      create_release:
+        description: 'Create GitHub release'
+        required: true
+        default: false
+        type: boolean
+
+  push:
+    branches:
+      - main
+    paths:
+      - 'Sources/**'
+      - 'Package.swift'
+      - '.github/workflows/build.yml'
+
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'Sources/**'
+      - 'Package.swift'
+
+  release:
+    types: [created]
+
+env:
+  PRODUCT_NAME: managedreportsrunner
+  BUNDLE_ID: com.github.reportmate.managedreportsrunner
+  PKG_IDENTIFIER: ca.ecuad.reportmate.client
+  OSQUERY_VERSION: "5.21.0"
+
+jobs:
+  build:
+    name: Build macOS Client
+    runs-on: macos-14  # macOS Sonoma with Apple Silicon
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for version detection
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Get Swift version
+        id: swift-version
+        run: |
+          SWIFT_VERSION=$(swift --version 2>&1 | head -n 1)
+          echo "version=$SWIFT_VERSION" >> $GITHUB_OUTPUT
+          echo "Swift: $SWIFT_VERSION"
+
+      - name: Generate version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+            VERSION="${VERSION#v}"  # Remove 'v' prefix if present
+          else
+            VERSION="$(date -u +%Y.%m.%d.%H%M)"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Generate AppVersion.swift
+        run: |
+          cat > Sources/Core/AppVersion.swift << EOF
+          import Foundation
+
+          /// Centralized version management for ReportMate macOS client
+          /// Version format: YYYY.MM.DD.HHMM (build timestamp)
+          /// This file is auto-generated at build time - do not edit manually
+          public enum AppVersion {
+              /// The current application version (generated at build time)
+              public static let current: String = "${{ steps.version.outputs.version }}"
+
+              /// Short version for display
+              public static var short: String {
+                  let parts = current.split(separator: ".")
+                  if parts.count >= 3 {
+                      return "\(parts[0]).\(parts[1]).\(parts[2])"
+                  }
+                  return current
+              }
+
+              /// Build number (HHMM portion or full version)
+              public static var build: String {
+                  let parts = current.split(separator: ".")
+                  if parts.count >= 4 {
+                      return String(parts[3])
+                  }
+                  return current
+              }
+          }
+          EOF
+
+      - name: Build Swift package
+        run: |
+          CONFIGURATION="${{ github.event.inputs.configuration || 'release' }}"
+          swift build -c $CONFIGURATION
+
+          # Find the built executable
+          if [ "$CONFIGURATION" = "release" ]; then
+            if [ -d ".build/arm64-apple-macosx/release" ]; then
+              BUILD_PATH=".build/arm64-apple-macosx/release"
+            else
+              BUILD_PATH=".build/release"
+            fi
+          else
+            if [ -d ".build/arm64-apple-macosx/debug" ]; then
+              BUILD_PATH=".build/arm64-apple-macosx/debug"
+            else
+              BUILD_PATH=".build/debug"
+            fi
+          fi
+
+          echo "BUILD_PATH=$BUILD_PATH" >> $GITHUB_ENV
+          ls -la "$BUILD_PATH/${{ env.PRODUCT_NAME }}"
+
+      - name: Download macadmins extension
+        run: |
+          echo "Downloading macadmins osquery extension..."
+          curl -L -o /tmp/macadmins_extension.zip \
+            "https://github.com/macadmins/osquery-extension/releases/download/v1.2.7/macadmins_extension.zip"
+
+          cd /tmp && unzip -o macadmins_extension.zip
+
+          # Copy to Sources for bundling
+          mkdir -p Sources/Resources/extensions
+          cp /tmp/macadmins_extension/darwin/macadmins_extension.ext Sources/Resources/extensions/
+          chmod +x Sources/Resources/extensions/macadmins_extension.ext
+
+      - name: Import signing certificate
+        if: github.event.inputs.sign == 'true' || github.event_name == 'release'
+        env:
+          SIGNING_CERTIFICATE_P12_BASE64: ${{ secrets.SIGNING_CERTIFICATE_P12_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          if [ -z "$SIGNING_CERTIFICATE_P12_BASE64" ]; then
+            echo "::warning::No signing certificate configured, skipping code signing"
+            echo "SIGN_BUILD=false" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/signing.keychain-db
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+          echo -n "$SIGNING_CERTIFICATE_P12_BASE64" | base64 --decode -o "$CERTIFICATE_PATH"
+
+          security import "$CERTIFICATE_PATH" \
+            -P "$SIGNING_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          # Get signing identity
+          SIGNING_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "::error::Could not find Developer ID Application certificate"
+            exit 1
+          fi
+
+          echo "SIGNING_IDENTITY=$SIGNING_IDENTITY" >> $GITHUB_ENV
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+          echo "SIGN_BUILD=true" >> $GITHUB_ENV
+          echo "Found signing identity: $SIGNING_IDENTITY"
+
+      - name: Create PKG installer
+        id: pkg
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DIST_DIR="dist"
+          OUTPUT_DIR="build/output"
+
+          mkdir -p "$DIST_DIR" "$OUTPUT_DIR"
+
+          # Copy executable to dist
+          cp "$BUILD_PATH/${{ env.PRODUCT_NAME }}" "$DIST_DIR/"
+
+          # ═══════════════════════════════════════════════════════════════════
+          # CREATE APP BUNDLE STRUCTURE
+          # ═══════════════════════════════════════════════════════════════════
+
+          PACKAGE_ROOT="$OUTPUT_DIR/package_root"
+          rm -rf "$PACKAGE_ROOT"
+
+          APP_BUNDLE="$PACKAGE_ROOT/usr/local/reportmate/ReportMate.app"
+          APP_CONTENTS="$APP_BUNDLE/Contents"
+          APP_MACOS="$APP_CONTENTS/MacOS"
+          APP_RESOURCES="$APP_CONTENTS/Resources"
+          APP_LAUNCHDAEMONS="$APP_CONTENTS/Library/LaunchDaemons"
+
+          mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_LAUNCHDAEMONS"
+          mkdir -p "$PACKAGE_ROOT/Library/Managed Reports/logs"
+          mkdir -p "$PACKAGE_ROOT/etc/paths.d"
+
+          # Add to PATH
+          echo "/usr/local/reportmate" > "$PACKAGE_ROOT/etc/paths.d/reportmate"
+
+          # Copy executable
+          cp "$DIST_DIR/${{ env.PRODUCT_NAME }}" "$APP_MACOS/"
+
+          # Copy macadmins extension
+          if [ -f "Sources/Resources/extensions/macadmins_extension.ext" ]; then
+            cp "Sources/Resources/extensions/macadmins_extension.ext" "$PACKAGE_ROOT/usr/local/reportmate/"
+            chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/macadmins_extension.ext"
+          fi
+
+          # Create wrapper script
+          cat > "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner" << 'WRAPPER'
+          #!/bin/sh
+          /usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner "${@}"
+          WRAPPER
+          chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner"
+
+          # Create Info.plist
+          cat > "$APP_CONTENTS/Info.plist" << PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleExecutable</key>
+              <string>managedreportsrunner</string>
+              <key>CFBundleIdentifier</key>
+              <string>${{ env.BUNDLE_ID }}</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>ReportMate</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>$VERSION</string>
+              <key>CFBundleVersion</key>
+              <string>$VERSION</string>
+              <key>LSBackgroundOnly</key>
+              <true/>
+              <key>LSMinimumSystemVersion</key>
+              <string>14.0</string>
+              <key>LSUIElement</key>
+              <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          echo "APPL????" > "$APP_CONTENTS/PkgInfo"
+
+          # Create LaunchDaemons (boot, hourly, fourhourly, daily)
+          for schedule in boot hourly fourhourly daily; do
+            case $schedule in
+              boot)
+                INTERVAL=""
+                RUN_AT_LOAD="<true/>"
+                LAUNCH_ONCE="<true/>"
+                MODULES=""
+                ;;
+              hourly)
+                INTERVAL="<key>StartInterval</key><integer>3600</integer>"
+                RUN_AT_LOAD="<false/>"
+                LAUNCH_ONCE=""
+                MODULES="<string>--run-modules</string><string>security,profiles,network,management</string>"
+                ;;
+              fourhourly)
+                INTERVAL="<key>StartInterval</key><integer>14400</integer>"
+                RUN_AT_LOAD="<false/>"
+                LAUNCH_ONCE=""
+                MODULES="<string>--run-modules</string><string>applications,inventory,system</string>"
+                ;;
+              daily)
+                INTERVAL="<key>StartCalendarInterval</key><dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>"
+                RUN_AT_LOAD="<false/>"
+                LAUNCH_ONCE=""
+                MODULES="<string>--run-modules</string><string>hardware,displays</string>"
+                ;;
+            esac
+
+            cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.${schedule}.plist" << DAEMON
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>Label</key>
+              <string>com.github.reportmate.${schedule}</string>
+              <key>ProgramArguments</key>
+              <array>
+                  <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+                  ${MODULES:-<string>run</string>}
+              </array>
+              <key>RunAtLoad</key>
+              ${RUN_AT_LOAD}
+              ${LAUNCH_ONCE:+<key>LaunchOnlyOnce</key>$LAUNCH_ONCE}
+              ${INTERVAL}
+              <key>StandardOutPath</key>
+              <string>/Library/Managed Reports/logs/reportmate-${schedule}.log</string>
+              <key>StandardErrorPath</key>
+              <string>/Library/Managed Reports/logs/reportmate-${schedule}.error.log</string>
+          </dict>
+          </plist>
+          DAEMON
+          done
+
+          # Create default config plist
+          mkdir -p "$PACKAGE_ROOT/Library/Managed Reports"
+          cat > "$PACKAGE_ROOT/Library/Managed Reports/reportmate.plist" << CONFIG
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>LogLevel</key>
+              <string>info</string>
+              <key>OsqueryPath</key>
+              <string>/usr/local/bin/osqueryi</string>
+              <key>OsqueryExtensionPath</key>
+              <string>/usr/local/reportmate/macadmins_extension.ext</string>
+              <key>ExtensionEnabled</key>
+              <true/>
+          </dict>
+          </plist>
+          CONFIG
+
+          # ═══════════════════════════════════════════════════════════════════
+          # CODE SIGN APP BUNDLE
+          # ═══════════════════════════════════════════════════════════════════
+
+          if [ "$SIGN_BUILD" = "true" ]; then
+            echo "Signing app bundle..."
+
+            codesign --force \
+              --sign "$SIGNING_IDENTITY" \
+              --keychain "$KEYCHAIN_PATH" \
+              --options runtime \
+              --timestamp \
+              "$APP_MACOS/${{ env.PRODUCT_NAME }}"
+
+            codesign --force \
+              --sign "$SIGNING_IDENTITY" \
+              --keychain "$KEYCHAIN_PATH" \
+              --options runtime \
+              --timestamp \
+              --deep \
+              "$APP_BUNDLE"
+
+            codesign --verify --verbose=2 "$APP_BUNDLE"
+          fi
+
+          # ═══════════════════════════════════════════════════════════════════
+          # CREATE INSTALLER SCRIPTS
+          # ═══════════════════════════════════════════════════════════════════
+
+          SCRIPTS_DIR="$OUTPUT_DIR/scripts"
+          mkdir -p "$SCRIPTS_DIR"
+
+          cat > "$SCRIPTS_DIR/postinstall" << 'POSTINSTALL'
+          #!/bin/zsh
+          # ReportMate Postinstall
+          LD_ROOT="/Library/LaunchDaemons"
+          APP_PATH="/usr/local/reportmate/ReportMate.app"
+          APP_ROOT="${APP_PATH}/Contents"
+          LOG_DIR="/Library/Managed Reports/logs"
+
+          log_message() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
+
+          log_message "Starting ReportMate postinstall..."
+
+          mkdir -p "$LOG_DIR"
+          chmod 755 "$LOG_DIR"
+
+          # Install osquery if missing
+          OSQUERY_PATH="/usr/local/bin/osqueryi"
+          OSQUERY_VERSION="5.21.0"
+
+          if [ ! -f "$OSQUERY_PATH" ]; then
+              log_message "osquery not found, installing..."
+              PKG_URL="https://github.com/osquery/osquery/releases/download/${OSQUERY_VERSION}/osquery-${OSQUERY_VERSION}.pkg"
+              TEMP_PKG="/tmp/osquery-${OSQUERY_VERSION}.pkg"
+
+              if /usr/bin/curl -L -s -o "$TEMP_PKG" "$PKG_URL"; then
+                  /usr/sbin/installer -pkg "$TEMP_PKG" -target / >/dev/null 2>&1
+                  rm -f "$TEMP_PKG"
+                  log_message "osquery installed"
+              fi
+          fi
+
+          # Make extension executable
+          chmod 755 /usr/local/reportmate/macadmins_extension.ext 2>/dev/null
+
+          # Register app bundle
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister "${APP_PATH}"
+
+          # Install LaunchDaemons
+          DAEMONS=(
+              "com.github.reportmate.boot.plist"
+              "com.github.reportmate.hourly.plist"
+              "com.github.reportmate.fourhourly.plist"
+              "com.github.reportmate.daily.plist"
+          )
+
+          for daemon in ${DAEMONS}; do
+              daemon_path="${LD_ROOT}/${daemon}"
+              [ -e "${daemon_path}" ] && /bin/launchctl bootout system "${daemon_path}" 2>/dev/null
+              rm -f "${daemon_path}"
+          done
+
+          for daemon in ${DAEMONS}; do
+              source_path="${APP_ROOT}/Library/LaunchDaemons/${daemon}"
+              dest_path="${LD_ROOT}/${daemon}"
+
+              if [ -e "${source_path}" ]; then
+                  cp "${source_path}" "${dest_path}"
+                  chmod 644 "${dest_path}"
+                  chown root:wheel "${dest_path}"
+                  /bin/launchctl bootstrap system "${dest_path}"
+              fi
+          done
+
+          chmod 755 /usr/local/reportmate/managedreportsrunner 2>/dev/null
+
+          mkdir -p /usr/local/bin
+          rm -f /usr/local/bin/managedreportsrunner 2>/dev/null
+          ln -sf "${APP_PATH}/Contents/MacOS/managedreportsrunner" /usr/local/bin/managedreportsrunner
+
+          echo "/usr/local/reportmate" > /etc/paths.d/reportmate 2>/dev/null
+
+          log_message "ReportMate postinstall complete."
+          exit 0
+          POSTINSTALL
+          chmod +x "$SCRIPTS_DIR/postinstall"
+
+          cat > "$SCRIPTS_DIR/preinstall" << 'PREINSTALL'
+          #!/bin/zsh
+          LD_ROOT="/Library/LaunchDaemons"
+
+          for daemon in com.github.reportmate.boot com.github.reportmate.hourly com.github.reportmate.fourhourly com.github.reportmate.daily; do
+              daemon_path="${LD_ROOT}/${daemon}.plist"
+              [ -e "${daemon_path}" ] && /bin/launchctl bootout system "${daemon_path}" 2>/dev/null
+              rm -f "${daemon_path}"
+          done
+
+          pkill -f "managedreportsrunner" 2>/dev/null || true
+          exit 0
+          PREINSTALL
+          chmod +x "$SCRIPTS_DIR/preinstall"
+
+          # Create component plist
+          cat > "$OUTPUT_DIR/component.plist" << 'COMPONENT'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <array>
+              <dict>
+                  <key>BundleHasStrictIdentifier</key>
+                  <true/>
+                  <key>BundleIsRelocatable</key>
+                  <false/>
+                  <key>BundleIsVersionChecked</key>
+                  <true/>
+                  <key>BundleOverwriteAction</key>
+                  <string>upgrade</string>
+                  <key>RootRelativeBundlePath</key>
+                  <string>usr/local/reportmate/ReportMate.app</string>
+              </dict>
+          </array>
+          </plist>
+          COMPONENT
+
+          # Build PKG
+          PKG_NAME="ReportMate-${VERSION}.pkg"
+
+          pkgbuild --root "$PACKAGE_ROOT" \
+                   --identifier "${{ env.PKG_IDENTIFIER }}" \
+                   --version "$VERSION" \
+                   --install-location "/" \
+                   --scripts "$SCRIPTS_DIR" \
+                   --component-plist "$OUTPUT_DIR/component.plist" \
+                   "$DIST_DIR/$PKG_NAME"
+
+          echo "pkg_name=$PKG_NAME" >> $GITHUB_OUTPUT
+          echo "pkg_path=$DIST_DIR/$PKG_NAME" >> $GITHUB_OUTPUT
+
+      - name: Import installer certificate
+        if: (github.event.inputs.sign == 'true' || github.event_name == 'release') && env.SIGN_BUILD == 'true'
+        env:
+          INSTALLER_CERTIFICATE_P12_BASE64: ${{ secrets.INSTALLER_CERTIFICATE_P12_BASE64 }}
+          INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.INSTALLER_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$INSTALLER_CERTIFICATE_P12_BASE64" ]; then
+            echo "::warning::No installer certificate configured"
+            exit 0
+          fi
+
+          CERTIFICATE_PATH=$RUNNER_TEMP/installer_certificate.p12
+          echo -n "$INSTALLER_CERTIFICATE_P12_BASE64" | base64 --decode -o "$CERTIFICATE_PATH"
+
+          security import "$CERTIFICATE_PATH" \
+            -P "$INSTALLER_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          INSTALLER_IDENTITY=$(security find-identity -v -p basic "$KEYCHAIN_PATH" | grep "Developer ID Installer" | head -1 | awk -F'"' '{print $2}')
+
+          if [ -n "$INSTALLER_IDENTITY" ]; then
+            echo "INSTALLER_IDENTITY=$INSTALLER_IDENTITY" >> $GITHUB_ENV
+            echo "Found installer identity: $INSTALLER_IDENTITY"
+          fi
+
+      - name: Sign PKG
+        if: env.SIGN_BUILD == 'true' && env.INSTALLER_IDENTITY != ''
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PKG_PATH="dist/ReportMate-${VERSION}.pkg"
+          SIGNED_PKG="dist/ReportMate-${VERSION}-signed.pkg"
+
+          productsign --sign "$INSTALLER_IDENTITY" \
+                      --keychain "$KEYCHAIN_PATH" \
+                      --timestamp \
+                      "$PKG_PATH" \
+                      "$SIGNED_PKG"
+
+          mv "$SIGNED_PKG" "$PKG_PATH"
+          echo "PKG signed successfully"
+
+      - name: Notarize PKG
+        if: (github.event.inputs.notarize == 'true' || github.event_name == 'release') && env.SIGN_BUILD == 'true'
+        env:
+          NOTARIZATION_APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
+          NOTARIZATION_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
+          NOTARIZATION_TEAM_ID: ${{ secrets.NOTARIZATION_TEAM_ID }}
+        run: |
+          if [ -z "$NOTARIZATION_APPLE_ID" ] || [ -z "$NOTARIZATION_PASSWORD" ] || [ -z "$NOTARIZATION_TEAM_ID" ]; then
+            echo "::warning::Notarization credentials not configured"
+            exit 0
+          fi
+
+          VERSION="${{ steps.version.outputs.version }}"
+          PKG_PATH="dist/ReportMate-${VERSION}.pkg"
+
+          echo "Submitting for notarization..."
+          xcrun notarytool submit "$PKG_PATH" \
+            --apple-id "$NOTARIZATION_APPLE_ID" \
+            --password "$NOTARIZATION_PASSWORD" \
+            --team-id "$NOTARIZATION_TEAM_ID" \
+            --wait
+
+          echo "Stapling notarization ticket..."
+          xcrun stapler staple "$PKG_PATH"
+          xcrun stapler validate "$PKG_PATH"
+
+      - name: Create ZIP
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cd dist
+          zip -r "ReportMate-${VERSION}.zip" "${{ env.PRODUCT_NAME }}"
+
+      - name: Generate checksums
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cd dist
+          shasum -a 256 ReportMate-${VERSION}.* > checksums.txt
+          cat checksums.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReportMate-${{ steps.version.outputs.version }}
+          path: |
+            dist/ReportMate-*.pkg
+            dist/ReportMate-*.zip
+            dist/checksums.txt
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: github.event_name == 'release' || github.event.inputs.create_release == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v${VERSION}"
+
+          # Create release notes
+          RELEASE_NOTES="## ReportMate macOS Client v${VERSION}
+
+          ### Build Information
+          - Built on: $(date -u)
+          - Swift: ${{ steps.swift-version.outputs.version }}
+          - Runner: ${{ runner.os }} ${{ runner.arch }}
+
+          ### Installation
+          Download \`ReportMate-${VERSION}.pkg\` and run the installer.
+
+          ### Checksums
+          \`\`\`
+          $(cat dist/checksums.txt)
+          \`\`\`
+          "
+
+          # Create tag if needed (for workflow_dispatch)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "Release ${VERSION}" || true
+            git push origin "$TAG" || true
+          fi
+
+          # Create or update release
+          gh release create "$TAG" \
+            --title "ReportMate macOS ${VERSION}" \
+            --notes "$RELEASE_NOTES" \
+            dist/ReportMate-${VERSION}.pkg \
+            dist/ReportMate-${VERSION}.zip \
+            dist/checksums.txt \
+            || gh release upload "$TAG" \
+               dist/ReportMate-${VERSION}.pkg \
+               dist/ReportMate-${VERSION}.zip \
+               dist/checksums.txt \
+               --clobber
+
+      - name: Cleanup keychain
+        if: always() && env.KEYCHAIN_PATH != ''
+        run: |
+          security delete-keychain "$KEYCHAIN_PATH" || true

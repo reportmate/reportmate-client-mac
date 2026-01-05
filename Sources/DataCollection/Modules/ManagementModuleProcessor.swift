@@ -4,7 +4,7 @@ import Foundation
 /// Based on MunkiReport patterns for MDM and management collection
 /// Reference: https://github.com/munkireport/munkireport-php
 /// No Python - uses osquery for: mdm, managed_policies, certificates
-/// Bash fallback for: DEP status, profiles, compliance checks
+/// Bash fallback for: ADE status, profiles, compliance checks
 public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     public init(configuration: ReportMateConfiguration) {
@@ -14,29 +14,29 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
     public override func collectData() async throws -> ModuleData {
         // Collect management data in parallel
         async let mdmStatus = collectMDMEnrollmentStatus()
-        async let depConfig = collectDEPConfiguration()
+        async let adeConfig = collectADEConfiguration()
         async let deviceIds = collectDeviceIdentifiers()
         async let remoteManagement = collectRemoteManagement()
         async let complianceStatus = collectComplianceStatus()
         async let installedProfiles = collectInstalledProfiles()
-        
+
         // Await all results
         let mdm = try await mdmStatus
-        let dep = try await depConfig
+        let ade = try await adeConfig
         let ids = try await deviceIds
         let remote = try await remoteManagement
         let compliance = try await complianceStatus
         let profiles = try await installedProfiles
-        
+
         let managementData: [String: Any] = [
             "mdmEnrollment": mdm,
-            "depConfiguration": dep,
+            "adeConfiguration": ade,
             "deviceIdentifiers": ids,
             "remoteManagement": remote,
             "complianceStatus": compliance,
             "installedProfiles": profiles
         ]
-        
+
         return BaseModuleData(moduleId: moduleId, data: managementData)
     }
     
@@ -61,47 +61,50 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             # Check MDM enrollment using profiles command
             mdm_enrolled="false"
             server_url=""
-            enrollment_type=""
+            enrollment_type="Unenrolled"
             user_approved="false"
-            dep_enrolled="false"
-            
+            ade_enrolled="false"
+
             # Check for MDM profile
             profiles_output=$(profiles status -type enrollment 2>/dev/null || echo "")
-            
+
             if echo "$profiles_output" | grep -qi "MDM enrollment: Yes"; then
                 mdm_enrolled="true"
             fi
-            
+
             if echo "$profiles_output" | grep -qi "User Approved"; then
                 user_approved="true"
             fi
-            
-            if echo "$profiles_output" | grep -qi "DEP enrollment: Yes"; then
-                dep_enrolled="true"
-                enrollment_type="DEP"
+
+            # Check for ADE enrollment (Automated Device Enrollment, formerly DEP)
+            if echo "$profiles_output" | grep -qi "DEP enrollment: Yes\\|Automated Device Enrollment: Yes"; then
+                ade_enrolled="true"
+                enrollment_type="ADE Enrolled"
+            elif [ "$user_approved" = "true" ]; then
+                enrollment_type="User Approved"
             elif [ "$mdm_enrolled" = "true" ]; then
-                enrollment_type="Manual"
+                enrollment_type="User Approved"
             fi
-            
+
             # Get MDM server URL from enrolled profile
             mdm_profile=$(profiles -C -v 2>/dev/null | grep -A5 "MDM Profile" | grep "ServerURL" | head -1 || echo "")
             if [ -n "$mdm_profile" ]; then
                 server_url=$(echo "$mdm_profile" | sed 's/.*ServerURL[[:space:]]*=[[:space:]]*//' | tr -d ';')
             fi
-            
+
             # Get enrollment identifier
             enrollment_id=""
             mdm_identity=$(profiles -C -v 2>/dev/null | grep -A10 "MDM Profile" | grep "PayloadIdentifier" | head -1 || echo "")
             if [ -n "$mdm_identity" ]; then
                 enrollment_id=$(echo "$mdm_identity" | sed 's/.*PayloadIdentifier[[:space:]]*=[[:space:]]*//' | tr -d ';')
             fi
-            
+
             echo "{"
             echo "  \\"enrolled\\": $mdm_enrolled,"
             echo "  \\"serverUrl\\": \\"$server_url\\","
             echo "  \\"enrollmentType\\": \\"$enrollment_type\\","
             echo "  \\"userApproved\\": $user_approved,"
-            echo "  \\"depEnrolled\\": $dep_enrolled,"
+            echo "  \\"adeEnrolled\\": $ade_enrolled,"
             echo "  \\"enrollmentIdentifier\\": \\"$enrollment_id\\""
             echo "}"
         """
@@ -114,47 +117,46 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         )
     }
     
-    // MARK: - DEP Configuration (bash: profiles)
-    
-    private func collectDEPConfiguration() async throws -> [String: Any] {
+    // MARK: - ADE Configuration (Automated Device Enrollment, formerly DEP)
+
+    private func collectADEConfiguration() async throws -> [String: Any] {
         let bashScript = """
-            # Get DEP status
-            dep_assigned="false"
-            dep_activated="false"
+            # Get ADE status (Automated Device Enrollment, formerly DEP)
+            ade_assigned="false"
+            ade_activated="false"
             organization=""
             support_phone=""
             support_email=""
-            
-            # Check DEP enrollment status
+
+            # Check ADE enrollment status
             profiles_output=$(profiles status -type enrollment 2>/dev/null || echo "")
-            
-            if echo "$profiles_output" | grep -qi "DEP enrollment: Yes"; then
-                dep_activated="true"
-                dep_assigned="true"
+
+            if echo "$profiles_output" | grep -qi "DEP enrollment: Yes\\|Automated Device Enrollment: Yes"; then
+                ade_activated="true"
+                ade_assigned="true"
             fi
-            
+
             # Try to get configuration profile info
             config_output=$(profiles -e 2>/dev/null | head -50 || echo "")
-            
+
             if [ -n "$config_output" ]; then
                 organization=$(echo "$config_output" | grep -i "ConfigurationURL" | head -1 | sed 's/.*\\/\\/\\([^\\/]*\\).*/\\1/' || echo "")
             fi
-            
-            # Get activation record if available
-            activation_record=""
+
+            # Get activation record if available (indicates ADE assignment)
             if [ -f "/private/var/db/ConfigurationProfiles/Store/activationRecord.plist" ]; then
-                dep_assigned="true"
+                ade_assigned="true"
             fi
-            
+
             echo "{"
-            echo "  \\"assigned\\": $dep_assigned,"
-            echo "  \\"activated\\": $dep_activated,"
+            echo "  \\"assigned\\": $ade_assigned,"
+            echo "  \\"activated\\": $ade_activated,"
             echo "  \\"organization\\": \\"$organization\\","
             echo "  \\"supportPhone\\": \\"$support_phone\\","
             echo "  \\"supportEmail\\": \\"$support_email\\""
             echo "}"
         """
-        
+
         return try await executeWithFallback(
             osquery: nil,
             bash: bashScript,
