@@ -53,22 +53,22 @@ public struct ManagementData: ModuleDataModel, Sendable {
 // MARK: - Device State (macOS equivalent of Windows DeviceState)
 public struct DeviceState: Codable, Sendable {
     public let mdmEnrolled: Bool           // Is device enrolled in MDM
-    public let depEnrolled: Bool           // Enrolled via DEP/ABM/ASM
+    public let adeEnrolled: Bool           // Enrolled via ADE (Automated Device Enrollment, formerly DEP)
     public let userApproved: Bool          // User-approved MDM enrollment
     public let supervised: Bool            // Device is supervised
     public let adBound: Bool               // Bound to Active Directory
     public let status: String              // Simplified status string
-    
+
     public init(
         mdmEnrolled: Bool = false,
-        depEnrolled: Bool = false,
+        adeEnrolled: Bool = false,
         userApproved: Bool = false,
         supervised: Bool = false,
         adBound: Bool = false,
         status: String = "Not Enrolled"
     ) {
         self.mdmEnrolled = mdmEnrolled
-        self.depEnrolled = depEnrolled
+        self.adeEnrolled = adeEnrolled
         self.userApproved = userApproved
         self.supervised = supervised
         self.adBound = adBound
@@ -119,7 +119,7 @@ public struct TenantDetails: Codable, Sendable {
 // MARK: - MDM Enrollment Info
 public struct MDMEnrollmentInfo: Codable, Sendable {
     public let isEnrolled: Bool
-    public let enrollmentType: String?     // DEP, Manual, User-Approved
+    public let enrollmentType: String?     // "ADE Enrolled", "User Approved", "Unenrolled"
     public let provider: String?           // Intune, Jamf, Mosyle, etc.
     public let userPrincipalName: String?  // Enrolled user
     public let enrollmentDate: Date?

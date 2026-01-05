@@ -19,6 +19,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         async let munkiInfo = collectMunkiInfo()
         async let munkiInstalls = collectMunkiManagedInstalls()
         async let pendingUpdates = collectPendingUpdates()
+        async let munkiRunLog = collectMunkiRunLog()
         
         // Await all results
         let history = try await installHistory
@@ -26,6 +27,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let info = try await munkiInfo
         let installs = try await munkiInstalls
         let pending = try await pendingUpdates
+        let runLog = try await munkiRunLog
         
         // Build MunkiInfo object if Munki is detected
         var munkiInfoObject: MunkiInfo? = nil
@@ -68,7 +70,8 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             munkiInfoObject = munki
         }
         
-        let installsData: [String: Any] = [
+        // Build installs data - runLog at top level like Cimian does
+        var installsData: [String: Any] = [
             "installHistory": history,
             "homebrewPackages": homebrew,
             "managedInstalls": installs.map { item -> [String: Any] in
@@ -117,7 +120,84 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             } ?? [:]
         ]
         
+        // Add runLog at top level (same key as Cimian for API compatibility)
+        if !runLog.isEmpty {
+            installsData["runLog"] = runLog
+        }
+        
         return BaseModuleData(moduleId: moduleId, data: installsData)
+    }
+    
+    // MARK: - Munki Run Log (extract last complete run from ManagedSoftwareUpdate.log)
+    
+    /// Collects the last complete run from Munki's ManagedSoftwareUpdate.log
+    /// Munki logs are cumulative with runs delimited by:
+    /// - "### Starting managedsoftwareupdate run: <type> ###"
+    /// - "### Ending managedsoftwareupdate run ###"
+    /// We extract only the last complete run (not all historical runs)
+    private func collectMunkiRunLog() async throws -> String {
+        let logPath = "/Library/Managed Installs/Logs/ManagedSoftwareUpdate.log"
+        
+        // Check if log exists
+        guard FileManager.default.fileExists(atPath: logPath) else {
+            return ""
+        }
+        
+        // Use tac to read file in reverse, find markers, then restore order
+        // This is efficient as it doesn't need to load the entire log file
+        let bashScript = """
+            logfile="/Library/Managed Installs/Logs/ManagedSoftwareUpdate.log"
+            
+            if [ ! -f "$logfile" ]; then
+                exit 0
+            fi
+            
+            # Use awk to find the last run by reading from the end
+            # Get line numbers of all "### Starting" and "### Ending" markers
+            ending_lines=$(grep -n "### Ending managedsoftwareupdate run ###" "$logfile" | tail -1 | cut -d: -f1)
+            starting_lines=$(grep -n "### Starting managedsoftwareupdate run:" "$logfile" | tail -1 | cut -d: -f1)
+            
+            # If we have both markers and ending is after starting (complete run)
+            if [ -n "$starting_lines" ] && [ -n "$ending_lines" ] && [ "$ending_lines" -ge "$starting_lines" ]; then
+                # Extract lines from starting to ending (inclusive)
+                sed -n "${starting_lines},${ending_lines}p" "$logfile"
+            elif [ -n "$starting_lines" ]; then
+                # Incomplete run - extract from starting to end of file
+                sed -n "${starting_lines},\\$p" "$logfile"
+            fi
+            """
+        
+        // Execute bash script
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", bashScript]
+        
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            if let output = String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !output.isEmpty {
+                // Limit to reasonable size (100KB max to avoid bloating the payload)
+                let maxSize = 100_000
+                if output.count > maxSize {
+                    let truncated = String(output.suffix(maxSize))
+                    return "... (truncated, showing last \(maxSize) characters) ...\n\n" + truncated
+                }
+                return output
+            }
+        } catch {
+            // Log error but don't fail - run log is optional
+            print("Warning: Failed to collect Munki run log: \(error)")
+        }
+        
+        return ""
     }
     
     // MARK: - Munki Info (osquery: munki_info table via macadmins extension)
@@ -139,60 +219,89 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             FROM munki_info;
             """
         
-        // Bash fallback: Read from Munki preferences and ManagedInstallReport
+        // Robust bash fallback using PlistBuddy to read ManagedInstallReport.plist
+        // This is the same plist the macadmins osquery extension reads
         let bashScript = """
+            plistbuddy="/usr/libexec/PlistBuddy"
+            report="/Library/Managed Installs/ManagedInstallReport.plist"
+            prefs="/Library/Preferences/ManagedInstalls.plist"
+            
             # Check if Munki is installed
             if [ ! -d "/Library/Managed Installs" ]; then
                 echo '{"isInstalled": false}'
                 exit 0
             fi
             
-            echo '{"isInstalled": true,'
+            # Start JSON output
+            printf '{'
+            printf '"isInstalled": true'
             
             # Get version from managedsoftwareupdate
             if [ -f "/usr/local/munki/managedsoftwareupdate" ]; then
                 version=$(/usr/local/munki/managedsoftwareupdate --version 2>/dev/null | head -1 || echo "")
-                echo '"version": "'$version'",'
+                printf ', "version": "%s"' "$version"
             fi
             
-            # Get config from ManagedInstalls plist
-            plist="/Library/Preferences/ManagedInstalls.plist"
-            if [ -f "$plist" ]; then
-                softwareRepoURL=$(defaults read "$plist" SoftwareRepoURL 2>/dev/null || echo "")
-                clientIdentifier=$(defaults read "$plist" ClientIdentifier 2>/dev/null || echo "")
-                echo '"softwareRepoURL": "'$softwareRepoURL'",'
-                echo '"clientIdentifier": "'$clientIdentifier'",'
+            # Get config from ManagedInstalls.plist preference file
+            if [ -f "$prefs" ]; then
+                softwareRepoURL=$($plistbuddy -c "Print :SoftwareRepoURL" "$prefs" 2>/dev/null || echo "")
+                clientIdentifier=$($plistbuddy -c "Print :ClientIdentifier" "$prefs" 2>/dev/null || echo "")
+                printf ', "softwareRepoURL": "%s"' "$softwareRepoURL"
+                printf ', "clientIdentifier": "%s"' "$clientIdentifier"
             fi
             
-            # Get last run info from ManagedInstallReport
-            report="/Library/Managed Installs/ManagedInstallReport.plist"
+            # Get last run info from ManagedInstallReport.plist
             if [ -f "$report" ]; then
-                startTime=$(defaults read "$report" StartTime 2>/dev/null || echo "")
-                endTime=$(defaults read "$report" EndTime 2>/dev/null || echo "")
-                consoleUser=$(defaults read "$report" ConsoleUser 2>/dev/null || echo "")
-                errors=$(defaults read "$report" Errors 2>/dev/null | tr '\\n' ' ' || echo "")
-                warnings=$(defaults read "$report" Warnings 2>/dev/null | tr '\\n' ' ' || echo "")
-                problemInstalls=$(defaults read "$report" ProblemInstalls 2>/dev/null | tr '\\n' ' ' || echo "")
+                # ManifestName - the resolved manifest path
+                manifestName=$($plistbuddy -c "Print :ManifestName" "$report" 2>/dev/null || echo "")
+                printf ', "manifestName": "%s"' "$manifestName"
                 
-                echo '"startTime": "'$startTime'",'
-                echo '"endTime": "'$endTime'",'
-                echo '"consoleUser": "'$consoleUser'",'
-                
-                # Determine success based on errors
-                if [ -z "$errors" ]; then
-                    echo '"success": "true",'
-                else
-                    echo '"success": "false",'
+                # ManagedInstallVersion - version stored in report
+                munkiVersion=$($plistbuddy -c "Print :ManagedInstallVersion" "$report" 2>/dev/null || echo "")
+                if [ -n "$munkiVersion" ]; then
+                    printf ', "version": "%s"' "$munkiVersion"
                 fi
                 
-                echo '"errors": "'$errors'",'
-                echo '"warnings": "'$warnings'",'
-                echo '"problemInstalls": "'$problemInstalls'"'
-            else
-                echo '"success": "false"'
+                # ConsoleUser at time of run
+                consoleUser=$($plistbuddy -c "Print :ConsoleUser" "$report" 2>/dev/null || echo "")
+                printf ', "consoleUser": "%s"' "$consoleUser"
+                
+                # StartTime and EndTime
+                startTime=$($plistbuddy -c "Print :StartTime" "$report" 2>/dev/null || echo "")
+                endTime=$($plistbuddy -c "Print :EndTime" "$report" 2>/dev/null || echo "")
+                printf ', "startTime": "%s"' "$startTime"
+                printf ', "endTime": "%s"' "$endTime"
+                
+                # Errors (array - check if empty)
+                errorCount=$($plistbuddy -c "Print :Errors" "$report" 2>/dev/null | grep -c "^    " || echo "0")
+                if [ "$errorCount" -gt 0 ]; then
+                    errors=$($plistbuddy -c "Print :Errors" "$report" 2>/dev/null | grep "^    " | tr '\\n' ';' | sed 's/^[[:space:]]*//' || echo "")
+                    # Escape quotes
+                    errors=$(echo "$errors" | sed 's/"/\\\\"/g')
+                    printf ', "errors": "%s"' "$errors"
+                    printf ', "success": "false"'
+                else
+                    printf ', "success": "true"'
+                fi
+                
+                # Warnings (array)
+                warningCount=$($plistbuddy -c "Print :Warnings" "$report" 2>/dev/null | grep -c "^    " || echo "0")
+                if [ "$warningCount" -gt 0 ]; then
+                    warnings=$($plistbuddy -c "Print :Warnings" "$report" 2>/dev/null | grep "^    " | tr '\\n' ';' | sed 's/^[[:space:]]*//' || echo "")
+                    warnings=$(echo "$warnings" | sed 's/"/\\\\"/g')
+                    printf ', "warnings": "%s"' "$warnings"
+                fi
+                
+                # ProblemInstalls (array)
+                problemCount=$($plistbuddy -c "Print :ProblemInstalls" "$report" 2>/dev/null | grep -c "^    " || echo "0")
+                if [ "$problemCount" -gt 0 ]; then
+                    problems=$($plistbuddy -c "Print :ProblemInstalls" "$report" 2>/dev/null | grep "^    " | tr '\\n' ';' | sed 's/^[[:space:]]*//' || echo "")
+                    problems=$(echo "$problems" | sed 's/"/\\\\"/g')
+                    printf ', "problemInstalls": "%s"' "$problems"
+                fi
             fi
             
-            echo '}'
+            printf '}'
             """
         
         let result = try await executeWithFallback(
@@ -379,68 +488,70 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     private func collectMunkiManagedInstalls() async throws -> [MunkiItem] {
         // osquery munki_installs table from macadmins extension
         // Reference: https://fleetdm.com/tables/munki_installs
+        // Columns: name, display_name, installed, installed_version, end_time
         let osqueryScript = """
             SELECT 
                 name,
+                display_name,
                 installed,
                 installed_version,
                 end_time
             FROM munki_installs;
             """
         
-        // Bash fallback: Parse Munki InstallInfo.plist
+        // Robust bash fallback using PlistBuddy to read ManagedInstallReport.plist
+        // This is the same plist the macadmins osquery extension reads
         let bashScript = """
-            managed_install_dir="/Library/Managed Installs"
-            install_info="$managed_install_dir/InstallInfo.plist"
+            report="/Library/Managed Installs/ManagedInstallReport.plist"
+            plistbuddy="/usr/libexec/PlistBuddy"
             
-            if [ -f "$install_info" ]; then
-                plutil -convert json -o - "$install_info" 2>/dev/null | awk '
-                BEGIN { 
-                    RS="},"; 
-                    in_managed=0; 
-                    in_removals=0; 
-                    print "["; 
-                    first=1 
-                }
-                /"managed_installs"/ { in_managed=1 }
-                /"removals"/ { in_managed=0; in_removals=1 }
-                {
-                    if (in_managed || in_removals) {
-                        name=""; version=""; size=0; installed="false"
-                        if (match($0, /"name"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
-                            n = substr($0, RSTART, RLENGTH)
-                            gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "", n)
-                            gsub(/".*/, "", n)
-                            name = n
-                        }
-                        if (match($0, /"version_to_install"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
-                            v = substr($0, RSTART, RLENGTH)
-                            gsub(/.*"version_to_install"[[:space:]]*:[[:space:]]*"/, "", v)
-                            gsub(/".*/, "", v)
-                            version = v
-                        }
-                        if (match($0, /"installed_size"[[:space:]]*:[[:space:]]*[0-9]+/)) {
-                            s = substr($0, RSTART, RLENGTH)
-                            gsub(/.*"installed_size"[[:space:]]*:[[:space:]]*/, "", s)
-                            size = s
-                        }
-                        if (match($0, /"installed"[[:space:]]*:[[:space:]]*(true|false)/)) {
-                            i = substr($0, RSTART, RLENGTH)
-                            if (i ~ /true/) installed = "true"
-                        }
-                        if (name != "") {
-                            status = in_removals ? "pending_removal" : (installed == "true" ? "installed" : "pending")
-                            if (!first) printf ","
-                            printf "{\\"name\\": \\"%s\\", \\"version\\": \\"%s\\", \\"status\\": \\"%s\\", \\"installed\\": \\"%s\\", \\"installedSize\\": %d}", name, version, status, installed, size
-                            first=0
-                        }
-                    }
-                }
-                END { print "]" }
-                ' 2>/dev/null || echo '[]'
-            else
+            if [ ! -f "$report" ]; then
                 echo '[]'
+                exit 0
             fi
+            
+            # Get the count of ManagedInstalls
+            count=$($plistbuddy -c "Print :ManagedInstalls" "$report" 2>/dev/null | grep -c "^    Dict" || echo "0")
+            
+            if [ "$count" -eq 0 ]; then
+                echo '[]'
+                exit 0
+            fi
+            
+            # Get end_time from the report (same for all items in this run)
+            end_time=$($plistbuddy -c "Print :EndTime" "$report" 2>/dev/null || echo "")
+            
+            echo "["
+            first=true
+            
+            i=0
+            while [ $i -lt $count ]; do
+                name=$($plistbuddy -c "Print :ManagedInstalls:$i:name" "$report" 2>/dev/null || echo "")
+                display_name=$($plistbuddy -c "Print :ManagedInstalls:$i:display_name" "$report" 2>/dev/null || echo "$name")
+                installed=$($plistbuddy -c "Print :ManagedInstalls:$i:installed" "$report" 2>/dev/null || echo "false")
+                installed_version=$($plistbuddy -c "Print :ManagedInstalls:$i:installed_version" "$report" 2>/dev/null || echo "")
+                installed_size=$($plistbuddy -c "Print :ManagedInstalls:$i:installed_size" "$report" 2>/dev/null || echo "0")
+                
+                # Escape any quotes in strings for JSON
+                name=$(echo "$name" | sed 's/"/\\\\"/g')
+                display_name=$(echo "$display_name" | sed 's/"/\\\\"/g')
+                
+                if [ -n "$name" ]; then
+                    if [ "$first" = "true" ]; then
+                        first=false
+                    else
+                        echo ","
+                    fi
+                    
+                    # Output JSON object
+                    printf '{"name": "%s", "display_name": "%s", "installed": "%s", "installed_version": "%s", "installed_size": %s, "end_time": "%s"}' \\
+                        "$name" "$display_name" "$installed" "$installed_version" "${installed_size:-0}" "$end_time"
+                fi
+                
+                i=$((i + 1))
+            done
+            
+            echo "]"
             """
         
         let result = try await executeWithFallback(
@@ -457,12 +568,22 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 
                 let name = itemData["name"] as? String ?? ""
                 item.name = name
-                item.displayName = name  // Munki doesn't have separate display name in osquery
+                // Use display_name from osquery/bash if available, otherwise fall back to name
+                item.displayName = itemData["display_name"] as? String ?? itemData["displayName"] as? String ?? name
                 item.id = name.lowercased().replacingOccurrences(of: " ", with: "-")
                 item.version = itemData["version"] as? String ?? ""
                 item.installedVersion = itemData["installed_version"] as? String ?? itemData["installedVersion"] as? String ?? ""
-                item.installedSize = itemData["installedSize"] as? Int ?? 0
-                item.endTime = itemData["end_time"] as? String ?? ""
+                
+                // Handle installed_size - could be Int or String
+                if let sizeInt = itemData["installed_size"] as? Int {
+                    item.installedSize = sizeInt
+                } else if let sizeStr = itemData["installed_size"] as? String, let sizeInt = Int(sizeStr) {
+                    item.installedSize = sizeInt
+                } else if let sizeInt = itemData["installedSize"] as? Int {
+                    item.installedSize = sizeInt
+                }
+                
+                item.endTime = itemData["end_time"] as? String ?? itemData["endTime"] as? String ?? ""
                 item.type = "munki"
                 
                 // Map 'installed' column to status
@@ -471,7 +592,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 
                 if statusStr == "pending_removal" {
                     item.status = "Removed"
-                } else if installedStr == "true" || installedStr == "1" {
+                } else if installedStr.lowercased() == "true" || installedStr == "1" {
                     item.status = "Installed"
                 } else {
                     item.status = "Pending"
