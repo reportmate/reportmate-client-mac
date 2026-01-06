@@ -13,6 +13,10 @@ let package = Package(
             name: "managedreportsrunner",
             targets: ["ReportMate"]
         ),
+        .executable(
+            name: "reportmate-appusage",
+            targets: ["AppUsageWatcher"]
+        ),
     ],
     dependencies: [
         // Swift Argument Parser for CLI
@@ -21,6 +25,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
         // Async HTTP Client
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.19.0"),
+        // SQLite.swift for app usage persistence
+        .package(url: "https://github.com/stephencelis/SQLite.swift.git", from: "0.15.3"),
     ],
     targets: [
         .executableTarget(
@@ -29,11 +35,22 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                .product(name: "SQLite", package: "SQLite.swift"),
             ],
             path: "Sources",
+            exclude: ["AppUsageWatcher"],
             resources: [
                 .copy("Resources")
             ]
+        ),
+        .executableTarget(
+            name: "AppUsageWatcher",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "SQLite", package: "SQLite.swift"),
+            ],
+            path: "Sources/AppUsageWatcher"
         ),
     ]
 )

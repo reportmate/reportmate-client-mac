@@ -230,7 +230,10 @@ struct ReportMateClient: AsyncParsableCommand {
         case "system": return SystemModuleProcessor(configuration: config)
         case "network": return NetworkModuleProcessor(configuration: config)
         case "security": return SecurityModuleProcessor(configuration: config)
-        case "applications": return ApplicationsModuleProcessor(configuration: config)
+        case "applications": 
+            // Application usage service for usage tracking from SQLite database
+            let usageService = ApplicationUsageService()
+            return ApplicationsModuleProcessor(configuration: config, applicationUsageService: usageService)
         case "management": return ManagementModuleProcessor(configuration: config)
         case "inventory": return InventoryModuleProcessor(configuration: config)
         case "displays", "printers", "peripherals":
