@@ -1,4 +1,5 @@
 import Foundation
+import SQLite
 
 // MARK: - Application Usage Models
 
@@ -75,14 +76,21 @@ public struct ApplicationUsageSession: Sendable {
 
 // MARK: - Application Usage Service
 
-/// Fast, simple service for collecting application usage data.
-/// Uses `ps` to get currently running application processes.
-/// Designed to complete in under 1 second.
+/// Service for collecting application usage data from SQLite database.
+/// The database is populated by the reportmate-appusage watcher daemon.
+/// Falls back to ps-based polling if database is unavailable.
 public class ApplicationUsageService: @unchecked Sendable {
     
-    public init() {}
+    private let dbPath: String
+    private var transmittedSessionIds: [Int64] = []  // Track IDs for two-phase delete
     
-    /// Collect application usage data - FAST synchronous implementation
+    public init(dbPath: String = "/Library/Managed Reports/appusage.sqlite") {
+        self.dbPath = dbPath
+    }
+    
+    /// Collect application usage data
+    /// Primary: Query SQLite database populated by watcher daemon
+    /// Fallback: Use ps command for currently running processes
     public func collectUsageData(
         installedApps: [[String: Any]],
         lookbackHours: Int? = nil
@@ -92,18 +100,38 @@ public class ApplicationUsageService: @unchecked Sendable {
         snapshot.generatedAt = Date()
         snapshot.windowStart = Date().addingTimeInterval(TimeInterval(-hours * 3600))
         snapshot.windowEnd = Date()
+        
+        // Try SQLite database first (populated by watcher daemon)
+        if FileManager.default.fileExists(atPath: dbPath) {
+            do {
+                let result = try collectFromDatabase(installedApps: installedApps)
+                snapshot.isCaptureEnabled = true
+                snapshot.captureMethod = "SQLiteWatcher"
+                snapshot.status = "complete"
+                snapshot.activeSessions = result.sessions
+                snapshot.totalLaunches = result.totalLaunches
+                snapshot.totalUsageSeconds = result.totalUsageSeconds
+                transmittedSessionIds = result.sessionIds
+                return snapshot
+            } catch {
+                snapshot.warnings.append("Database error: \(error.localizedDescription), falling back to polling")
+            }
+        }
+        
+        // Fallback to ps-based polling (for when watcher is not installed)
         snapshot.captureMethod = "ProcessPolling"
         snapshot.isCaptureEnabled = true
         
         do {
-            // Get running processes - completes in milliseconds
             let sessions = try collectRunningSessions(installedApps: installedApps)
-            
             snapshot.status = "complete"
             snapshot.activeSessions = sessions
             snapshot.totalLaunches = sessions.count
             snapshot.totalUsageSeconds = sessions.reduce(0) { $0 + $1.durationSeconds }
             
+            if !FileManager.default.fileExists(atPath: dbPath) {
+                snapshot.warnings.append("Watcher daemon not running. Install reportmate-appusage for accurate usage tracking.")
+            }
         } catch {
             snapshot.status = "error"
             snapshot.warnings.append(error.localizedDescription)
@@ -112,7 +140,101 @@ public class ApplicationUsageService: @unchecked Sendable {
         return snapshot
     }
     
-    /// Collect running application sessions - fast ps-based polling
+    /// Mark transmitted data for deletion (called after successful API transmission)
+    public func confirmTransmission() {
+        guard !transmittedSessionIds.isEmpty else { return }
+        
+        do {
+            let db = try Connection(dbPath)
+            
+            // Two-phase delete: First mark as transmitted
+            let sessions = Table("app_sessions")
+            let id = Expression<Int64>("id")
+            let transmitted = Expression<Bool>("transmitted")
+            
+            let toUpdate = sessions.filter(transmittedSessionIds.contains(id))
+            try db.run(toUpdate.update(transmitted <- true))
+            
+            // Delete previously transmitted sessions (from last cycle)
+            let toDelete = sessions.filter(transmitted == true)
+            try db.run(toDelete.delete())
+            
+            transmittedSessionIds = []
+        } catch {
+            print("Warning: Failed to mark sessions as transmitted: \(error)")
+        }
+    }
+    
+    // MARK: - SQLite Database Collection
+    
+    private func collectFromDatabase(installedApps: [[String: Any]]) throws -> (sessions: [ApplicationUsageSession], totalLaunches: Int, totalUsageSeconds: Double, sessionIds: [Int64]) {
+        let db = try Connection(dbPath, readonly: true)
+        
+        let sessions = Table("app_sessions")
+        let idCol = Expression<Int64>("id")
+        let appNameCol = Expression<String>("app_name")
+        let pathCol = Expression<String>("path")
+        let userCol = Expression<String>("user")
+        let pidCol = Expression<Int64>("pid")
+        let startTimeCol = Expression<String>("start_time")
+        let endTimeCol = Expression<String?>("end_time")
+        let durationCol = Expression<Int64>("duration_seconds")
+        let transmittedCol = Expression<Bool>("transmitted")
+        
+        // Query untransmitted completed sessions + active sessions
+        let query = sessions
+            .filter(transmittedCol == false)
+            .order(startTimeCol.desc)
+        
+        var result: [ApplicationUsageSession] = []
+        var sessionIds: [Int64] = []
+        var totalLaunches = 0
+        var totalUsageSeconds: Double = 0
+        
+        let formatter = ISO8601DateFormatter()
+        
+        for row in try db.prepare(query) {
+            let rowId = row[idCol]
+            let path = row[pathCol]
+            let isActive = row[endTimeCol] == nil
+            
+            // Accept all tracked applications from the watcher database
+            // The watcher already filters to trackable GUI apps in /Applications
+            let startDate = formatter.date(from: row[startTimeCol]) ?? Date()
+            var duration = Double(row[durationCol])
+            
+            // For active sessions, calculate current duration
+            if isActive {
+                duration = Date().timeIntervalSince(startDate)
+            }
+            
+            // Skip unknown duration sessions in totals but include them
+            if row[durationCol] != -1 {
+                totalUsageSeconds += duration
+            }
+            
+            var session = ApplicationUsageSession()
+            session.sessionId = "\(row[pidCol])-\(Int(startDate.timeIntervalSince1970))"
+            session.name = row[appNameCol]
+            session.path = path
+            session.processId = Int(row[pidCol])
+            session.user = row[userCol]
+            session.startTime = startDate
+            session.endTime = row[endTimeCol].flatMap { formatter.date(from: $0) }
+            session.durationSeconds = duration
+            session.isActive = isActive
+            
+            result.append(session)
+            sessionIds.append(rowId)
+            totalLaunches += 1
+        }
+        
+        return (result, totalLaunches, totalUsageSeconds, sessionIds)
+    }
+    
+    // MARK: - Fallback: Process Polling
+    
+    /// Collect running application sessions - fast ps-based polling (fallback)
     private func collectRunningSessions(installedApps: [[String: Any]]) throws -> [ApplicationUsageSession] {
         var sessions: [ApplicationUsageSession] = []
         
