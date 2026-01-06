@@ -5,10 +5,12 @@ public class DataCollectionService {
     private let configuration: ReportMateConfiguration
     private let osqueryService: OSQueryService
     private let moduleProcessors: [String: ModuleProcessor]
+    private let applicationUsageService: ApplicationUsageService
     
     public init(configuration: ReportMateConfiguration) {
         self.configuration = configuration
         self.osqueryService = OSQueryService(configuration: configuration)
+        self.applicationUsageService = ApplicationUsageService()
         
         // Initialize module processors
         self.moduleProcessors = [
@@ -16,7 +18,7 @@ public class DataCollectionService {
             "system": SystemModuleProcessor(configuration: configuration),
             "network": NetworkModuleProcessor(configuration: configuration),
             "security": SecurityModuleProcessor(configuration: configuration),
-            "applications": ApplicationsModuleProcessor(configuration: configuration),
+            "applications": ApplicationsModuleProcessor(configuration: configuration, applicationUsageService: applicationUsageService),
             "management": ManagementModuleProcessor(configuration: configuration),
             "inventory": InventoryModuleProcessor(configuration: configuration),
             "profiles": ProfilesModuleProcessor(configuration: configuration)
