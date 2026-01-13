@@ -235,20 +235,142 @@ public class SystemInfoService {
 }
 
 /// Cache service for managing collection timestamps and cached data
+/// Enhanced to match Windows client architecture: per-module JSON files with timestamps
 public class CacheService {
-    private let cacheDirectory: URL
+    private let baseCacheDirectory: URL
+    private var currentCacheDirectory: URL?
     
     public init() {
-        // Use system-wide cache directory matching Munki: /Library/Managed Reports
-        self.cacheDirectory = URL(fileURLWithPath: "/Library/Managed Reports/cache")
+        // Use system-wide cache directory matching Munki: /Library/Managed Reports/cache
+        self.baseCacheDirectory = URL(fileURLWithPath: "/Library/Managed Reports/cache")
         
-        // Create cache directory if it doesn't exist
-        try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        // Create base cache directory if it doesn't exist
+        try? FileManager.default.createDirectory(at: baseCacheDirectory, withIntermediateDirectories: true)
     }
+    
+    // MARK: - Timestamped Directory Management (matches Windows architecture)
+    
+    /// Create a new timestamped cache directory for this collection run
+    /// Returns the directory URL for saving module files
+    public func createTimestampedCacheDirectory() -> URL {
+        let now = Date()
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        let timestamp = formatter.string(from: now)
+        
+        let timestampedDir = baseCacheDirectory.appendingPathComponent(timestamp)
+        try? FileManager.default.createDirectory(at: timestampedDir, withIntermediateDirectories: true)
+        
+        self.currentCacheDirectory = timestampedDir
+        return timestampedDir
+    }
+    
+    /// Get the current timestamped cache directory, creating one if needed
+    public func getCurrentCacheDirectory() -> URL {
+        if let current = currentCacheDirectory {
+            return current
+        }
+        return createTimestampedCacheDirectory()
+    }
+    
+    /// Save module data to its own JSON file in the current timestamped directory
+    /// Matches Windows pattern: each module gets its own file (e.g., security.json, hardware.json)
+    public func saveModuleData(_ data: [String: Any], for moduleId: String) async throws {
+        let cacheDir = getCurrentCacheDirectory()
+        let moduleFile = cacheDir.appendingPathComponent("\(moduleId).json")
+        
+        let jsonData = try JSONSerialization.data(withJSONObject: data, options: [.prettyPrinted, .sortedKeys])
+        try jsonData.write(to: moduleFile)
+        
+        print("Saved module data: \(moduleFile.lastPathComponent)")
+    }
+    
+    /// Load module data from the latest timestamped cache directory
+    public func loadModuleData(for moduleId: String) async -> [String: Any]? {
+        guard let latestDir = getLatestCacheDirectory() else {
+            return nil
+        }
+        
+        let moduleFile = latestDir.appendingPathComponent("\(moduleId).json")
+        
+        guard FileManager.default.fileExists(atPath: moduleFile.path) else {
+            return nil
+        }
+        
+        do {
+            let data = try Data(contentsOf: moduleFile)
+            return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        } catch {
+            print("Warning: Could not load module data for \(moduleId): \(error)")
+            return nil
+        }
+    }
+    
+    /// Get the latest timestamped cache directory
+    public func getLatestCacheDirectory() -> URL? {
+        do {
+            let contents = try FileManager.default.contentsOfDirectory(
+                at: baseCacheDirectory,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+            
+            // Filter to only timestamped directories (format: YYYY-MM-DD-HHmmss)
+            let timestampDirs = contents.filter { url in
+                var isDirectory: ObjCBool = false
+                FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+                guard isDirectory.boolValue else { return false }
+                
+                // Check if name matches timestamp pattern
+                let name = url.lastPathComponent
+                return name.range(of: #"^\d{4}-\d{2}-\d{2}-\d{6}$"#, options: .regularExpression) != nil
+            }
+            
+            // Sort by name (which is chronological due to timestamp format) and get latest
+            return timestampDirs.sorted { $0.lastPathComponent > $1.lastPathComponent }.first
+        } catch {
+            print("Warning: Could not list cache directories: \(error)")
+            return nil
+        }
+    }
+    
+    /// Save the unified event.json payload to the current cache directory
+    public func saveEventPayload(_ payload: [String: Any]) async throws {
+        let cacheDir = getCurrentCacheDirectory()
+        let eventFile = cacheDir.appendingPathComponent("event.json")
+        
+        let jsonData = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        try jsonData.write(to: eventFile)
+        
+        print("Saved event payload: \(eventFile.path)")
+    }
+    
+    /// Load the event.json from the latest cache directory
+    public func loadEventPayload() async -> [String: Any]? {
+        guard let latestDir = getLatestCacheDirectory() else {
+            return nil
+        }
+        
+        let eventFile = latestDir.appendingPathComponent("event.json")
+        
+        guard FileManager.default.fileExists(atPath: eventFile.path) else {
+            return nil
+        }
+        
+        do {
+            let data = try Data(contentsOf: eventFile)
+            return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        } catch {
+            print("Warning: Could not load event payload: \(error)")
+            return nil
+        }
+    }
+    
+    // MARK: - Legacy Methods (for backwards compatibility)
     
     /// Get the timestamp of the last data collection
     public func getLastCollectionTimestamp() async -> Date? {
-        let timestampFile = cacheDirectory.appendingPathComponent("last_collection.timestamp")
+        let timestampFile = baseCacheDirectory.appendingPathComponent("last_collection.timestamp")
         
         guard FileManager.default.fileExists(atPath: timestampFile.path) else {
             return nil
@@ -266,7 +388,7 @@ public class CacheService {
     
     /// Set the timestamp of the last data collection
     public func setLastCollectionTimestamp(_ timestamp: Date) async {
-        let timestampFile = cacheDirectory.appendingPathComponent("last_collection.timestamp")
+        let timestampFile = baseCacheDirectory.appendingPathComponent("last_collection.timestamp")
         let timestampString = String(timestamp.timeIntervalSince1970)
         
         do {
@@ -276,88 +398,71 @@ public class CacheService {
         }
     }
     
-    /// Cache collected data
-    public func cacheData(_ payload: [String: Any], for moduleId: String) async {
-        let cacheFile = cacheDirectory.appendingPathComponent("\(moduleId)_cache.json")
-        
-        do {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = .prettyPrinted
-            
-            let data = try JSONSerialization.data(withJSONObject: payload)
-            try data.write(to: cacheFile)
-        } catch {
-            print("Warning: Could not cache data for module \(moduleId): \(error)")
-        }
-    }
-    
-    /// Cache all collected data (for ReportMateCore compatibility)
+    /// Cache all collected data (legacy method - now also saves to event.json)
     public func setCachedData(_ data: [String: Any]) async {
-        let cacheFile = cacheDirectory.appendingPathComponent("collected_data.json")
+        // Create timestamped directory and save as event.json
+        _ = getCurrentCacheDirectory()
         
         do {
-            let jsonData = try JSONSerialization.data(withJSONObject: data)
-            try jsonData.write(to: cacheFile)
+            try await saveEventPayload(data)
+            
+            // Also save individual module files from the payload
+            if let modules = data["modules"] as? [String: Any] {
+                for (moduleId, moduleData) in modules {
+                    if let moduleDict = moduleData as? [String: Any] {
+                        try await saveModuleData(moduleDict, for: moduleId)
+                    }
+                }
+            }
+            
+            // Save top-level module data if present (for flat payload structure)
+            let moduleNames = ["hardware", "system", "security", "network", "applications", 
+                            "management", "inventory", "profiles", "installs", "displays", "printers"]
+            for moduleName in moduleNames {
+                if let moduleData = data[moduleName] as? [String: Any] {
+                    try await saveModuleData(moduleData, for: moduleName)
+                }
+            }
         } catch {
             print("Warning: Could not cache collected data: \(error)")
         }
     }
     
-    /// Get all cached data (for ReportMateCore compatibility)
+    /// Get all cached data (legacy method - reads from latest event.json)
     public func getCachedData() async -> [String: Any]? {
-        let cacheFile = cacheDirectory.appendingPathComponent("collected_data.json")
-        
-        guard FileManager.default.fileExists(atPath: cacheFile.path) else {
-            return nil
-        }
-        
-        do {
-            let data = try Data(contentsOf: cacheFile)
-            return try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        } catch {
-            print("Warning: Could not load cached data: \(error)")
-            return nil
-        }
+        return await loadEventPayload()
     }
     
-    /// Load cached data for a module
-    public func loadCachedData(for moduleId: String) async -> [String: Any]? {
-        let cacheFile = cacheDirectory.appendingPathComponent("\(moduleId)_cache.json")
-        
-        guard FileManager.default.fileExists(atPath: cacheFile.path) else {
-            return nil
-        }
-        
+    /// Clean up old cache directories (keeps last N directories)
+    public func cleanupOldCache(keepLast count: Int = 5) async {
         do {
-            let data = try Data(contentsOf: cacheFile)
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
+            let contents = try FileManager.default.contentsOfDirectory(
+                at: baseCacheDirectory,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
             
-            return try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        } catch {
-            print("Warning: Could not load cached data for module \(moduleId): \(error)")
-            return nil
-        }
-    }
-    
-    /// Clean up old cache files
-    public func cleanupOldCache(olderThan interval: TimeInterval = 86400) async { // 24 hours default
-        let cutoffDate = Date().addingTimeInterval(-interval)
-        
-        do {
-            let cacheFiles = try FileManager.default.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: [.contentModificationDateKey])
+            // Filter to only timestamped directories
+            let timestampDirs = contents.filter { url in
+                var isDirectory: ObjCBool = false
+                FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+                guard isDirectory.boolValue else { return false }
+                
+                let name = url.lastPathComponent
+                return name.range(of: #"^\d{4}-\d{2}-\d{2}-\d{6}$"#, options: .regularExpression) != nil
+            }
             
-            for file in cacheFiles {
-                let attributes = try file.resourceValues(forKeys: [.contentModificationDateKey])
-                if let modificationDate = attributes.contentModificationDate,
-                   modificationDate < cutoffDate {
-                    try FileManager.default.removeItem(at: file)
-                    print("Cleaned up old cache file: \(file.lastPathComponent)")
+            // Sort by name (chronological) and remove oldest if over count
+            let sorted = timestampDirs.sorted { $0.lastPathComponent > $1.lastPathComponent }
+            
+            if sorted.count > count {
+                for dir in sorted.dropFirst(count) {
+                    try FileManager.default.removeItem(at: dir)
+                    print("Cleaned up old cache directory: \(dir.lastPathComponent)")
                 }
             }
         } catch {
-            print("Warning: Could not clean up cache directory: \(error)")
+            print("Warning: Could not clean up cache directories: \(error)")
         }
     }
 }
