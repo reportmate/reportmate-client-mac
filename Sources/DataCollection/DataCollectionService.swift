@@ -210,14 +210,26 @@ public class DataCollectionService {
     }
     
     /// Convert ModuleData to dictionary for JSON serialization
+    /// Extracts the actual data from the module, not the wrapper
     private func convertModuleDataToDict(_ moduleData: ModuleData) -> [String: Any] {
-        // Use JSONEncoder to convert the Codable ModuleData to Data, then to dictionary
+        // If it's a BaseModuleData, extract the data property directly
+        if let baseData = moduleData as? BaseModuleData {
+            return baseData.data
+        }
+        
+        // Fallback: Use JSONEncoder to convert the Codable ModuleData to Data, then to dictionary
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         
         do {
             let data = try encoder.encode(moduleData)
             if let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                // If the result has a "dataJson" key, parse and return that instead
+                if let dataJsonString = dict["dataJson"] as? String,
+                   let jsonData = dataJsonString.data(using: .utf8),
+                   let actualData = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                    return actualData
+                }
                 return dict
             }
         } catch {
