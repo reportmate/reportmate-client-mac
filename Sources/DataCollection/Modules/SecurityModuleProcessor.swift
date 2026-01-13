@@ -25,7 +25,10 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         async let mrtStatus = collectMRTStatus()
         async let secureEnclaveStatus = collectSecureEnclaveStatus()
         async let activationLockStatus = collectActivationLockStatus()
+        async let platformSSOStatus = collectPlatformSSOStatus()
         async let fileVaultUsers = collectFileVaultUsers()
+        async let secureTokenStatus = collectSecureTokenStatus()
+        async let bootstrapTokenStatus = collectBootstrapTokenStatus()
         async let authdbData = collectAuthDB()
         async let sofaUnpatchedCVEs = collectSofaUnpatchedCVEs()
         async let sofaSecurityRelease = collectSofaSecurityReleaseInfo()
@@ -43,7 +46,10 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let mrt = try await mrtStatus
         let secureEnclave = try await secureEnclaveStatus
         let activationLock = try await activationLockStatus
+        let platformSSO = try await platformSSOStatus
         let fvUsers = try await fileVaultUsers
+        let secureToken = try await secureTokenStatus
+        let bootstrapToken = try await bootstrapTokenStatus
         let authdb = try await authdbData
         let unpatchedCVEs = try await sofaUnpatchedCVEs
         let securityRelease = try await sofaSecurityRelease
@@ -55,6 +61,8 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "firewall": firewall,
             "fileVault": fileVault,
             "fileVaultUsers": fvUsers,
+            "secureToken": secureToken,
+            "bootstrapToken": bootstrapToken,
             "xprotect": xprotect,
             "ssh": ssh,
             "secureBoot": secureBoot,
@@ -63,6 +71,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "mrt": mrt,
             "secureEnclave": secureEnclave,
             "activationLock": activationLock,
+            "platformSSO": platformSSO,
             "authorizationDB": authdb,
             "unpatchedCVEs": unpatchedCVEs,
             "securityReleaseInfo": securityRelease
@@ -327,17 +336,31 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 deferred="true"
             fi
             
-            # Get enabled users
+            # Get enabled users (Volume Owners)
             enabled_users=""
             if [ "$enabled" = "true" ]; then
                 enabled_users=$(fdesetup list 2>/dev/null | cut -d',' -f1 | tr '\\n' ',' | sed 's/,$//')
+            fi
+            
+            # Get Personal Recovery Key (PRK) status - CRITICAL for MDM
+            prk_exists="false"
+            if fdesetup haspersonalrecoverykey 2>/dev/null | grep -qi "true"; then
+                prk_exists="true"
+            fi
+            
+            # Get Institutional Recovery Key (IRK) status
+            irk_exists="false"
+            if fdesetup hasinstitutionalrecoverykey 2>/dev/null | grep -qi "true"; then
+                irk_exists="true"
             fi
             
             echo "{"
             echo "  \\"enabled\\": $enabled,"
             echo "  \\"status\\": \\"$status\\","
             echo "  \\"deferred\\": $deferred,"
-            echo "  \\"enabledUsers\\": \\"$enabled_users\\""
+            echo "  \\"enabledUsers\\": \\"$enabled_users\\","
+            echo "  \\"personalRecoveryKey\\": $prk_exists,"
+            echo "  \\"institutionalRecoveryKey\\": $irk_exists"
             echo "}"
         """
         
@@ -377,17 +400,48 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let deferred = (result["deferred"] as? Bool == true) ||
                       (result["deferred"] as? String == "true")
         
-        // Parse enabled users
+        // Parse enabled users (Volume Owners)
         var enabledUsers: [String] = []
         if let users = result["enabledUsers"] as? String, !users.isEmpty {
             enabledUsers = users.components(separatedBy: ",").filter { !$0.isEmpty }
+        }
+        
+        // Recovery key status - critical for MDM
+        // These are always from bash script output
+        var personalRecoveryKey = (result["personalRecoveryKey"] as? Bool == true) ||
+                                  (result["personalRecoveryKey"] as? String == "true")
+        var institutionalRecoveryKey = (result["institutionalRecoveryKey"] as? Bool == true) ||
+                                       (result["institutionalRecoveryKey"] as? String == "true")
+        
+        // If osquery was used (items array present), we need to run bash specifically for PRK/IRK
+        if result["items"] != nil {
+            // Run bash script specifically for recovery key status
+            let prkScript = """
+                prk="false"
+                irk="false"
+                if fdesetup haspersonalrecoverykey 2>/dev/null | grep -qi "true"; then
+                    prk="true"
+                fi
+                if fdesetup hasinstitutionalrecoverykey 2>/dev/null | grep -qi "true"; then
+                    irk="true"
+                fi
+                echo "{\\"personalRecoveryKey\\": $prk, \\"institutionalRecoveryKey\\": $irk}"
+            """
+            if let prkResult = try? await executeWithFallback(osquery: nil, bash: prkScript, python: nil) {
+                personalRecoveryKey = (prkResult["personalRecoveryKey"] as? Bool == true) ||
+                                      (prkResult["personalRecoveryKey"] as? String == "true")
+                institutionalRecoveryKey = (prkResult["institutionalRecoveryKey"] as? Bool == true) ||
+                                           (prkResult["institutionalRecoveryKey"] as? String == "true")
+            }
         }
         
         return [
             "enabled": enabled,
             "status": status,
             "deferred": deferred,
-            "enabledUsers": enabledUsers
+            "enabledUsers": enabledUsers,
+            "personalRecoveryKey": personalRecoveryKey,
+            "institutionalRecoveryKey": institutionalRecoveryKey
         ]
     }
     
@@ -445,6 +499,110 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         }
         
         return []
+    }
+    
+    // MARK: - Secure Token Status (critical for MDM management)
+    
+    private func collectSecureTokenStatus() async throws -> [String: Any] {
+        // SecureToken is essential for MDM workflows - must be collected via bash
+        // sysadminctl -secureTokenStatus <username> returns status per user
+        let bashScript = """
+            users_with_token=()
+            users_without_token=()
+            total_checked=0
+            
+            # Get all local users with UID >= 500 (actual users, not system accounts)
+            for user in $(dscl . -list /Users UniqueID | awk '$2 >= 500 {print $1}'); do
+                total_checked=$((total_checked + 1))
+                status=$(sysadminctl -secureTokenStatus "$user" 2>&1 || echo "Unknown")
+                
+                if echo "$status" | grep -qi "enabled"; then
+                    users_with_token+=("$user")
+                elif echo "$status" | grep -qi "disabled"; then
+                    users_without_token+=("$user")
+                fi
+            done
+            
+            # Build JSON with helper function
+            array_to_json() {
+                local arr=("$@")
+                local first=true
+                echo -n "["
+                for item in "${arr[@]}"; do
+                    [ "$first" = false ] && echo -n ","
+                    first=false
+                    echo -n "\\"$item\\""
+                done
+                echo -n "]"
+            }
+            
+            has_token=false
+            [ ${#users_with_token[@]} -gt 0 ] && has_token=true
+            
+            echo "{"
+            echo "  \\"enabled\\": $has_token,"
+            echo "  \\"usersWithToken\\": $(array_to_json "${users_with_token[@]}"),"
+            echo "  \\"usersWithoutToken\\": $(array_to_json "${users_without_token[@]}"),"
+            echo "  \\"totalUsersChecked\\": $total_checked,"
+            echo "  \\"tokenGrantedCount\\": ${#users_with_token[@]},"
+            echo "  \\"tokenMissingCount\\": ${#users_without_token[@]}"
+            echo "}"
+        """
+        
+        return try await executeWithFallback(
+            osquery: nil,
+            bash: bashScript,
+            python: nil
+        )
+    }
+    
+    // MARK: - Bootstrap Token Status (critical for MDM management)
+    
+    private func collectBootstrapTokenStatus() async throws -> [String: Any] {
+        // Bootstrap Token is escrowed to MDM - required for Volume Ownership/DEP workflows
+        // profiles status -type bootstraptoken tells us if it's escrowed
+        let bashScript = """
+            status="Unknown"
+            escrowed=false
+            supported=true
+            
+            # Check Bootstrap Token status via profiles command
+            bt_output=$(profiles status -type bootstraptoken 2>&1 || echo "Unknown")
+            
+            # Parse the output
+            if echo "$bt_output" | grep -qi "escrowed\\|YES"; then
+                escrowed=true
+                status="Escrowed"
+            elif echo "$bt_output" | grep -qi "not escrowed\\|NO"; then
+                status="Not Escrowed"
+            elif echo "$bt_output" | grep -qi "not supported"; then
+                supported=false
+                status="Not Supported"
+            elif echo "$bt_output" | grep -qi "requires MDM"; then
+                status="Requires MDM Enrollment"
+            fi
+            
+            # Check if device is Apple Silicon (Bootstrap Token more critical on AS)
+            cpu_brand=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "")
+            is_apple_silicon=false
+            if echo "$cpu_brand" | grep -qi "Apple"; then
+                is_apple_silicon=true
+            fi
+            
+            echo "{"
+            echo "  \\"escrowed\\": $escrowed,"
+            echo "  \\"status\\": \\"$status\\","
+            echo "  \\"supported\\": $supported,"
+            echo "  \\"isAppleSilicon\\": $is_apple_silicon,"
+            echo "  \\"rawOutput\\": \\"$(echo "$bt_output" | tr '\\n' ' ' | tr '\\"' \"'\")\\"" 
+            echo "}"
+        """
+        
+        return try await executeWithFallback(
+            osquery: nil,
+            bash: bashScript,
+            python: nil
+        )
     }
     
     // MARK: - XProtect Status (osquery: xprotect_entries + bash for version)
@@ -809,13 +967,73 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     private func collectActivationLockStatus() async throws -> [String: Any] {
         let bashScript = """
-            # Check Activation Lock status
-            # This requires MDM enrollment to be truly accurate
+            # Check Activation Lock and Find My Mac status
+            # Methods:
+            # 1. ioreg - Check for fmm-mobileme-token (works on Apple Silicon)
+            # 2. nvram - Check for fmm-mobileme-token (Intel Macs)
+            # 3. system_profiler - Activation Lock status
+            # 4. MobileMeAccounts - Get iCloud account email
+            # Reference: https://github.com/munkireport/findmymac
             
             activation_lock="Unknown"
-            find_my_mac="Unknown"
+            find_my_mac="Disabled"
+            fmm_email=""
+            fmm_owner=""
+            fmm_person_id=""
             
-            # Try to get from system_profiler
+            # METHOD 1: Check via ioreg (Apple Silicon / modern macOS)
+            # On Apple Silicon, nvram data is stored differently
+            # The token appears as "01:fmm-mobileme-token-FMM" with Present=Yes
+            fmm_count=$(ioreg -l 2>/dev/null | grep -c "fmm-mobileme-token-FMM" || echo "0")
+            if [ "$fmm_count" -gt 0 ]; then
+                find_my_mac="Enabled"
+            fi
+            
+            # METHOD 2: Check via nvram (Intel Macs / older macOS)
+            if [ "$find_my_mac" = "Disabled" ]; then
+                fmm_data=$(/usr/sbin/nvram -x -p 2>/dev/null | /usr/bin/awk '/fmm-mobileme-token/,/<\\/data>/' | /usr/bin/awk '/<key>/ {f=0}; f && c==1; /<key>/ {f=1; c++}' | /usr/bin/grep -v 'data\\|key' | /usr/bin/tr -d '\\t' | /usr/bin/tr -d '\\n')
+                
+                if [ -n "$fmm_data" ]; then
+                    find_my_mac="Enabled"
+                    
+                    # Decode the base64 data to get additional info (Intel only)
+                    fmm_plist_file="/tmp/findmymac_raw_$$.plist"
+                    echo "$fmm_data" | /usr/bin/base64 --decode > "$fmm_plist_file" 2>/dev/null
+                    
+                    if [ -f "$fmm_plist_file" ] && [ -s "$fmm_plist_file" ]; then
+                        # Extract email (iCloud account)
+                        fmm_email=$(/usr/libexec/PlistBuddy -c "Print username" "$fmm_plist_file" 2>/dev/null || echo "")
+                        
+                        # Extract owner display name
+                        fmm_owner=$(/usr/libexec/PlistBuddy -c "Print userInfo:InUseOwnerDisplayName" "$fmm_plist_file" 2>/dev/null || echo "")
+                        
+                        # Extract person ID (unique iCloud ID)
+                        fmm_person_id=$(/usr/libexec/PlistBuddy -c "Print personID" "$fmm_plist_file" 2>/dev/null || echo "")
+                        
+                        # Cleanup
+                        rm -f "$fmm_plist_file"
+                    fi
+                fi
+            fi
+            
+            # METHOD 4: Get iCloud account from MobileMeAccounts (works on both Intel and Apple Silicon)
+            # This gets the logged-in iCloud account that owns Find My
+            # Note: MobileMeAccounts is per-user, so we need to read from the console user's home
+            if [ -z "$fmm_email" ]; then
+                # Get the console user's home directory
+                console_user=$(stat -f '%Su' /dev/console 2>/dev/null || echo "")
+                if [ -n "$console_user" ] && [ "$console_user" != "root" ]; then
+                    user_home=$(dscl . -read "/Users/$console_user" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || echo "")
+                    if [ -n "$user_home" ] && [ -f "$user_home/Library/Preferences/MobileMeAccounts.plist" ]; then
+                        # Read from user's preferences with full path
+                        fmm_email=$(defaults read "$user_home/Library/Preferences/MobileMeAccounts" Accounts 2>/dev/null | awk -F'"' '/AccountID/ {print $2; exit}' || echo "")
+                        fmm_owner=$(defaults read "$user_home/Library/Preferences/MobileMeAccounts" Accounts 2>/dev/null | awk -F'"' '/DisplayName/ {print $2; exit}' || echo "")
+                    fi
+                fi
+            fi
+            
+            # METHOD 5: Check Activation Lock status from system_profiler
+            # This reports the MDM-managed Activation Lock status
             hw_info=$(system_profiler SPHardwareDataType 2>/dev/null || echo "")
             
             if echo "$hw_info" | grep -qi "Activation Lock Status: Enabled"; then
@@ -824,28 +1042,220 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 activation_lock="Disabled"
             fi
             
-            # Check Find My Mac status
-            fmm_plist="/Library/Preferences/com.apple.findmy.plist"
-            if [ -f "$fmm_plist" ]; then
-                fmm_enabled=$(/usr/libexec/PlistBuddy -c "Print :FMMEnabled" "$fmm_plist" 2>/dev/null || echo "")
-                if [ "$fmm_enabled" = "true" ]; then
-                    find_my_mac="Enabled"
-                elif [ "$fmm_enabled" = "false" ]; then
-                    find_my_mac="Disabled"
-                fi
-            fi
-            
-            # Alternative: check via nvram (less reliable)
-            if [ "$activation_lock" = "Unknown" ]; then
-                nvram_fmm=$(nvram -p 2>/dev/null | grep -i "fmm-" || echo "")
-                if [ -n "$nvram_fmm" ]; then
-                    find_my_mac="Likely Enabled"
-                fi
+            # If Activation Lock unknown but Find My is enabled, it's likely enabled
+            if [ "$activation_lock" = "Unknown" ] && [ "$find_my_mac" = "Enabled" ]; then
+                activation_lock="Likely Enabled"
             fi
             
             echo "{"
             echo "  \\"status\\": \\"$activation_lock\\","
-            echo "  \\"findMyMac\\": \\"$find_my_mac\\""
+            echo "  \\"findMyMac\\": \\"$find_my_mac\\","
+            echo "  \\"email\\": \\"$fmm_email\\","
+            echo "  \\"ownerDisplayName\\": \\"$fmm_owner\\","
+            echo "  \\"personId\\": \\"$fmm_person_id\\""
+            echo "}"
+        """
+        
+        return try await executeWithFallback(
+            osquery: nil,
+            bash: bashScript,
+            python: nil
+        )
+    }
+    
+    // MARK: - Platform Single Sign-On Status (bash: app-sso)
+    
+    private func collectPlatformSSOStatus() async throws -> [String: Any] {
+        // Platform SSO is macOS 13+ feature for enterprise single sign-on
+        // Uses the app-sso command-line tool with -s flag to get state (JSON-like format)
+        // Collects comprehensive device config + per-user SSO data
+        let bashScript = """
+            # Platform SSO status check (macOS 13+ Ventura and later)
+            # Collects device-level config and per-user SSO registration
+            
+            # Check macOS version (Platform SSO requires 13+)
+            os_version=$(sw_vers -productVersion | cut -d. -f1)
+            if [ "$os_version" -lt 13 ]; then
+                echo "{"
+                echo "  \\"supported\\": false,"
+                echo "  \\"registered\\": false,"
+                echo "  \\"provider\\": \\"\\"," 
+                echo "  \\"method\\": \\"Not supported (macOS 13+ required)\\","
+                echo "  \\"extensionIdentifier\\": \\"\\"," 
+                echo "  \\"loginFrequency\\": 0,"
+                echo "  \\"offlineGracePeriod\\": \\"\\"," 
+                echo "  \\"users\\": []"
+                echo "}"
+                exit 0
+            fi
+            
+            # First get device-level SSO state (can run as root)
+            sso_state=$(app-sso platform -s 2>/dev/null || echo "")
+            
+            # Initialize device-level variables
+            registered="false"
+            sso_provider=""
+            method="Unknown"
+            extension_id=""
+            org_name=""
+            login_freq="0"
+            offline_grace=""
+            non_psso_accounts=""
+            
+            if [ -n "$sso_state" ]; then
+                # Check registration status
+                if echo "$sso_state" | grep -q '"registrationCompleted" *: *true'; then
+                    registered="true"
+                fi
+                
+                # Extract SSO extension identifier
+                extension_id=$(echo "$sso_state" | grep '"extensionIdentifier"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
+                
+                # Extract organization/account display name (first one is org name)
+                org_name=$(echo "$sso_state" | grep '"accountDisplayName"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
+                
+                # Extract provider from accountDisplayName (find the IdP entry)
+                provider_val=$(echo "$sso_state" | grep '"accountDisplayName"' | grep -i "Entra\\|Okta\\|Google\\|Jamf\\|Microsoft" | head -1 || echo "")
+                if echo "$provider_val" | grep -qi "Microsoft\\|Entra"; then
+                    sso_provider="Microsoft Entra ID"
+                elif echo "$provider_val" | grep -qi "Okta"; then
+                    sso_provider="Okta"
+                elif echo "$provider_val" | grep -qi "Google"; then
+                    sso_provider="Google"
+                elif echo "$provider_val" | grep -qi "Jamf"; then
+                    sso_provider="Jamf Connect"
+                fi
+                
+                # Extract login type / method
+                login_type=$(echo "$sso_state" | grep '"loginType"' | head -1 || echo "")
+                if echo "$login_type" | grep -qi "SecureEnclaveKey"; then
+                    method="Secure enclave key"
+                elif echo "$login_type" | grep -qi "Password"; then
+                    method="Password"
+                elif echo "$login_type" | grep -qi "SmartCard"; then
+                    method="Smart Card"
+                fi
+                
+                # Extract login frequency (seconds)
+                login_freq=$(echo "$sso_state" | grep '"loginFrequency"' | head -1 | sed 's/[^0-9]//g' || echo "0")
+                
+                # Extract offline grace period
+                offline_grace=$(echo "$sso_state" | grep '"offlineGracePeriod"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
+                
+                # Extract non-Platform SSO accounts (local accounts) - array format
+                non_psso_accounts=$(echo "$sso_state" | sed -n '/"nonPlatformSSOAccounts"/,/\\]/p' | grep -v 'nonPlatformSSOAccounts' | grep '"' | sed 's/.*"\\([^"]*\\)".*/\\1/' | tr '\\n' ',' | sed 's/,$//' || echo "")
+            fi
+            
+            # Now collect per-user SSO data (only if registered)
+            users_json="[]"
+            if [ "$registered" = "true" ]; then
+                # Get all human users on the system
+                all_users=$(dscl . -list /Users | grep -v "^_" | grep -v "daemon\\|nobody\\|root\\|Guest" || echo "")
+                
+                users_json="["
+                first_user="true"
+                
+                for user in $all_users; do
+                    # Get user's home directory to check if real user
+                    user_home=$(dscl . -read /Users/"$user" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || echo "")
+                    if [ ! -d "$user_home" ] || [ "$user_home" = "/var/empty" ]; then
+                        continue
+                    fi
+                    
+                    # Get SSO state for this user
+                    user_sso=$(sudo -u "$user" app-sso platform -s 2>/dev/null || echo "")
+                    
+                    user_registered="false"
+                    user_upn=""
+                    user_email=""
+                    user_tokens="false"
+                    user_last_login=""
+                    user_state=""
+                    
+                    if [ -n "$user_sso" ]; then
+                        # Check User Configuration section for this user's SSO data
+                        if echo "$user_sso" | grep -q "User Configuration:"; then
+                            # Extract UPN (prefer clean one without KERBEROS suffix)
+                            user_upn=$(echo "$user_sso" | grep '"upn"' | grep -v "KERBEROS" | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
+                            if [ -z "$user_upn" ]; then
+                                user_upn=$(echo "$user_sso" | grep '"upn"' | head -1 | sed 's/.*: *"\\([^@]*@[^@]*\\)@.*/\\1/' | sed 's/\\\\\\\\@/@/' || echo "")
+                            fi
+                            
+                            # Extract loginUserName (may be masked)
+                            user_email=$(echo "$user_sso" | grep '"loginUserName"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
+                            
+                            # Prefer UPN if email is masked
+                            if [ -n "$user_upn" ]; then
+                                if [ -z "$user_email" ] || echo "$user_email" | grep -q '\\*\\*\\*'; then
+                                    user_email="$user_upn"
+                                fi
+                            fi
+                            
+                            # If we have UPN or email, user is registered
+                            if [ -n "$user_upn" ] || [ -n "$user_email" ]; then
+                                user_registered="true"
+                            fi
+                            
+                            # Extract last login date
+                            user_last_login=$(echo "$user_sso" | grep '"lastLoginDate"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
+                            
+                            # Extract user state
+                            user_state=$(echo "$user_sso" | grep '"state"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
+                            
+                            # Check for SSO Tokens
+                            if echo "$user_sso" | grep -q "SSO Tokens:" && echo "$user_sso" | grep -A3 "SSO Tokens:" | grep -q "Received:"; then
+                                user_tokens="true"
+                            fi
+                        fi
+                    fi
+                    
+                    # Add user to JSON array if they have any SSO data
+                    if [ "$user_registered" = "true" ] || [ -n "$user_upn" ] || [ -n "$user_email" ]; then
+                        if [ "$first_user" = "true" ]; then
+                            first_user="false"
+                        else
+                            users_json="$users_json,"
+                        fi
+                        users_json="$users_json{"
+                        users_json="$users_json\\"username\\": \\"$user\\","
+                        users_json="$users_json\\"registered\\": $user_registered,"
+                        users_json="$users_json\\"upn\\": \\"$user_upn\\","
+                        users_json="$users_json\\"loginEmail\\": \\"$user_email\\","
+                        users_json="$users_json\\"lastLogin\\": \\"$user_last_login\\","
+                        users_json="$users_json\\"state\\": \\"$user_state\\","
+                        users_json="$users_json\\"tokensPresent\\": $user_tokens"
+                        users_json="$users_json}"
+                    fi
+                done
+                users_json="$users_json]"
+            fi
+            
+            # Fallback: Check for SSO provider via profile if not found
+            if [ "$sso_provider" = "" ] && [ "$registered" = "false" ]; then
+                azure_check=$(profiles show -type configuration 2>/dev/null | grep -i "microsoft\\|azure\\|entra" || echo "")
+                okta_check=$(profiles show -type configuration 2>/dev/null | grep -i "okta" || echo "")
+                jamf_check=$(profiles show -type configuration 2>/dev/null | grep -i "jamf connect" || echo "")
+                
+                if [ -n "$azure_check" ]; then
+                    sso_provider="Microsoft Entra ID"
+                elif [ -n "$okta_check" ]; then
+                    sso_provider="Okta"
+                elif [ -n "$jamf_check" ]; then
+                    sso_provider="Jamf Connect"
+                fi
+            fi
+            
+            echo "{"
+            echo "  \\"supported\\": true,"
+            echo "  \\"registered\\": $registered,"
+            echo "  \\"provider\\": \\"$sso_provider\\","
+            echo "  \\"method\\": \\"$method\\","
+            echo "  \\"extensionIdentifier\\": \\"$extension_id\\","
+            echo "  \\"organizationName\\": \\"$org_name\\","
+            echo "  \\"loginFrequency\\": $login_freq,"
+            echo "  \\"offlineGracePeriod\\": \\"$offline_grace\\","
+            echo "  \\"nonPlatformSSOAccounts\\": \\"$non_psso_accounts\\","
+            echo "  \\"users\\": $users_json"
             echo "}"
         """
         
