@@ -756,13 +756,30 @@ EOF
       "run_at_load": true,
       "launch_only_once": true,
       "launchd_label": "com.github.reportmate.boot",
-      "description": "Full collection at boot to establish baseline"
+    "description": "Full collection at boot to establish baseline"
     }
   },
   "version": "1.0.0",
   "platform": "macOS"
 }
 EOF
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MUNKI POSTFLIGHT RESOURCES
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    MUNKI_RESOURCES_SRC="${BUILD_DIR}/resources/munki"
+    MUNKI_RESOURCES_DST="${APP_RESOURCES}/munki"
+    
+    if [ -d "$MUNKI_RESOURCES_SRC" ]; then
+        log_info "Bundling Munki postflight integration scripts..."
+        mkdir -p "$MUNKI_RESOURCES_DST"
+        cp "$MUNKI_RESOURCES_SRC"/* "$MUNKI_RESOURCES_DST/"
+        chmod 755 "$MUNKI_RESOURCES_DST"/*
+        log_success "Munki postflight scripts bundled"
+    else
+        log_warn "Munki resources not found at: $MUNKI_RESOURCES_SRC"
+    fi
 
     # ═══════════════════════════════════════════════════════════════════════════
     # APP ICON (Liquid Glass / Tahoe icon pipeline for macOS Sequoia+)
@@ -1041,6 +1058,55 @@ log_message "Symlink created: /usr/local/bin/managedreportsrunner -> ${APP_PATH}
 
 # PATH entry (keep for backward compatibility with wrapper)
 echo "/usr/local/reportmate" > /etc/paths.d/reportmate 2>/dev/null
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MUNKI POSTFLIGHT INTEGRATION
+# ═══════════════════════════════════════════════════════════════════════════
+# Install wrapper postflight that implements postflight.d/ directory support
+# This allows both MunkiReport and ReportMate to run after Munki updates
+
+MUNKI_DIR="/usr/local/munki"
+POSTFLIGHT_D="${MUNKI_DIR}/postflight.d"
+POSTFLIGHT="${MUNKI_DIR}/postflight"
+MUNKI_RESOURCES="${APP_ROOT}/Resources/munki"
+
+# Only install if Munki is present
+if [ -d "$MUNKI_DIR" ]; then
+    log_message "Munki detected, installing postflight integration..."
+    
+    # Create postflight.d directory
+    mkdir -p "$POSTFLIGHT_D"
+    chmod 755 "$POSTFLIGHT_D"
+    
+    # Backup existing postflight if it exists and isn't our wrapper
+    if [ -f "$POSTFLIGHT" ]; then
+        if ! grep -q "postflight.d wrapper" "$POSTFLIGHT" 2>/dev/null; then
+            log_message "Backing up existing postflight to postflight.d/00-original.sh"
+            mv "$POSTFLIGHT" "${POSTFLIGHT_D}/00-original.sh"
+            chmod 755 "${POSTFLIGHT_D}/00-original.sh"
+        fi
+    fi
+    
+    # Install wrapper postflight (implements .d/ directory iteration)
+    if [ -f "${MUNKI_RESOURCES}/postflight-wrapper" ]; then
+        log_message "Installing postflight wrapper..."
+        cp "${MUNKI_RESOURCES}/postflight-wrapper" "$POSTFLIGHT"
+        chmod 755 "$POSTFLIGHT"
+        chown root:wheel "$POSTFLIGHT"
+    fi
+    
+    # Install ReportMate postflight script
+    if [ -f "${MUNKI_RESOURCES}/reportmate.sh" ]; then
+        log_message "Installing ReportMate postflight script..."
+        cp "${MUNKI_RESOURCES}/reportmate.sh" "${POSTFLIGHT_D}/reportmate.sh"
+        chmod 755 "${POSTFLIGHT_D}/reportmate.sh"
+        chown root:wheel "${POSTFLIGHT_D}/reportmate.sh"
+    fi
+    
+    log_message "Munki postflight integration installed"
+else
+    log_message "Munki not detected, skipping postflight integration"
+fi
 
 log_message "ReportMate postinstall complete."
 exit 0
