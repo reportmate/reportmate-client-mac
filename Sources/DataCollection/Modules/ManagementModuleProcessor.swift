@@ -399,25 +399,22 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             screen_sharing_enabled="false"
             remote_login_enabled="false"
             
-            # Check ARD agent status
-            if launchctl list 2>/dev/null | grep -q "com.apple.ARDAgent"; then
+            # Check ARD status via launchctl
+            # com.apple.RemoteDesktop.PrivilegeProxy is the system daemon for ARD
+            if launchctl list 2>/dev/null | grep -q "com.apple.RemoteDesktop"; then
                 ard_enabled="true"
             fi
             
-            # Check kickstart status (requires admin)
-            ard_status=$(/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -privs -getprivs 2>/dev/null || echo "")
-            if [ -n "$ard_status" ]; then
-                ard_enabled="true"
+            # Fallback: Check for running ARDAgent process
+            if [ "$ard_enabled" = "false" ]; then
+                if ps ax | grep -v grep | grep -q "ARDAgent"; then
+                    ard_enabled="true"
+                fi
             fi
             
             # Check Screen Sharing
-            ss_status=$(launchctl list 2>/dev/null | grep "com.apple.screensharing" || echo "")
-            if [ -n "$ss_status" ]; then
-                screen_sharing_enabled="true"
-            fi
-            # Alternative check
-            ss_pref=$(defaults read /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing 2>/dev/null | grep -i "disabled.*false" || echo "")
-            if [ -n "$ss_pref" ]; then
+            # If com.apple.screensharing is loaded in launchctl, service is enabled
+            if launchctl list 2>/dev/null | grep -q "com.apple.screensharing"; then
                 screen_sharing_enabled="true"
             fi
             

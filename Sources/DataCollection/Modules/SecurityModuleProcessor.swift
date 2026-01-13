@@ -32,6 +32,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         async let authdbData = collectAuthDB()
         async let sofaUnpatchedCVEs = collectSofaUnpatchedCVEs()
         async let sofaSecurityRelease = collectSofaSecurityReleaseInfo()
+        async let remoteManagement = collectRemoteManagement()
         
         // Await all results
         let sip = try await sipStatus
@@ -53,6 +54,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let authdb = try await authdbData
         let unpatchedCVEs = try await sofaUnpatchedCVEs
         let securityRelease = try await sofaSecurityRelease
+        let remoteMgmt = try await remoteManagement
         
         // Build security data dictionary
         let securityData: [String: Any] = [
@@ -74,10 +76,68 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "platformSSO": platformSSO,
             "authorizationDB": authdb,
             "unpatchedCVEs": unpatchedCVEs,
-            "securityReleaseInfo": securityRelease
+            "securityReleaseInfo": securityRelease,
+            "remoteManagement": remoteMgmt
         ]
         
         return BaseModuleData(moduleId: moduleId, data: securityData)
+    }
+
+    // MARK: - Remote Management (bash)
+    
+    private func collectRemoteManagement() async throws -> [String: Any] {
+        let bashScript = """
+            # Check Remote Management (ARD) status
+            # Output uses snake_case for consistency
+            ard_enabled="false"
+            ard_allowed_users=""
+            screen_sharing_enabled="false"
+            remote_login_enabled="false"
+            
+            # Check ARD status via launchctl
+            # com.apple.RemoteDesktop.PrivilegeProxy is the system daemon for ARD
+            if launchctl list 2>/dev/null | grep -q "com.apple.RemoteDesktop"; then
+                ard_enabled="true"
+            fi
+            
+            # Fallback: Check for running ARDAgent process
+            if [ "$ard_enabled" = "false" ]; then
+                if ps ax | grep -v grep | grep -q "ARDAgent"; then
+                    ard_enabled="true"
+                fi
+            fi
+            
+            # Check Screen Sharing
+            # If com.apple.screensharing is loaded in launchctl, service is enabled
+            if launchctl list 2>/dev/null | grep -q "com.apple.screensharing"; then
+                screen_sharing_enabled="true"
+            fi
+            
+            # Check Remote Login (SSH)
+            ssh_status=$(systemsetup -getremotelogin 2>/dev/null || echo "")
+            if echo "$ssh_status" | grep -qi "On"; then
+                remote_login_enabled="true"
+            fi
+            
+            # Get allowed users for ARD
+            ard_plist="/Library/Preferences/com.apple.RemoteManagement.plist"
+            if [ -f "$ard_plist" ]; then
+                ard_allowed_users=$(/usr/libexec/PlistBuddy -c "Print :ARD_AllLocalUsers" "$ard_plist" 2>/dev/null || echo "")
+            fi
+            
+            echo "{"
+            echo "  \\"ard_enabled\\": \\"$ard_enabled\\","
+            echo "  \\"screen_sharing_enabled\\": \\"$screen_sharing_enabled\\","
+            echo "  \\"remote_login_enabled\\": \\"$remote_login_enabled\\","
+            echo "  \\"ard_allowed_users\\": \\"$ard_allowed_users\\""
+            echo "}"
+        """
+        
+        return try await executeWithFallback(
+            osquery: nil,
+            bash: bashScript,
+            python: nil
+        )
     }
     
     // MARK: - System Integrity Protection (osquery: sip_config)
