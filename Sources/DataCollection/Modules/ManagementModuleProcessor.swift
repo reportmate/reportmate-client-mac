@@ -14,6 +14,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
     public override func collectData() async throws -> ModuleData {
         // Collect management data in parallel
         async let mdmStatus = collectMDMEnrollmentStatus()
+        async let mdmCertificateDetails = collectMDMCertificateDetails()
         async let adeConfig = collectADEConfiguration()
         async let deviceIds = collectDeviceIdentifiers()
         async let remoteManagement = collectRemoteManagement()
@@ -22,19 +23,22 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
 
         // Await all results
         let mdm = try await mdmStatus
+        let mdmCert = try await mdmCertificateDetails
         let ade = try await adeConfig
         let ids = try await deviceIds
         let remote = try await remoteManagement
         let compliance = try await complianceStatus
         let profiles = try await installedProfiles
 
+        // Use snake_case for top-level keys to match osquery conventions
         let managementData: [String: Any] = [
-            "mdmEnrollment": mdm,
-            "adeConfiguration": ade,
-            "deviceIdentifiers": ids,
-            "remoteManagement": remote,
-            "complianceStatus": compliance,
-            "installedProfiles": profiles
+            "mdm_enrollment": mdm,
+            "mdm_certificate": mdmCert,
+            "ade_configuration": ade,
+            "device_identifiers": ids,
+            "remote_management": remote,
+            "compliance_status": compliance,
+            "installed_profiles": profiles
         ]
 
         return BaseModuleData(moduleId: moduleId, data: managementData)
@@ -59,17 +63,21 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         
         let bashScript = """
             # Check MDM enrollment using profiles command
-            mdm_enrolled="false"
+            # Output follows osquery mdm table field naming (snake_case)
+            enrolled="false"
             server_url=""
-            enrollment_type="Unenrolled"
+            checkin_url=""
             user_approved="false"
-            ade_enrolled="false"
+            installed_from_dep="false"
+            dep_capable="false"
+            access_rights="0"
+            has_scep_payload="false"
 
             # Check for MDM profile
             profiles_output=$(profiles status -type enrollment 2>/dev/null || echo "")
 
             if echo "$profiles_output" | grep -qi "MDM enrollment: Yes"; then
-                mdm_enrolled="true"
+                enrolled="true"
             fi
 
             if echo "$profiles_output" | grep -qi "User Approved"; then
@@ -78,12 +86,13 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
 
             # Check for ADE enrollment (Automated Device Enrollment, formerly DEP)
             if echo "$profiles_output" | grep -qi "DEP enrollment: Yes\\|Automated Device Enrollment: Yes"; then
-                ade_enrolled="true"
-                enrollment_type="ADE Enrolled"
-            elif [ "$user_approved" = "true" ]; then
-                enrollment_type="User Approved"
-            elif [ "$mdm_enrolled" = "true" ]; then
-                enrollment_type="User Approved"
+                installed_from_dep="true"
+                dep_capable="true"
+            fi
+
+            # Check if DEP capable (has activation record)
+            if [ -f "/private/var/db/ConfigurationProfiles/Store/activationRecord.plist" ]; then
+                dep_capable="true"
             fi
 
             # Get MDM server URL from enrolled profile
@@ -92,20 +101,27 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
                 server_url=$(echo "$mdm_profile" | sed 's/.*ServerURL[[:space:]]*=[[:space:]]*//' | tr -d ';')
             fi
 
-            # Get enrollment identifier
-            enrollment_id=""
-            mdm_identity=$(profiles -C -v 2>/dev/null | grep -A10 "MDM Profile" | grep "PayloadIdentifier" | head -1 || echo "")
-            if [ -n "$mdm_identity" ]; then
-                enrollment_id=$(echo "$mdm_identity" | sed 's/.*PayloadIdentifier[[:space:]]*=[[:space:]]*//' | tr -d ';')
+            # Get check-in URL
+            checkin_profile=$(profiles -C -v 2>/dev/null | grep -A5 "MDM Profile" | grep "CheckInURL" | head -1 || echo "")
+            if [ -n "$checkin_profile" ]; then
+                checkin_url=$(echo "$checkin_profile" | sed 's/.*CheckInURL[[:space:]]*=[[:space:]]*//' | tr -d ';')
+            fi
+
+            # Check for SCEP payload
+            scep_check=$(profiles -C -v 2>/dev/null | grep -i "SCEP" || echo "")
+            if [ -n "$scep_check" ]; then
+                has_scep_payload="true"
             fi
 
             echo "{"
-            echo "  \\"enrolled\\": $mdm_enrolled,"
-            echo "  \\"serverUrl\\": \\"$server_url\\","
-            echo "  \\"enrollmentType\\": \\"$enrollment_type\\","
-            echo "  \\"userApproved\\": $user_approved,"
-            echo "  \\"adeEnrolled\\": $ade_enrolled,"
-            echo "  \\"enrollmentIdentifier\\": \\"$enrollment_id\\""
+            echo "  \\"enrolled\\": \\"$enrolled\\","
+            echo "  \\"server_url\\": \\"$server_url\\","
+            echo "  \\"checkin_url\\": \\"$checkin_url\\","
+            echo "  \\"user_approved\\": \\"$user_approved\\","
+            echo "  \\"installed_from_dep\\": \\"$installed_from_dep\\","
+            echo "  \\"dep_capable\\": \\"$dep_capable\\","
+            echo "  \\"access_rights\\": \\"$access_rights\\","
+            echo "  \\"has_scep_payload\\": \\"$has_scep_payload\\""
             echo "}"
         """
         
@@ -117,13 +133,139 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         )
     }
     
+    // MARK: - MDM Certificate Details (APNs Topic, SCEP, Identity Certificate)
+    
+    private func collectMDMCertificateDetails() async throws -> [String: Any] {
+        // Collect MDM push certificate and SCEP details
+        // The APNs Topic is critical for push notifications
+        let bashScript = """
+            # Get MDM certificate details: Topic, SCEP, Identity Certificate
+            # Topic format: com.apple.mgmt.External.<UUID>
+            
+            push_topic=""
+            scep_url=""
+            certificate_name=""
+            certificate_issuer=""
+            certificate_expires=""
+            certificate_subject=""
+            mdm_provider=""
+            
+            # Method 1: Get Topic from MDM profile via profiles command
+            mdm_topic_raw=$(profiles -C -v 2>/dev/null | grep -i "Topic" | head -1 || echo "")
+            if [ -n "$mdm_topic_raw" ]; then
+                # Extract the topic UUID - format: com.apple.mgmt.External.<UUID>
+                push_topic=$(echo "$mdm_topic_raw" | grep -oE "com\\.apple\\.mgmt\\.[^[:space:]]*" | head -1)
+            fi
+            
+            # Method 2: Try system_profiler for push certificate
+            if [ -z "$push_topic" ]; then
+                sp_output=$(system_profiler SPConfigurationProfileDataType 2>/dev/null || echo "")
+                push_topic=$(echo "$sp_output" | grep -oE "com\\.apple\\.mgmt\\.[^[:space:]]*" | head -1)
+            fi
+            
+            # Get SCEP URL from profiles
+            scep_raw=$(profiles -C -v 2>/dev/null | grep -A10 -i "SCEP" | grep -i "URL" | head -1 || echo "")
+            if [ -n "$scep_raw" ]; then
+                scep_url=$(echo "$scep_raw" | sed 's/.*URL[[:space:]]*=[[:space:]]*//' | tr -d ';" ' | head -1)
+            fi
+            
+            # Get MDM identity certificate from keychain
+            # Look for MDM-related certificates
+            cert_output=$(security find-certificate -a -p /Library/Keychains/System.keychain 2>/dev/null | \
+                openssl x509 -noout -subject -issuer -enddate 2>/dev/null | head -6 || echo "")
+            
+            # Try to find MDM identity cert specifically
+            mdm_cert_cn=""
+            mdm_certs=$(security find-certificate -a -c "MDM" /Library/Keychains/System.keychain 2>/dev/null || \
+                        security find-certificate -a -c "Identity" /Library/Keychains/System.keychain 2>/dev/null || echo "")
+            
+            if [ -n "$mdm_certs" ]; then
+                # Get first matching cert details
+                cert_hash=$(echo "$mdm_certs" | grep -m1 "SHA-1" | awk -F'"' '{print $2}')
+                if [ -n "$cert_hash" ]; then
+                    cert_details=$(security find-certificate -a -Z /Library/Keychains/System.keychain 2>/dev/null | \
+                        grep -A50 "$cert_hash" | head -50 || echo "")
+                    certificate_name=$(echo "$cert_details" | grep '"labl"' | head -1 | awk -F'"' '{print $4}')
+                fi
+            fi
+            
+            # Alternative: Get cert info from profiles output
+            if [ -z "$certificate_name" ]; then
+                cert_from_profiles=$(profiles -C -v 2>/dev/null | grep -i "PayloadCertificateFileName\\|PayloadDisplayName" | head -1 || echo "")
+                if [ -n "$cert_from_profiles" ]; then
+                    certificate_name=$(echo "$cert_from_profiles" | sed 's/.*=[[:space:]]*//' | tr -d ';"')
+                fi
+            fi
+            
+            # Get cert expiry and issuer from keychain cert
+            cert_pem=$(security find-certificate -a -p -c "MDM" /Library/Keychains/System.keychain 2>/dev/null | head -50 || \
+                       security find-certificate -a -p -c "Identity" /Library/Keychains/System.keychain 2>/dev/null | head -50 || echo "")
+            
+            if [ -n "$cert_pem" ]; then
+                cert_info=$(echo "$cert_pem" | openssl x509 -noout -subject -issuer -enddate 2>/dev/null || echo "")
+                
+                if [ -n "$cert_info" ]; then
+                    # Extract issuer (O= or CN= from issuer line)
+                    issuer_line=$(echo "$cert_info" | grep "issuer=" | head -1)
+                    certificate_issuer=$(echo "$issuer_line" | grep -oE "O=[^,/]+" | sed 's/O=//' || \
+                                         echo "$issuer_line" | grep -oE "CN=[^,/]+" | sed 's/CN=//')
+                    
+                    # Extract subject (common name)
+                    subject_line=$(echo "$cert_info" | grep "subject=" | head -1)
+                    certificate_subject=$(echo "$subject_line" | grep -oE "CN=[^,/]+" | sed 's/CN=//')
+                    
+                    # Extract expiry date
+                    expiry_line=$(echo "$cert_info" | grep "notAfter=" | head -1)
+                    certificate_expires=$(echo "$expiry_line" | sed 's/notAfter=//')
+                fi
+            fi
+            
+            # Detect MDM provider from certificate issuer or SCEP URL
+            if echo "$certificate_issuer" | grep -qi "MicroMDM"; then
+                mdm_provider="MicroMDM"
+            elif echo "$certificate_issuer" | grep -qi "NanoMDM"; then
+                mdm_provider="NanoMDM"
+            elif echo "$scep_url" | grep -qi "micromdm"; then
+                mdm_provider="MicroMDM"
+            elif echo "$scep_url" | grep -qi "nanomdm"; then
+                mdm_provider="NanoMDM"
+            elif echo "$certificate_issuer" | grep -qi "Jamf"; then
+                mdm_provider="Jamf Pro"
+            elif echo "$certificate_issuer" | grep -qi "Microsoft"; then
+                mdm_provider="Microsoft Intune"
+            fi
+            
+            # If certificate_name is still empty, use subject
+            if [ -z "$certificate_name" ] && [ -n "$certificate_subject" ]; then
+                certificate_name="$certificate_subject"
+            fi
+            
+            echo "{"
+            echo "  \\"push_topic\\": \\"$push_topic\\","
+            echo "  \\"scep_url\\": \\"$scep_url\\","
+            echo "  \\"certificate_name\\": \\"$certificate_name\\","
+            echo "  \\"certificate_subject\\": \\"$certificate_subject\\","
+            echo "  \\"certificate_issuer\\": \\"$certificate_issuer\\","
+            echo "  \\"certificate_expires\\": \\"$certificate_expires\\","
+            echo "  \\"mdm_provider\\": \\"$mdm_provider\\""
+            echo "}"
+        """
+        
+        return try await executeWithFallback(
+            osquery: nil,
+            bash: bashScript,
+            python: nil
+        )
+    }
+    
     // MARK: - ADE Configuration (Automated Device Enrollment, formerly DEP)
 
     private func collectADEConfiguration() async throws -> [String: Any] {
         let bashScript = """
             # Get ADE status (Automated Device Enrollment, formerly DEP)
-            ade_assigned="false"
-            ade_activated="false"
+            # Output uses snake_case for consistency with osquery
+            assigned="false"
+            activated="false"
             organization=""
             support_phone=""
             support_email=""
@@ -132,8 +274,8 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             profiles_output=$(profiles status -type enrollment 2>/dev/null || echo "")
 
             if echo "$profiles_output" | grep -qi "DEP enrollment: Yes\\|Automated Device Enrollment: Yes"; then
-                ade_activated="true"
-                ade_assigned="true"
+                activated="true"
+                assigned="true"
             fi
 
             # Try to get configuration profile info
@@ -145,15 +287,15 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
 
             # Get activation record if available (indicates ADE assignment)
             if [ -f "/private/var/db/ConfigurationProfiles/Store/activationRecord.plist" ]; then
-                ade_assigned="true"
+                assigned="true"
             fi
 
             echo "{"
-            echo "  \\"assigned\\": $ade_assigned,"
-            echo "  \\"activated\\": $ade_activated,"
+            echo "  \\"assigned\\": \\"$assigned\\","
+            echo "  \\"activated\\": \\"$activated\\","
             echo "  \\"organization\\": \\"$organization\\","
-            echo "  \\"supportPhone\\": \\"$support_phone\\","
-            echo "  \\"supportEmail\\": \\"$support_email\\""
+            echo "  \\"support_phone\\": \\"$support_phone\\","
+            echo "  \\"support_email\\": \\"$support_email\\""
             echo "}"
         """
 
@@ -179,6 +321,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         
         let bashScript = """
             # Get device identifiers
+            # Output uses snake_case to match osquery system_info table
             uuid=$(ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/{print $4}' 2>/dev/null || echo "")
             serial=$(ioreg -l | grep IOPlatformSerialNumber | sed 's/.*"\\(.*\\)".*/\\1/' | head -1 2>/dev/null || echo "")
             model=$(sysctl -n hw.model 2>/dev/null || echo "")
@@ -206,10 +349,10 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             
             echo "{"
             echo "  \\"uuid\\": \\"$uuid\\","
-            echo "  \\"serialNumber\\": \\"$serial\\","
-            echo "  \\"hardwareModel\\": \\"$model\\","
-            echo "  \\"assetTag\\": \\"$asset_tag\\","
-            echo "  \\"provisioningUDID\\": \\"$provisioning_udid\\""
+            echo "  \\"hardware_serial\\": \\"$serial\\","
+            echo "  \\"hardware_model\\": \\"$model\\","
+            echo "  \\"asset_tag\\": \\"$asset_tag\\","
+            echo "  \\"provisioning_udid\\": \\"$provisioning_udid\\""
             echo "}"
         """
         
@@ -227,7 +370,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             python: nil
         )
         
-        // Merge results
+        // Merge results - osquery fields are already snake_case
         var result = bashResult
         
         if let osq = osqueryResult {
@@ -235,10 +378,10 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
                 result["uuid"] = uuid
             }
             if let serial = osq["hardware_serial"] as? String, !serial.isEmpty {
-                result["serialNumber"] = serial
+                result["hardware_serial"] = serial
             }
             if let model = osq["hardware_model"] as? String, !model.isEmpty {
-                result["hardwareModel"] = model
+                result["hardware_model"] = model
             }
         }
         
@@ -250,10 +393,11 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
     private func collectRemoteManagement() async throws -> [String: Any] {
         let bashScript = """
             # Check Remote Management (ARD) status
+            # Output uses snake_case for consistency
             ard_enabled="false"
-            ard_users=""
-            screen_sharing="false"
-            remote_login="false"
+            ard_allowed_users=""
+            screen_sharing_enabled="false"
+            remote_login_enabled="false"
             
             # Check ARD agent status
             if launchctl list 2>/dev/null | grep -q "com.apple.ARDAgent"; then
@@ -269,31 +413,31 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             # Check Screen Sharing
             ss_status=$(launchctl list 2>/dev/null | grep "com.apple.screensharing" || echo "")
             if [ -n "$ss_status" ]; then
-                screen_sharing="true"
+                screen_sharing_enabled="true"
             fi
             # Alternative check
             ss_pref=$(defaults read /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing 2>/dev/null | grep -i "disabled.*false" || echo "")
             if [ -n "$ss_pref" ]; then
-                screen_sharing="true"
+                screen_sharing_enabled="true"
             fi
             
             # Check Remote Login (SSH)
             ssh_status=$(systemsetup -getremotelogin 2>/dev/null || echo "")
             if echo "$ssh_status" | grep -qi "On"; then
-                remote_login="true"
+                remote_login_enabled="true"
             fi
             
             # Get allowed users for ARD
             ard_plist="/Library/Preferences/com.apple.RemoteManagement.plist"
             if [ -f "$ard_plist" ]; then
-                ard_users=$(/usr/libexec/PlistBuddy -c "Print :ARD_AllLocalUsers" "$ard_plist" 2>/dev/null || echo "")
+                ard_allowed_users=$(/usr/libexec/PlistBuddy -c "Print :ARD_AllLocalUsers" "$ard_plist" 2>/dev/null || echo "")
             fi
             
             echo "{"
-            echo "  \\"ardEnabled\\": $ard_enabled,"
-            echo "  \\"screenSharingEnabled\\": $screen_sharing,"
-            echo "  \\"remoteLoginEnabled\\": $remote_login,"
-            echo "  \\"ardAllowedUsers\\": \\"$ard_users\\""
+            echo "  \\"ard_enabled\\": \\"$ard_enabled\\","
+            echo "  \\"screen_sharing_enabled\\": \\"$screen_sharing_enabled\\","
+            echo "  \\"remote_login_enabled\\": \\"$remote_login_enabled\\","
+            echo "  \\"ard_allowed_users\\": \\"$ard_allowed_users\\""
             echo "}"
         """
         
@@ -309,11 +453,12 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
     private func collectComplianceStatus() async throws -> [String: Any] {
         let bashScript = """
             # Check various compliance indicators
+            # Output uses snake_case for consistency
             filevault_enabled="false"
             sip_enabled="false"
             gatekeeper_enabled="false"
             firewall_enabled="false"
-            password_required="false"
+            screen_lock_password_required="false"
             auto_login_disabled="true"
             
             # FileVault
@@ -351,7 +496,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             if [ -f "$screensaver_pref" ]; then
                 ask_pwd=$(defaults read com.apple.screensaver askForPassword 2>/dev/null || echo "0")
                 if [ "$ask_pwd" = "1" ]; then
-                    password_required="true"
+                    screen_lock_password_required="true"
                 fi
             fi
             
@@ -364,16 +509,18 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             [ "$auto_login_disabled" = "true" ] && compliant_count=$((compliant_count + 1))
             
             compliance_score=$((compliant_count * 20))
+            is_compliant="false"
+            [ $compliance_score -ge 80 ] && is_compliant="true"
             
             echo "{"
-            echo "  \\"fileVaultEnabled\\": $filevault_enabled,"
-            echo "  \\"sipEnabled\\": $sip_enabled,"
-            echo "  \\"gatekeeperEnabled\\": $gatekeeper_enabled,"
-            echo "  \\"firewallEnabled\\": $firewall_enabled,"
-            echo "  \\"autoLoginDisabled\\": $auto_login_disabled,"
-            echo "  \\"screenLockPasswordRequired\\": $password_required,"
-            echo "  \\"complianceScore\\": $compliance_score,"
-            echo "  \\"isCompliant\\": $([ $compliance_score -ge 80 ] && echo 'true' || echo 'false')"
+            echo "  \\"filevault_enabled\\": \\"$filevault_enabled\\","
+            echo "  \\"sip_enabled\\": \\"$sip_enabled\\","
+            echo "  \\"gatekeeper_enabled\\": \\"$gatekeeper_enabled\\","
+            echo "  \\"firewall_enabled\\": \\"$firewall_enabled\\","
+            echo "  \\"auto_login_disabled\\": \\"$auto_login_disabled\\","
+            echo "  \\"screen_lock_password_required\\": \\"$screen_lock_password_required\\","
+            echo "  \\"compliance_score\\": $compliance_score,"
+            echo "  \\"is_compliant\\": \\"$is_compliant\\""
             echo "}"
         """
         
@@ -400,6 +547,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         
         let bashScript = """
             # Get installed configuration profiles
+            # Output uses snake_case for consistency
             echo "["
             
             profiles -C -v 2>/dev/null | grep -E "^[[:space:]]*(attribute|profileIdentifier|profileUUID|profileDisplayName|installationDate|profileOrganization):" | \
@@ -408,7 +556,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             /profileDisplayName:/ { 
                 if (in_profile && name != "") {
                     if (!first) printf ","
-                    printf "{\\"name\\": \\"%s\\", \\"identifier\\": \\"%s\\", \\"uuid\\": \\"%s\\", \\"organization\\": \\"%s\\", \\"installDate\\": \\"%s\\"}", name, identifier, uuid, org, install_date
+                    printf "{\\"name\\": \\"%s\\", \\"identifier\\": \\"%s\\", \\"uuid\\": \\"%s\\", \\"organization\\": \\"%s\\", \\"install_date\\": \\"%s\\"}", name, identifier, uuid, org, install_date
                     first = 0
                 }
                 gsub(/profileDisplayName:[[:space:]]*/, "")
@@ -426,7 +574,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             END {
                 if (in_profile && name != "") {
                     if (!first) printf ","
-                    printf "{\\"name\\": \\"%s\\", \\"identifier\\": \\"%s\\", \\"uuid\\": \\"%s\\", \\"organization\\": \\"%s\\", \\"installDate\\": \\"%s\\"}", name, identifier, uuid, org, install_date
+                    printf "{\\"name\\": \\"%s\\", \\"identifier\\": \\"%s\\", \\"uuid\\": \\"%s\\", \\"organization\\": \\"%s\\", \\"install_date\\": \\"%s\\"}", name, identifier, uuid, org, install_date
                 }
             }
             '
@@ -476,14 +624,14 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             }
         }
         
-        // Transform to standardized format
+        // Transform to standardized format with snake_case
         return profiles.map { profile in
             [
                 "name": profile["name"] as? String ?? "Unknown",
                 "identifier": profile["identifier"] as? String ?? "",
                 "uuid": profile["uuid"] as? String ?? "",
                 "organization": profile["organization"] as? String ?? "",
-                "installDate": profile["installDate"] as? String ?? "",
+                "install_date": profile["install_date"] as? String ?? profile["installDate"] as? String ?? "",
                 "policies": profile["policies"] as? [[String: Any]] ?? []
             ]
         }
