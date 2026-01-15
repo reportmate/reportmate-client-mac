@@ -192,6 +192,7 @@ import subprocess
 import socket
 import re
 import plistlib
+import os
 
 def run_command(cmd, shell=False):
     try:
@@ -199,6 +200,47 @@ def run_command(cmd, shell=False):
         return result.stdout.strip()
     except:
         return ""
+
+def get_saved_wifi_networks():
+    """Get list of saved/preferred WiFi networks"""
+    networks = []
+    
+    # Get WiFi interface name
+    wifi_interface = None
+    try:
+        output = run_command(['networksetup', '-listallhardwareports'])
+        lines = output.split('\n')
+        for i, line in enumerate(lines):
+            if 'Wi-Fi' in line or 'AirPort' in line:
+                for j in range(i, min(i+3, len(lines))):
+                    if 'Device:' in lines[j]:
+                        wifi_interface = lines[j].split(':')[1].strip()
+                        break
+                break
+    except:
+        wifi_interface = "en0"
+    
+    if not wifi_interface:
+        return networks
+    
+    # Get preferred/saved networks using networksetup
+    try:
+        output = run_command(['networksetup', '-listpreferredwirelessnetworks', wifi_interface])
+        if output and 'Preferred networks' in output:
+            lines = output.split('\n')[1:]  # Skip header line
+            for line in lines:
+                ssid = line.strip()
+                if ssid:
+                    networks.append({
+                        "ssid": ssid,
+                        "security": "Saved Profile",
+                        "isConnected": False,
+                        "isSaved": True
+                    })
+    except:
+        pass
+    
+    return networks
 
 def get_wifi_info():
     """Get comprehensive WiFi information including protocol, band, and channel"""
@@ -209,8 +251,13 @@ def get_wifi_info():
         "phyMode": None,
         "band": None,
         "channel": None,
-        "channelWidth": None
+        "channelWidth": None,
+        "knownNetworks": [],
+        "availableNetworks": []
     }
+    
+    # Get saved WiFi networks
+    wifi_info["knownNetworks"] = get_saved_wifi_networks()
     
     # Get WiFi interface name (usually en0 or en1)
     wifi_interface = None
@@ -226,6 +273,8 @@ def get_wifi_info():
                 break
     except:
         wifi_interface = "en0"  # Default fallback
+    
+    wifi_info["interface"] = wifi_interface
     
     if not wifi_interface:
         return wifi_info
@@ -285,36 +334,68 @@ def get_wifi_info():
                             elif "20 MHz" in channel:
                                 channel_width = "20 MHz"
                         
-                        # Get PHY mode (802.11 protocol)
+                        # Get PHY mode (802.11 protocol) and map to friendly name
                         phy_mode = net_info.get("spairport_network_phymode")
+                        wifi_protocol = None
                         if phy_mode:
-                            # Clean up PHY mode string
-                            if "802.11ax" in phy_mode or "ax" in phy_mode.lower():
-                                phy_mode = "802.11ax (WiFi 6)"
+                            if "802.11be" in phy_mode or "be" in phy_mode.lower():
+                                wifi_protocol = "WiFi 7"
+                                phy_mode = "802.11be"
+                            elif "802.11ax" in phy_mode or "ax" in phy_mode.lower():
+                                wifi_protocol = "WiFi 6"
+                                phy_mode = "802.11ax"
                             elif "802.11ac" in phy_mode or "ac" in phy_mode.lower():
-                                phy_mode = "802.11ac (WiFi 5)"
+                                wifi_protocol = "WiFi 5"
+                                phy_mode = "802.11ac"
                             elif "802.11n" in phy_mode or "n" in phy_mode.lower():
-                                phy_mode = "802.11n (WiFi 4)"
-                            elif "802.11be" in phy_mode or "be" in phy_mode.lower():
-                                phy_mode = "802.11be (WiFi 7)"
+                                wifi_protocol = "WiFi 4"
+                                phy_mode = "802.11n"
+                            elif "802.11g" in phy_mode:
+                                wifi_protocol = "WiFi 3"
+                                phy_mode = "802.11g"
+                        
+                        # Get transmit rate and format as link speed
+                        tx_rate = net_info.get("spairport_network_rate")
+                        link_speed = None
+                        if tx_rate:
+                            try:
+                                rate_val = float(str(tx_rate).replace(' Mbps', '').replace('Mbps', '').strip())
+                                if rate_val >= 1000:
+                                    link_speed = f"{rate_val/1000:.1f} Gbps"
+                                else:
+                                    link_speed = f"{int(rate_val)} Mbps"
+                            except:
+                                link_speed = str(tx_rate)
+                        
+                        current_ssid = net_info.get("_name", "")
                         
                         wifi_info["currentNetwork"] = {
-                            "ssid": net_info.get("_name", ""),
+                            "ssid": current_ssid,
                             "bssid": net_info.get("spairport_network_bssid"),
-                            "networkName": net_info.get("_name", ""),
+                            "networkName": current_ssid,
                             "security": net_info.get("spairport_security_mode", "Unknown"),
-                            "rssi": None,  # Not in system_profiler
+                            "rssi": None,  # Will be filled from airport command
                             "noise": None,
                             "channel": channel_num,
                             "channelWidth": channel_width,
                             "band": band,
                             "phyMode": phy_mode,
-                            "txRate": net_info.get("spairport_network_rate")
+                            "wifiProtocol": wifi_protocol,
+                            "txRate": tx_rate,
+                            "linkSpeed": link_speed
                         }
                         wifi_info["phyMode"] = phy_mode
+                        wifi_info["wifiProtocol"] = wifi_protocol
                         wifi_info["band"] = band
                         wifi_info["channel"] = channel_num
                         wifi_info["channelWidth"] = channel_width
+                        wifi_info["linkSpeed"] = link_speed
+                        
+                        # Mark current network as connected in knownNetworks
+                        for net in wifi_info["knownNetworks"]:
+                            if net["ssid"] == current_ssid:
+                                net["isConnected"] = True
+                                break
                         
                     # Fallback: try to get interfaces info
                     elif "spairport_airport_interfaces" in airport:
@@ -328,10 +409,12 @@ def get_wifi_info():
                                     except:
                                         pass
                                 
+                                current_ssid = iface.get("spairport_current_network", "")
+                                
                                 wifi_info["currentNetwork"] = {
-                                    "ssid": iface.get("spairport_current_network", ""),
+                                    "ssid": current_ssid,
                                     "bssid": iface.get("_name"),
-                                    "networkName": iface.get("spairport_current_network", ""),
+                                    "networkName": current_ssid,
                                     "security": iface.get("spairport_security_type", "Unknown"),
                                     "rssi": None,
                                     "noise": None,
@@ -341,16 +424,23 @@ def get_wifi_info():
                                     "phyMode": iface.get("spairport_supported_phymodes"),
                                     "txRate": iface.get("spairport_current_network_rate")
                                 }
+                                
+                                # Mark current network as connected
+                                for net in wifi_info["knownNetworks"]:
+                                    if net["ssid"] == current_ssid:
+                                        net["isConnected"] = True
+                                        break
     except Exception as e:
         wifi_info["error"] = str(e)
     
     # Try airport command for RSSI/noise (may require location services)
     try:
         airport_path = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
-        if subprocess.run(['test', '-f', airport_path], capture_output=True).returncode == 0:
+        if os.path.exists(airport_path):
             airport_output = run_command([airport_path, '-I'])
             if airport_output and wifi_info.get("currentNetwork"):
                 for line in airport_output.split('\n'):
+                    line = line.strip()
                     if 'agrCtlRSSI:' in line:
                         try:
                             wifi_info["currentNetwork"]["rssi"] = int(line.split(':')[1].strip())
@@ -359,6 +449,17 @@ def get_wifi_info():
                     elif 'agrCtlNoise:' in line:
                         try:
                             wifi_info["currentNetwork"]["noise"] = int(line.split(':')[1].strip())
+                        except:
+                            pass
+                    elif 'lastTxRate:' in line and not wifi_info["currentNetwork"].get("txRate"):
+                        try:
+                            rate = int(line.split(':')[1].strip())
+                            wifi_info["currentNetwork"]["txRate"] = rate
+                            if rate >= 1000:
+                                wifi_info["currentNetwork"]["linkSpeed"] = f"{rate/1000:.1f} Gbps"
+                            else:
+                                wifi_info["currentNetwork"]["linkSpeed"] = f"{rate} Mbps"
+                            wifi_info["linkSpeed"] = wifi_info["currentNetwork"]["linkSpeed"]
                         except:
                             pass
     except:
@@ -378,7 +479,7 @@ def get_network_info():
         "searchDomains": []
     }
     
-    # Get WiFi info
+    # Get WiFi info (includes saved networks now)
     info["wifiInfo"] = get_wifi_info()
     
     # Get network interfaces with enhanced info
@@ -440,6 +541,10 @@ def get_network_info():
                             current_iface["type"] = "Ethernet"
                         if '<full-duplex>' in line or '1000baseT' in line:
                             current_iface["linkSpeed"] = "1 Gbps"
+                        elif '2500baseT' in line:
+                            current_iface["linkSpeed"] = "2.5 Gbps"
+                        elif '10GbaseT' in line or '10Gbase' in line:
+                            current_iface["linkSpeed"] = "10 Gbps"
                         elif '100baseTX' in line:
                             current_iface["linkSpeed"] = "100 Mbps"
                         elif '10baseT' in line:
@@ -449,7 +554,8 @@ def get_network_info():
     except:
         pass
     
-    # Determine interface types from networksetup
+    # Determine interface types and add WiFi-specific info from networksetup
+    wifi_interface = info["wifiInfo"].get("interface") if info["wifiInfo"] else None
     try:
         hw_output = run_command(['networksetup', '-listallhardwareports'])
         current_hw = None
@@ -462,6 +568,14 @@ def get_network_info():
                     if iface["interface"] == device:
                         if 'Wi-Fi' in current_hw or 'AirPort' in current_hw:
                             iface["type"] = "WiFi"
+                            # Add WiFi protocol and band info from wifiInfo
+                            if info["wifiInfo"] and device == wifi_interface:
+                                if info["wifiInfo"].get("wifiProtocol"):
+                                    iface["wirelessProtocol"] = info["wifiInfo"]["wifiProtocol"]
+                                if info["wifiInfo"].get("band"):
+                                    iface["wirelessBand"] = info["wifiInfo"]["band"]
+                                if info["wifiInfo"].get("linkSpeed"):
+                                    iface["linkSpeed"] = info["wifiInfo"]["linkSpeed"]
                         elif 'Ethernet' in current_hw or 'Thunderbolt' in current_hw:
                             iface["type"] = "Ethernet"
                         elif 'Bluetooth' in current_hw:
@@ -473,6 +587,8 @@ def get_network_info():
         pass
         
     # Get active connection with route-based detection
+    # Note: This returns the routing interface which may be VPN tunnel
+    # We'll also store physical interface info for proper display
     try:
         res = subprocess.run(['route', '-n', 'get', 'default'], capture_output=True, text=True)
         if res.returncode == 0:
@@ -487,23 +603,46 @@ def get_network_info():
             if active_iface:
                 ip_address = ""
                 connection_type = "Unknown"
+                mac_address = ""
+                link_speed = ""
                 for iface in info["interfaces"]:
                     if iface["interface"] == active_iface:
                         ip_address = iface.get("address", "")
                         connection_type = iface.get("type", "Unknown")
+                        mac_address = iface.get("mac", "")
+                        link_speed = iface.get("linkSpeed", "")
                         break
+                
+                # Check if active interface is VPN tunnel
+                is_vpn_tunnel = active_iface.startswith("utun") or active_iface.startswith("ppp")
                 
                 info["activeConnection"] = {
                     "interface": active_iface,
                     "ipAddress": ip_address,
                     "gateway": gateway,
                     "connectionType": connection_type,
-                    "isPrimary": True
+                    "macAddress": mac_address,
+                    "linkSpeed": link_speed,
+                    "isPrimary": True,
+                    "isVpnTunnel": is_vpn_tunnel
                 }
+                
+                # If on VPN, also find primary physical interface for display
+                if is_vpn_tunnel:
+                    # Find en0 or first physical interface with IP
+                    for iface in info["interfaces"]:
+                        iface_name = iface["interface"]
+                        if iface_name == "en0" or (iface.get("type") in ["Ethernet", "WiFi"] and iface.get("address")):
+                            info["activeConnection"]["physicalInterface"] = iface_name
+                            info["activeConnection"]["physicalIpAddress"] = iface.get("address", "")
+                            info["activeConnection"]["physicalMacAddress"] = iface.get("mac", "")
+                            info["activeConnection"]["physicalConnectionType"] = iface.get("type", "Unknown")
+                            info["activeConnection"]["physicalLinkSpeed"] = iface.get("linkSpeed", "")
+                            break
     except:
         pass
 
-    # Get enhanced VPN connections
+    # Get enhanced VPN connections - filter out Unknown VPN
     try:
         res = subprocess.run(['scutil', '--nc', 'list'], capture_output=True, text=True)
         if res.returncode == 0:
@@ -519,11 +658,15 @@ def get_network_info():
                 elif "(Disconnecting)" in line:
                     status = "Disconnecting"
                 
-                name = "Unknown VPN"
+                name = ""
                 if '"' in line:
                     parts = line.split('"')
                     if len(parts) >= 2:
                         name = parts[1]
+                
+                # Skip unnamed/unknown VPNs
+                if not name or name == "Unknown VPN":
+                    continue
                 
                 vpn_type = "VPN"
                 if '[' in line and ']' in line:
@@ -565,7 +708,6 @@ def get_network_info():
     # Get DNS configuration
     try:
         dns_output = run_command(['scutil', '--dns'])
-        current_resolver = None
         for line in dns_output.split('\n'):
             if 'nameserver[' in line:
                 dns = line.split(':')[-1].strip()
