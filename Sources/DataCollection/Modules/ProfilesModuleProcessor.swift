@@ -3,8 +3,9 @@ import Foundation
 /// Profiles module processor - uses osquery first with bash fallback
 /// Based on MunkiReport patterns for profile collection
 /// Reference: https://github.com/munkireport/profile
-/// No Python - uses osquery for: system_extensions, managed_policies
-/// Bash fallback for: profiles command, kernel/system extensions
+/// No Python - uses osquery for: managed_policies
+/// Bash fallback for: profiles command
+/// NOTE: Login Items, System Extensions, and Kernel Extensions have been moved to SystemModuleProcessor
 public class ProfilesModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     public init(configuration: ReportMateConfiguration) {
@@ -14,24 +15,16 @@ public class ProfilesModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     public override func collectData() async throws -> ModuleData {
         // Collect profile data in parallel
         async let configProfiles = collectConfigurationProfiles()
-        async let systemExtensions = collectSystemExtensions()
-        async let kernelExtensions = collectKernelExtensions()
-        async let loginItems = collectLoginItems()
         async let serviceManagement = collectServiceManagement()
         
         // Await all results
         let profiles = try await configProfiles
-        let sysExt = try await systemExtensions
-        let kext = try await kernelExtensions
-        let login = try await loginItems
         let services = try await serviceManagement
         
         let profilesData: [String: Any] = [
             "configurationProfiles": profiles,
-            "systemExtensions": sysExt,
-            "kernelExtensions": kext,
-            "loginItems": login,
             "serviceManagement": services
+            // NOTE: loginItems, systemExtensions, and kernelExtensions are now in the System module
         ]
         
         return BaseModuleData(moduleId: moduleId, data: profilesData)
@@ -151,227 +144,6 @@ public class ProfilesModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         }
         
         return profiles
-    }
-    
-    // MARK: - System Extensions (osquery: system_extensions)
-    
-    private func collectSystemExtensions() async throws -> [[String: Any]] {
-        // osquery system_extensions table (macOS 10.15+)
-        let osqueryScript = """
-            SELECT 
-                identifier,
-                version,
-                state,
-                team,
-                bundle_path,
-                category
-            FROM system_extensions;
-        """
-        
-        let bashScript = """
-            # Get system extensions using systemextensionsctl
-            systemextensionsctl list 2>/dev/null | awk '
-            BEGIN { print "["; first = 1 }
-            /enabled|disabled|activated/ {
-                # Parse extension info
-                gsub(/^[[:space:]]+/, "")
-                split($0, parts, /[[:space:]]+/)
-                
-                if (length(parts) >= 3) {
-                    identifier = parts[1]
-                    team = parts[2]
-                    state = "unknown"
-                    for (i = 1; i <= NF; i++) {
-                        if (parts[i] ~ /enabled|disabled|activated/) {
-                            state = parts[i]
-                            break
-                        }
-                    }
-                    
-                    if (!first) print ","
-                    printf "{\\"identifier\\": \\"%s\\", \\"team\\": \\"%s\\", \\"state\\": \\"%s\\"}", identifier, team, state
-                    first = 0
-                }
-            }
-            END { print "]" }
-            '
-        """
-        
-        let result = try await executeWithFallback(
-            osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
-        )
-        
-        var extensions: [[String: Any]] = []
-        
-        if let items = result["items"] as? [[String: Any]] {
-            extensions = items
-        }
-        
-        return extensions.map { ext in
-            [
-                "identifier": ext["identifier"] as? String ?? "",
-                "version": ext["version"] as? String ?? "",
-                "state": ext["state"] as? String ?? "unknown",
-                "teamId": ext["team"] as? String ?? "",
-                "bundlePath": ext["bundle_path"] as? String ?? "",
-                "category": ext["category"] as? String ?? ""
-            ]
-        }
-    }
-    
-    // MARK: - Kernel Extensions (osquery: kernel_extensions)
-    
-    private func collectKernelExtensions() async throws -> [[String: Any]] {
-        // osquery kernel_extensions table
-        let osqueryScript = """
-            SELECT 
-                idx,
-                refs,
-                size,
-                name,
-                version,
-                linked_against,
-                path
-            FROM kernel_extensions
-            WHERE name NOT LIKE 'com.apple.%';
-        """
-        
-        let bashScript = """
-            # Get kernel extensions using kextstat
-            kextstat 2>/dev/null | awk '
-            BEGIN { print "["; first = 1 }
-            NR > 1 && $6 !~ /^com\\.apple\\./ {
-                idx = $1
-                refs = $2
-                size = $4
-                name = $6
-                version = ""
-                
-                # Extract version from name if present
-                if (match(name, /\\([0-9.]+\\)/)) {
-                    version = substr(name, RSTART+1, RLENGTH-2)
-                    name = substr(name, 1, RSTART-1)
-                }
-                
-                if (!first) print ","
-                printf "{\\"idx\\": \\"%s\\", \\"refs\\": \\"%s\\", \\"size\\": \\"%s\\", \\"name\\": \\"%s\\", \\"version\\": \\"%s\\"}", idx, refs, size, name, version
-                first = 0
-            }
-            END { print "]" }
-            '
-        """
-        
-        let result = try await executeWithFallback(
-            osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
-        )
-        
-        var kexts: [[String: Any]] = []
-        
-        if let items = result["items"] as? [[String: Any]] {
-            kexts = items
-        }
-        
-        return kexts.map { kext in
-            let sizeStr = kext["size"] as? String ?? "0"
-            let sizeInt = Int(sizeStr) ?? 0
-            
-            return [
-                "name": kext["name"] as? String ?? "",
-                "version": kext["version"] as? String ?? "",
-                "path": kext["path"] as? String ?? "",
-                "size": sizeInt,
-                "references": Int(kext["refs"] as? String ?? "0") ?? 0,
-                "index": Int(kext["idx"] as? String ?? "0") ?? 0
-            ]
-        }
-    }
-    
-    // MARK: - Login Items (osquery: startup_items + launchd)
-    
-    private func collectLoginItems() async throws -> [[String: Any]] {
-        // osquery startup_items for login items
-        let osqueryScript = """
-            SELECT 
-                name,
-                path,
-                args,
-                type,
-                source,
-                status,
-                username
-            FROM startup_items
-            WHERE type = 'Login Item' OR source LIKE '%LoginItems%';
-        """
-        
-        let bashScript = """
-            # Get login items using various methods
-            echo "["
-            first=true
-            
-            # System login items via defaults
-            sfltool dumpbtm 2>/dev/null | awk '
-            BEGIN { name = ""; path = ""; enabled = "true" }
-            /Name:/ { name = $2 }
-            /URL:/ { 
-                path = $0
-                gsub(/.*URL:[[:space:]]*/, "", path)
-            }
-            /Hidden:/ {
-                if ($2 == "true") enabled = "false"
-            }
-            name != "" && path != "" {
-                printf "%s{\\"name\\": \\"%s\\", \\"path\\": \\"%s\\", \\"enabled\\": %s, \\"type\\": \\"ServiceManagement\\"}", (NR>1 ? "," : ""), name, path, enabled
-                name = ""
-                path = ""
-                enabled = "true"
-            }
-            '
-            
-            # User login items from preferences
-            osascript -e 'tell application "System Events" to get the name of every login item' 2>/dev/null | \
-            tr ',' '\\n' | while read -r item; do
-                item=$(echo "$item" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                [ -z "$item" ] && continue
-                
-                if [ "$first" = "true" ]; then
-                    first=false
-                else
-                    echo ","
-                fi
-                
-                item_esc=$(echo "$item" | sed 's/"/\\\\"/g')
-                echo "{\\"name\\": \\"$item_esc\\", \\"type\\": \\"LoginItem\\", \\"enabled\\": true}"
-            done
-            
-            echo "]"
-        """
-        
-        let result = try await executeWithFallback(
-            osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
-        )
-        
-        var items: [[String: Any]] = []
-        
-        if let resultItems = result["items"] as? [[String: Any]] {
-            items = resultItems
-        }
-        
-        return items.map { item in
-            [
-                "name": item["name"] as? String ?? "",
-                "path": item["path"] as? String ?? "",
-                "type": item["type"] as? String ?? "LoginItem",
-                "enabled": (item["enabled"] as? Bool == true) ||
-                          (item["status"] as? String != "disabled"),
-                "username": item["username"] as? String ?? ""
-            ]
-        }
     }
     
     // MARK: - Service Management (SMAppService items)
