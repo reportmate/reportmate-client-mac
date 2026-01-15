@@ -3,8 +3,8 @@ import Foundation
 /// System module processor - uses osquery first with bash fallback
 /// Based on MunkiReport patterns for system info collection
 /// Reference: https://github.com/munkireport/machine
-/// No Python - uses osquery for: system_info, os_version, uptime, launchd
-/// Bash fallback for: hostnames, locale, keyboard, rosetta, software updates, system preferences
+/// No Python - uses osquery for: system_info, os_version, uptime, launchd, system_extensions, kernel_extensions, startup_items, package_receipts
+/// Bash fallback for: hostnames, locale, keyboard, rosetta, software updates, system preferences, privileged helpers
 public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     public init(configuration: ReportMateConfiguration) {
@@ -21,8 +21,14 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         async let launchdServicesData = collectLaunchdServices()
         async let softwareUpdatesData = collectSoftwareUpdates()
         async let pendingAppleUpdatesData = collectPendingAppleUpdates()
+        async let installHistoryData = collectInstallHistory()
         async let systemConfigData = collectSystemConfiguration()
         async let environmentData = collectEnvironment()
+        // Mac-specific components (moved from Profiles module)
+        async let loginItemsData = collectLoginItems()
+        async let systemExtensionsData = collectSystemExtensions()
+        async let kernelExtensionsData = collectKernelExtensions()
+        async let privilegedHelpersData = collectPrivilegedHelperTools()
         
         // Await all results
         let osInfo = try await osInfoData
@@ -33,8 +39,14 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let launchdServices = try await launchdServicesData
         _ = try await softwareUpdatesData  // Collected but not used; pendingAppleUpdates provides this data
         let pendingUpdates = try await pendingAppleUpdatesData
+        let installHistory = try await installHistoryData
         let systemConfig = try await systemConfigData
         let environment = try await environmentData
+        // Mac-specific
+        let loginItems = try await loginItemsData
+        let systemExtensions = try await systemExtensionsData
+        let kernelExtensions = try await kernelExtensionsData
+        let privilegedHelpers = try await privilegedHelpersData
         
         // Build the combined system data dictionary
         let systemData: [String: Any] = [
@@ -46,8 +58,14 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "scheduledTasks": launchItems,
             "services": launchdServices,
             "pendingAppleUpdates": pendingUpdates,
+            "installHistory": installHistory,
             "environment": environment,
-            "systemConfiguration": systemConfig
+            "systemConfiguration": systemConfig,
+            // Mac-specific system components
+            "loginItems": loginItems,
+            "systemExtensions": systemExtensions,
+            "kernelExtensions": kernelExtensions,
+            "privilegedHelperTools": privilegedHelpers
         ]
         
         return BaseModuleData(moduleId: moduleId, data: systemData)
@@ -129,9 +147,13 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             uuid=$(ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/{print $4}' 2>/dev/null || echo "")
             current_user=$(stat -f%Su /dev/console 2>/dev/null || whoami)
             
-            # Boot time
-            boot_time_sec=$(sysctl -n kern.boottime 2>/dev/null | awk -F'[= ,]' '{print $4}')
-            boot_time_iso=$(date -r "$boot_time_sec" -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
+            # Boot time - extract seconds from kern.boottime
+            boot_time_sec=$(sysctl -n kern.boottime 2>/dev/null | awk '{gsub(/[{}=,]/, " "); print $2}')
+            if [ -n "$boot_time_sec" ] && [ "$boot_time_sec" != "0" ]; then
+                boot_time_iso=$(date -r "$boot_time_sec" -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
+            else
+                boot_time_iso=""
+            fi
             
             # Timezone
             timezone=$(systemsetup -gettimezone 2>/dev/null | sed 's/Time Zone: //' || cat /etc/localtime 2>/dev/null | strings | tail -1)
@@ -139,8 +161,30 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             # Locale
             locale=$(defaults read .GlobalPreferences AppleLocale 2>/dev/null || echo "en_US")
             
-            # Keyboard layouts
-            keyboards=$(defaults read com.apple.HIToolbox AppleEnabledInputSources 2>/dev/null | grep -E '"KeyboardLayout Name"' | sed 's/.*= "\\(.*\\)";/\\1/' | tr '\\n' ',' | sed 's/,$//' || echo "US")
+            # Keyboard layouts - need to read from console user's domain (not root's)
+            console_user=$(stat -f%Su /dev/console 2>/dev/null || whoami)
+            keyboard_name=""
+            
+            # Try reading from console user's preferences
+            if [ "$console_user" != "root" ] && [ -n "$console_user" ]; then
+                user_home=$(eval echo ~$console_user)
+                keyboard_plist_file="$user_home/Library/Preferences/com.apple.HIToolbox.plist"
+                if [ -f "$keyboard_plist_file" ]; then
+                    # Read the selected input sources - need to escape space in key name with backslash
+                    keyboard_name=$(/usr/libexec/PlistBuddy -c 'Print :AppleSelectedInputSources:0:KeyboardLayout\\ Name' "$keyboard_plist_file" 2>/dev/null || echo "")
+                fi
+            fi
+            
+            # Fallback: try defaults command (works if not running as root)
+            if [ -z "$keyboard_name" ]; then
+                keyboard_name=$(defaults read com.apple.HIToolbox AppleSelectedInputSources 2>/dev/null | grep -E "KeyboardLayout Name" | head -1 | sed 's/.*= "\\(.*\\)".*/\\1/' | tr -d ';' 2>/dev/null || echo "")
+            fi
+            
+            # Final fallback
+            if [ -z "$keyboard_name" ]; then
+                keyboard_name="Unknown"
+            fi
+            keyboards="$keyboard_name"
             
             # Rosetta 2 status (Apple Silicon)
             arch=$(uname -m)
@@ -321,14 +365,16 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             let username = item["username"] as? String
             
             // Determine type and source from path
+            // Note: When running as root, NSHomeDirectory() returns /var/root, not user's home
+            // Check for /Users/ in path for user-level items
             var itemType = "LaunchDaemon"
             var source = "System"
             if path.contains("LaunchAgents") {
                 itemType = "LaunchAgent"
             }
-            if path.hasPrefix("/System/") {
+            if path.hasPrefix("/System/") || label.hasPrefix("com.apple.") {
                 source = "Apple"
-            } else if path.contains(NSHomeDirectory()) {
+            } else if path.contains("/Users/") {
                 source = "User"
             }
             
@@ -366,17 +412,16 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         }
     }
     
-    // MARK: - Launchd Services (bash: launchctl list + osquery: launchd for details)
+    // MARK: - Launchd Services (bash: launchctl list + osquery: launchd for details + plist content)
     
     private func collectLaunchdServices() async throws -> [[String: Any]] {
         // Use bash to get running services from launchctl, then enrich with osquery launchd data
+        // Note: We need to collect BOTH system-level (launchctl list) AND user-level (as console user) items
         let bashScript = """
-            # Get all loaded services with PID and status
+            # Collect system-level services (running as root)
             launchctl list 2>/dev/null | tail -n +2 | while IFS=$'\\t' read -r pid status label; do
-                # Skip empty labels
                 [ -z "$label" ] && continue
                 
-                # Determine running status
                 if [ "$pid" != "-" ] && [ -n "$pid" ]; then
                     running="true"
                     pid_val="$pid"
@@ -385,16 +430,38 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     pid_val="null"
                 fi
                 
-                echo "{\\"label\\": \\"$label\\", \\"pid\\": $pid_val, \\"running\\": $running},"
-            done | sed '$ s/,$//'
+                echo "{\\"label\\": \\"$label\\", \\"pid\\": $pid_val, \\"running\\": $running, \\"domain\\": \\"system\\"},"
+            done
+            
+            # Also collect user-level services (run launchctl as console user)
+            console_user=$(stat -f%Su /dev/console 2>/dev/null)
+            if [ -n "$console_user" ] && [ "$console_user" != "root" ]; then
+                console_uid=$(id -u "$console_user" 2>/dev/null)
+                if [ -n "$console_uid" ]; then
+                    # Use launchctl print to get user domain items, or run launchctl as user
+                    sudo -u "$console_user" launchctl list 2>/dev/null | tail -n +2 | while IFS=$'\\t' read -r pid status label; do
+                        [ -z "$label" ] && continue
+                        
+                        if [ "$pid" != "-" ] && [ -n "$pid" ]; then
+                            running="true"
+                            pid_val="$pid"
+                        else
+                            running="false"
+                            pid_val="null"
+                        fi
+                        
+                        echo "{\\"label\\": \\"$label\\", \\"pid\\": $pid_val, \\"running\\": $running, \\"domain\\": \\"user\\"},"
+                    done
+                fi
+            fi
         """
         
-        // Get the raw launchctl list
+        // Get the raw launchctl list (both system and user)
         let launchctlResult = try await executeWithFallback(
             osquery: nil,
             bash: """
                 echo '['
-                \(bashScript)
+                \(bashScript) | sed '$ s/,$//'
                 echo ']'
                 """,
             python: nil
@@ -427,7 +494,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             }
         }
         
-        // Parse launchctl results and enrich with osquery data
+        // Parse launchctl results and enrich with osquery data and plist content
         var services: [[String: Any]] = []
         
         if let items = launchctlResult["items"] as? [[String: Any]] {
@@ -448,6 +515,9 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 let onDemand = details["on_demand"] as? String ?? ""
                 let disabled = details["disabled"] as? String ?? ""
                 
+                // Get the domain (system vs user) from launchctl output
+                let domain = item["domain"] as? String ?? "system"
+                
                 // Parse program arguments into array
                 var programArguments: [String] = []
                 if !programArgs.isEmpty {
@@ -457,6 +527,33 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 // Parse watch paths and queue directories
                 let watchPaths = (details["watch_paths"] as? String)?.components(separatedBy: ",").filter { !$0.isEmpty } ?? []
                 let queueDirs = (details["queue_directories"] as? String)?.components(separatedBy: ",").filter { !$0.isEmpty } ?? []
+                
+                // Determine source (Apple, System, User)
+                // Use domain from launchctl + path patterns
+                var source = "System"
+                if label.hasPrefix("com.apple.") || path.hasPrefix("/System/") {
+                    source = "Apple"
+                } else if domain == "user" || path.contains("/Users/") {
+                    source = "User"
+                }
+                
+                // Determine type from path
+                var itemType = "LaunchDaemon"
+                if path.contains("LaunchAgents") || domain == "user" {
+                    itemType = "LaunchAgent"
+                }
+                
+                // Get plist content if path exists
+                var plistContent: String? = nil
+                if !path.isEmpty && FileManager.default.fileExists(atPath: path) {
+                    // Read and convert plist to JSON for display
+                    if let plistData = FileManager.default.contents(atPath: path),
+                       let plist = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil),
+                       let jsonData = try? JSONSerialization.data(withJSONObject: plist, options: [.prettyPrinted, .sortedKeys]),
+                       let jsonString = String(data: jsonData, encoding: .utf8) {
+                        plistContent = jsonString
+                    }
+                }
                 
                 services.append([
                     "label": label,
@@ -478,7 +575,10 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     "exitTimeout": Optional<Int>.none as Any,
                     "startInterval": Int(details["start_interval"] as? String ?? "") as Any,
                     "watchPaths": watchPaths,
-                    "queueDirectories": queueDirs
+                    "queueDirectories": queueDirs,
+                    "source": source,
+                    "type": itemType,
+                    "plistContent": plistContent as Any
                 ])
             }
         }
@@ -764,5 +864,530 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             }
         }
         return env
+    }
+    
+    // MARK: - Install History (osquery: package_receipts)
+    
+    private func collectInstallHistory() async throws -> [[String: Any]] {
+        // Get packages installed in the last 30 days
+        // Calculate timestamp for 30 days ago
+        let thirtyDaysAgo = Int(Date().timeIntervalSince1970) - (30 * 24 * 60 * 60)
+        
+        // osquery package_receipts provides macOS install history
+        let osqueryScript = """
+            SELECT 
+                package_id,
+                package_filename,
+                version,
+                location,
+                install_time,
+                installer_name,
+                path
+            FROM package_receipts
+            WHERE install_time >= '\(thirtyDaysAgo)'
+            ORDER BY install_time DESC;
+        """
+        
+        let bashScript = """
+            # Fallback: parse receipts from filesystem (last 30 days)
+            thirty_days_ago=$(date -v-30d +%s 2>/dev/null || date -d "30 days ago" +%s 2>/dev/null || echo "0")
+            
+            echo "["
+            first=true
+            for receipt in /var/db/receipts/*.plist; do
+                [ -f "$receipt" ] || continue
+                
+                # Get modification time of receipt file
+                mod_time=$(stat -f%m "$receipt" 2>/dev/null || echo "0")
+                [ "$mod_time" -lt "$thirty_days_ago" ] && continue
+                
+                pkg_id=$(/usr/libexec/PlistBuddy -c "Print :PackageIdentifier" "$receipt" 2>/dev/null || echo "")
+                version=$(/usr/libexec/PlistBuddy -c "Print :PackageVersion" "$receipt" 2>/dev/null || echo "")
+                install_time=$(/usr/libexec/PlistBuddy -c "Print :InstallDate" "$receipt" 2>/dev/null || echo "")
+                
+                [ -z "$pkg_id" ] && continue
+                
+                if [ "$first" = "true" ]; then
+                    first=false
+                else
+                    echo ","
+                fi
+                
+                echo "{\\"package_id\\": \\"$pkg_id\\", \\"version\\": \\"$version\\", \\"install_time\\": \\"$install_time\\"}"
+            done
+            echo "]"
+        """
+        
+        let result = try await executeWithFallback(
+            osquery: osqueryScript,
+            bash: bashScript,
+            python: nil
+        )
+        
+        var history: [[String: Any]] = []
+        
+        if let items = result["items"] as? [[String: Any]] {
+            history = items.map { item in
+                var normalized: [String: Any] = [:]
+                
+                normalized["packageId"] = item["package_id"] as? String ?? ""
+                normalized["packageFilename"] = item["package_filename"] as? String ?? ""
+                normalized["version"] = item["version"] as? String ?? ""
+                normalized["location"] = item["location"] as? String ?? ""
+                normalized["installTime"] = item["install_time"] as? String ?? ""
+                normalized["installerName"] = item["installer_name"] as? String ?? ""
+                normalized["path"] = item["path"] as? String ?? ""
+                
+                return normalized
+            }
+        }
+        
+        return history
+    }
+    
+    // MARK: - Login Items (Open at Login apps - uses sfltool for BTM database)
+    
+    private func collectLoginItems() async throws -> [[String: Any]] {
+        // The "Open at Login" items in macOS System Settings come from the BTM (Background Task Management) database
+        // These are Type: app (0x2) entries with Disposition: [enabled, ...]
+        // sfltool dumpbtm shows all items - we filter for enabled apps that are NOT helper apps
+        
+        let bashScript = """
+            # Get login items using sfltool (lists BTM-registered apps)
+            # Filter for Type: app with enabled disposition - these are the "Open at Login" items
+            
+            sudo sfltool dumpbtm 2>/dev/null | awk '
+            BEGIN { RS = ""; FS = "\\n"; first = 1 }
+            {
+                name = ""
+                url = ""
+                type = ""
+                disposition = ""
+                bundle_id = ""
+                
+                for (i = 1; i <= NF; i++) {
+                    if ($i ~ /^[[:space:]]*Name:/) {
+                        gsub(/^[[:space:]]*Name:[[:space:]]*/, "", $i)
+                        name = $i
+                    }
+                    if ($i ~ /^[[:space:]]*Type:/) {
+                        gsub(/^[[:space:]]*Type:[[:space:]]*/, "", $i)
+                        type = $i
+                    }
+                    if ($i ~ /^[[:space:]]*Disposition:/) {
+                        gsub(/^[[:space:]]*Disposition:[[:space:]]*/, "", $i)
+                        disposition = $i
+                    }
+                    if ($i ~ /^[[:space:]]*URL:.*file:/) {
+                        gsub(/^[[:space:]]*URL:[[:space:]]*file:\\/\\//, "", $i)
+                        gsub(/\\/$/, "", $i)
+                        # URL decode
+                        gsub(/%20/, " ", $i)
+                        url = $i
+                    }
+                    if ($i ~ /^[[:space:]]*Bundle Identifier:/) {
+                        gsub(/^[[:space:]]*Bundle Identifier:[[:space:]]*/, "", $i)
+                        bundle_id = $i
+                    }
+                }
+                
+                # Filter for app type (0x2) that is enabled
+                if (type ~ /app \\(0x2\\)/ && disposition ~ /enabled/) {
+                    if (name != "" && name != "(null)") {
+                        if (!first) printf ","
+                        first = 0
+                        # Escape quotes in name
+                        gsub(/"/, "\\\\\\"", name)
+                        gsub(/"/, "\\\\\\"", url)
+                        printf "{\\"name\\":\\"%s\\",\\"path\\":\\"%s\\",\\"type\\":\\"Application\\",\\"bundleId\\":\\"%s\\"}", name, url, bundle_id
+                    }
+                }
+            }
+            END { }
+            ' | (echo "["; cat; echo "]") | jq '.'
+        """
+        
+        let result = try await executeWithFallback(
+            osquery: nil,
+            bash: bashScript,
+            python: nil
+        )
+        
+        var items: [[String: Any]] = []
+        
+        if let resultItems = result["items"] as? [[String: Any]] {
+            items = resultItems
+        }
+        
+        return items.map { item in
+            [
+                "name": item["name"] as? String ?? "",
+                "path": item["path"] as? String ?? "",
+                "type": item["type"] as? String ?? "Application",
+                "bundleId": item["bundleId"] as? String ?? "",
+                "enabled": true,
+                "source": "BTM"
+            ]
+        }
+    }
+    
+    // MARK: - System Extensions (osquery: system_extensions + app extensions)
+    
+    private func collectSystemExtensions() async throws -> [[String: Any]] {
+        var allExtensions: [[String: Any]] = []
+        
+        // 1. System Extensions (osquery system_extensions table for macOS 10.15+)
+        let osqueryScript = """
+            SELECT 
+                identifier,
+                version,
+                state,
+                team,
+                bundle_path,
+                category
+            FROM system_extensions;
+        """
+        
+        let sysExtResult = try? await executeWithFallback(
+            osquery: osqueryScript,
+            bash: nil,
+            python: nil
+        )
+        
+        if let items = sysExtResult?["items"] as? [[String: Any]] {
+            for ext in items {
+                let category = ext["category"] as? String ?? ""
+                var extType = "System"
+                if category.contains("Network") || category.contains("network") {
+                    extType = "Network"
+                } else if category.contains("Endpoint") || category.contains("endpoint") || category.contains("Security") {
+                    extType = "EndpointSecurity"
+                } else if category.contains("DriverKit") || category.contains("driver") {
+                    extType = "DriverKit"
+                }
+                
+                allExtensions.append([
+                    "identifier": ext["identifier"] as? String ?? "",
+                    "version": ext["version"] as? String ?? "",
+                    "state": ext["state"] as? String ?? "unknown",
+                    "teamId": ext["team"] as? String ?? "",
+                    "bundlePath": ext["bundle_path"] as? String ?? "",
+                    "category": category,
+                    "type": extType,
+                    "extensionCategory": category.isEmpty ? "Driver Extensions" : category,
+                    "appName": ""
+                ])
+            }
+        }
+        
+        // 2. App Extensions (pluginkit - Quick Look, Sharing, Finder, etc.)
+        let appExtScript = """
+            # Get all app extensions using pluginkit
+            pluginkit -mDAv 2>/dev/null | awk '
+            BEGIN { first = 1 }
+            {
+                # Parse lines like: com.app.extension(1.0) identifier
+                # or: Path: /path/to/extension
+                if ($0 ~ /^[[:space:]]*[A-Za-z0-9._-]+\\(/) {
+                    # New extension entry
+                    if (identifier != "" && !first) print ","
+                    first = 0
+                    
+                    # Extract identifier
+                    match($0, /[A-Za-z0-9._-]+/)
+                    identifier = substr($0, RSTART, RLENGTH)
+                    
+                    # Extract version
+                    if (match($0, /\\([0-9.]+\\)/)) {
+                        version = substr($0, RSTART+1, RLENGTH-2)
+                    } else {
+                        version = ""
+                    }
+                    
+                    path = ""
+                    category = ""
+                    appName = ""
+                }
+                else if ($0 ~ /^[[:space:]]*Path:/) {
+                    gsub(/^[[:space:]]*Path:[[:space:]]*/, "")
+                    path = $0
+                    
+                    # Extract app name from path
+                    if (match(path, /\\/([^\\/]+)\\.app/)) {
+                        appName = substr(path, RSTART+1, RLENGTH-5)
+                    }
+                    
+                    # Determine category from path or identifier
+                    if (path ~ /QuickLook/) category = "Quick Look"
+                    else if (path ~ /ShareExtension/ || identifier ~ /share/) category = "Sharing"
+                    else if (path ~ /FinderSync/ || identifier ~ /finder/) category = "Finder"
+                    else if (path ~ /PhotosExtension/ || identifier ~ /photo/) category = "Photos Editing"
+                    else if (path ~ /SpotlightExtension/ || identifier ~ /spotlight/) category = "Spotlight"
+                    else if (path ~ /ActionExtension/ || identifier ~ /action/) category = "Actions"
+                    else if (path ~ /FileProvider/ || identifier ~ /fileprovider/) category = "File Providers"
+                    else if (path ~ /SourceEditorExtension/ || identifier ~ /sourceeditor/) category = "Xcode Source Editor"
+                    else if (identifier ~ /camera/) category = "Camera Extensions"
+                    else if (identifier ~ /media/) category = "Media Extensions"
+                    else if (identifier ~ /dock/) category = "Dock Tiles"
+                    else category = "Other"
+                    
+                    printf "{\\"identifier\\": \\"%s\\", \\"version\\": \\"%s\\", \\"bundlePath\\": \\"%s\\", \\"category\\": \\"%s\\", \\"appName\\": \\"%s\\", \\"state\\": \\"enabled\\", \\"type\\": \\"AppExtension\\"}", identifier, version, path, category, appName
+                }
+            }
+            END {
+                if (identifier != "") print ""
+            }
+            ' | sed 's/\\\\"/"/g'
+        """
+        
+        // Run app extensions collection
+        let appExtResult = try await executeWithFallback(
+            osquery: nil,
+            bash: """
+                echo "["
+                \(appExtScript)
+                echo "]"
+                """,
+            python: nil
+        )
+        
+        if let items = appExtResult["items"] as? [[String: Any]] {
+            for ext in items {
+                allExtensions.append([
+                    "identifier": ext["identifier"] as? String ?? "",
+                    "version": ext["version"] as? String ?? "",
+                    "state": ext["state"] as? String ?? "enabled",
+                    "teamId": ext["teamId"] as? String ?? "",
+                    "bundlePath": ext["bundlePath"] as? String ?? "",
+                    "category": ext["category"] as? String ?? "Other",
+                    "type": ext["type"] as? String ?? "AppExtension",
+                    "extensionCategory": ext["category"] as? String ?? "Other",
+                    "appName": ext["appName"] as? String ?? ""
+                ])
+            }
+        }
+        
+        // 3. Also get extensions from PlugIns directories
+        let pluginsScript = """
+            echo "["
+            first=true
+            
+            # Search for app extensions in standard locations
+            for appdir in /Applications/*.app ~/Applications/*.app /System/Applications/*.app; do
+                [ -d "$appdir" ] || continue
+                
+                plugins_dir="$appdir/Contents/PlugIns"
+                [ -d "$plugins_dir" ] || continue
+                
+                app_name=$(basename "$appdir" .app)
+                
+                for ext in "$plugins_dir"/*.appex; do
+                    [ -d "$ext" ] || continue
+                    
+                    ext_name=$(basename "$ext" .appex)
+                    info_plist="$ext/Contents/Info.plist"
+                    
+                    if [ -f "$info_plist" ]; then
+                        identifier=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$info_plist" 2>/dev/null || echo "$ext_name")
+                        version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$info_plist" 2>/dev/null || echo "")
+                        ext_type=$(/usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" "$info_plist" 2>/dev/null || echo "")
+                        
+                        # Map extension point to category
+                        case "$ext_type" in
+                            *quicklook*) category="Quick Look" ;;
+                            *share*) category="Sharing" ;;
+                            *finder*) category="Finder" ;;
+                            *photos*) category="Photos Editing" ;;
+                            *spotlight*) category="Spotlight" ;;
+                            *action*) category="Actions" ;;
+                            *fileprovider*) category="File Providers" ;;
+                            *sourceeditor*) category="Xcode Source Editor" ;;
+                            *) category="Other" ;;
+                        esac
+                        
+                        if [ "$first" = "true" ]; then
+                            first=false
+                        else
+                            echo ","
+                        fi
+                        
+                        echo "{\\"identifier\\": \\"$identifier\\", \\"version\\": \\"$version\\", \\"bundlePath\\": \\"$ext\\", \\"category\\": \\"$category\\", \\"appName\\": \\"$app_name\\", \\"state\\": \\"enabled\\", \\"type\\": \\"AppExtension\\"}"
+                    fi
+                done
+            done
+            
+            echo "]"
+        """
+        
+        let pluginsResult = try await executeWithFallback(
+            osquery: nil,
+            bash: pluginsScript,
+            python: nil
+        )
+        
+        // Deduplicate by identifier (pluginkit may have found them already)
+        var seenIds = Set(allExtensions.compactMap { $0["identifier"] as? String })
+        
+        if let items = pluginsResult["items"] as? [[String: Any]] {
+            for ext in items {
+                let identifier = ext["identifier"] as? String ?? ""
+                if !identifier.isEmpty && !seenIds.contains(identifier) {
+                    seenIds.insert(identifier)
+                    allExtensions.append([
+                        "identifier": identifier,
+                        "version": ext["version"] as? String ?? "",
+                        "state": ext["state"] as? String ?? "enabled",
+                        "teamId": "",
+                        "bundlePath": ext["bundlePath"] as? String ?? "",
+                        "category": ext["category"] as? String ?? "Other",
+                        "type": ext["type"] as? String ?? "AppExtension",
+                        "extensionCategory": ext["category"] as? String ?? "Other",
+                        "appName": ext["appName"] as? String ?? ""
+                    ])
+                }
+            }
+        }
+        
+        return allExtensions
+    }
+    
+    // MARK: - Kernel Extensions (osquery: kernel_extensions)
+    
+    private func collectKernelExtensions() async throws -> [[String: Any]] {
+        // osquery kernel_extensions table
+        let osqueryScript = """
+            SELECT 
+                idx,
+                refs,
+                size,
+                name,
+                version,
+                linked_against,
+                path
+            FROM kernel_extensions
+            WHERE name NOT LIKE 'com.apple.%';
+        """
+        
+        let bashScript = """
+            # Get kernel extensions using kextstat
+            kextstat 2>/dev/null | awk '
+            BEGIN { print "["; first = 1 }
+            NR > 1 && $6 !~ /^com\\.apple\\./ {
+                idx = $1
+                refs = $2
+                size = $4
+                name = $6
+                version = ""
+                
+                # Extract version from name if present
+                if (match(name, /\\([0-9.]+\\)/)) {
+                    version = substr(name, RSTART+1, RLENGTH-2)
+                    name = substr(name, 1, RSTART-1)
+                }
+                
+                if (!first) print ","
+                printf "{\\"idx\\": \\"%s\\", \\"refs\\": \\"%s\\", \\"size\\": \\"%s\\", \\"name\\": \\"%s\\", \\"version\\": \\"%s\\"}", idx, refs, size, name, version
+                first = 0
+            }
+            END { print "]" }
+            '
+        """
+        
+        let result = try await executeWithFallback(
+            osquery: osqueryScript,
+            bash: bashScript,
+            python: nil
+        )
+        
+        var kexts: [[String: Any]] = []
+        
+        if let items = result["items"] as? [[String: Any]] {
+            kexts = items
+        }
+        
+        return kexts.map { kext in
+            let sizeStr = kext["size"] as? String ?? "0"
+            let sizeInt = Int(sizeStr) ?? 0
+            
+            return [
+                "name": kext["name"] as? String ?? "",
+                "version": kext["version"] as? String ?? "",
+                "path": kext["path"] as? String ?? "",
+                "size": sizeInt,
+                "references": Int(kext["refs"] as? String ?? "0") ?? 0,
+                "index": Int(kext["idx"] as? String ?? "0") ?? 0,
+                "loaded": true
+            ]
+        }
+    }
+    
+    // MARK: - Privileged Helper Tools
+    
+    private func collectPrivilegedHelperTools() async throws -> [[String: Any]] {
+        // List privileged helper tools installed by third-party apps
+        // Uses jq for reliable JSON construction
+        let bashScript = """
+            collect_helper() {
+                local helper="$1"
+                local name=$(basename "$helper")
+                
+                # Get file info
+                size=$(stat -f%z "$helper" 2>/dev/null || echo "0")
+                modified=$(stat -f%m "$helper" 2>/dev/null || echo "0")
+                mod_date=$(date -r "$modified" -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
+                
+                # Get code signature info
+                team_id=""
+                signed="false"
+                codesign_output=$(codesign -dvv "$helper" 2>&1 || echo "")
+                if echo "$codesign_output" | grep -q "Authority="; then
+                    signed="true"
+                    team_id=$(echo "$codesign_output" | grep "TeamIdentifier=" | cut -d= -f2)
+                fi
+                
+                # Get bundle identifier from codesign output (more reliable than parsing binary)
+                bundle_id=$(echo "$codesign_output" | grep "Identifier=" | cut -d= -f2)
+                [ -z "$bundle_id" ] && bundle_id="$name"
+                
+                jq -n --arg n "$name" --arg p "$helper" --arg b "$bundle_id" --arg t "$team_id" \\
+                    --argjson s "$size" --arg m "$mod_date" --argjson sg "$([ \"$signed\" = \"true\" ] && echo true || echo false)" \\
+                    '{name: $n, path: $p, bundleIdentifier: $b, teamId: $t, size: $s, modifiedDate: $m, signed: $sg}'
+            }
+            
+            # Collect all helpers
+            items="[]"
+            
+            for helper in /Library/PrivilegedHelperTools/*; do
+                [ -f "$helper" ] || continue
+                item=$(collect_helper "$helper" 2>/dev/null)
+                [ -n "$item" ] && items=$(echo "$items" | jq --argjson item "$item" '. + [$item]')
+            done
+            
+            echo "$items"
+        """
+        
+        let result = try await executeWithFallback(
+            osquery: nil,
+            bash: bashScript,
+            python: nil
+        )
+        
+        var helpers: [[String: Any]] = []
+        
+        if let items = result["items"] as? [[String: Any]] {
+            helpers = items
+        }
+        
+        return helpers.map { helper in
+            [
+                "name": helper["name"] as? String ?? "",
+                "path": helper["path"] as? String ?? "",
+                "bundleIdentifier": helper["bundleIdentifier"] as? String ?? "",
+                "teamId": helper["teamId"] as? String ?? "",
+                "size": helper["size"] as? Int ?? 0,
+                "modifiedDate": helper["modifiedDate"] as? String ?? "",
+                "signed": helper["signed"] as? Bool ?? false
+            ]
+        }
     }
 }
