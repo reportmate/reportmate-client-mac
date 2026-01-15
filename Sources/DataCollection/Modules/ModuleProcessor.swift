@@ -52,51 +52,61 @@ open class BaseModuleProcessor: ModuleProcessor, @unchecked Sendable {
             do {
                 let osqueryService = OSQueryService(configuration: configuration)
                 if await osqueryService.isAvailable() {
+                    print("[DEBUG] Trying osquery for module \(moduleId)...")
                     let results = try await osqueryService.executeQuery(osqueryCmd)
                     // Unwrap single result, or return as items
                     if results.count == 1, let first = results.first {
+                        print("[DEBUG] OSQuery succeeded for module \(moduleId)")
                         return first
                     }
+                    print("[DEBUG] OSQuery succeeded for module \(moduleId) with \(results.count) results")
                     return ["items": results]
                 }
             } catch {
-                print("⚠️ OSQuery failed (extension tables may not be available), trying bash fallback: \(error)")
+                print("WARNING: OSQuery failed (extension tables may not be available), trying bash fallback: \(error)")
             }
         }
         
         // Try bash fallback
         if let bashCmd = bash {
             do {
+                print("[DEBUG] Trying bash fallback for module \(moduleId)...")
                 let output = try await BashService.execute(bashCmd)
+                print("[DEBUG] Bash output length: \(output.count) characters")
                 
                 // Try to parse as JSON
                 if let data = output.data(using: .utf8),
                    let jsonObject = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
                     if let dict = jsonObject as? [String: Any] {
+                        print("[DEBUG] Bash succeeded for module \(moduleId), returned dict")
                         return dict
                     } else if let array = jsonObject as? [Any] {
+                        print("[DEBUG] Bash succeeded for module \(moduleId), returned array")
                         return ["items": array]
                     }
                 }
                 
+                print("[DEBUG] WARNING: Bash output not JSON, returning as string")
                 return ["output": output]
             } catch {
-                print("⚠️ Bash fallback failed, trying python fallback: \(error)")
+                print("WARNING: Bash fallback failed, trying python fallback: \(error)")
             }
         }
         
         // Try python fallback
         if let pythonScript = python {
             do {
+                print("[DEBUG] Trying python fallback for module \(moduleId)...")
                 let result = try await PythonService.executeScript(pythonScript)
+                print("[DEBUG] Python succeeded for module \(moduleId)")
                 return result
             } catch {
-                print("❌ Python fallback failed: \(error)")
-                throw error
+                print("ERROR: Python fallback failed: \(error)")
             }
         }
         
-        // throw ModuleError.moduleNotFound(moduleId)
-        fatalError("No data source available for module: \(moduleId)")
+        // All fallbacks exhausted - return empty data instead of crashing
+        print("WARNING: All data sources exhausted for module \(moduleId), returning empty data")
+        return [:]
     }
 }

@@ -1775,7 +1775,7 @@ private func collectBatteryInfo() async throws -> [String: Any] {
         
         // Cap at 100% - any value over 100% indicates measurement error
         if percentage > 100 {
-            print("⚠️  Calculated percentage \(String(format: "%.2f", percentage))% exceeds 100%, capping to 100% (size: \(size), capacity: \(capacity))")
+            print("WARNING:  Calculated percentage \(String(format: "%.2f", percentage))% exceeds 100%, capping to 100% (size: \(size), capacity: \(capacity))")
             return 100.0
         }
         

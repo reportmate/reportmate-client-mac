@@ -14,12 +14,19 @@ public class OSQueryService {
         self.configuration = configuration
         self.osqueryPath = configuration.osqueryPath
         
+        // TEMPORARILY DISABLED: macadmins extension has compatibility issues with osquery 5.21.0
+        // The extension fails to create its socket and osquery doesn't wait for extension tables
+        // Bash fallbacks provide all necessary data for now
+        // TODO: Investigate extension compatibility or upgrade osquery
+        self.extensionPath = nil
+        /*
         // Determine extension path (bundled or configured)
         if configuration.extensionEnabled {
             self.extensionPath = Self.resolveExtensionPath(configured: configuration.osqueryExtensionPath)
         } else {
             self.extensionPath = nil
         }
+        */
     }
     
     /// Check if osquery is available
@@ -114,27 +121,63 @@ public class OSQueryService {
     /// Execute an osquery SQL query
     public func executeQuery(_ query: String) async throws -> [[String: Any]] {
         return try await withCheckedThrowingContinuation { continuation in
+            var extensionProcess: Process? = nil
+            var socketPath: String? = nil
+            
+            // Start extension daemon if available
+            if let extPath = extensionPath {
+                let uniqueId = UUID().uuidString.prefix(8)
+                socketPath = "/tmp/osquery-rm-\(uniqueId).em"
+                
+                // Clean up any stale socket
+                try? FileManager.default.removeItem(atPath: socketPath!)
+                
+                // Start extension as background process
+                let extTask = Process()
+                extTask.executableURL = URL(fileURLWithPath: extPath)
+                extTask.arguments = ["--socket", socketPath!, "--verbose"]
+                extTask.standardOutput = Pipe()  // Suppress output
+                extTask.standardError = Pipe()
+                
+                do {
+                    try extTask.run()
+                    extensionProcess = extTask
+                    
+                    // Wait for socket to be created (extension startup)
+                    var retries = 0
+                    while retries < 30 {  // 3 seconds max
+                        if FileManager.default.fileExists(atPath: socketPath!) {
+                            break
+                        }
+                        Thread.sleep(forTimeInterval: 0.1)
+                        retries += 1
+                    }
+                    
+                    if !FileManager.default.fileExists(atPath: socketPath!) {
+                        print("WARNING: Extension socket not created after 3 seconds, continuing without extension")
+                        extensionProcess?.terminate()
+                        extensionProcess = nil
+                        socketPath = nil
+                    }
+                } catch {
+                    print("WARNING: Failed to start extension: \(error), continuing without extension")
+                    extensionProcess = nil
+                    socketPath = nil
+                }
+            }
+            
+            // Now run osquery connecting to the extension socket
             let task = Process()
             task.executableURL = URL(fileURLWithPath: osqueryPath)
             
-            // Build arguments with extension support
+            // Build arguments
             var arguments = ["--json"]
             
-            // Load extension if available
-            if let extPath = extensionPath {
-                // Use a unique socket path per query to avoid stale socket conflicts
-                let uniqueId = UUID().uuidString.prefix(8)
-                let socketPath = "/tmp/osquery-rm-\(uniqueId).em"
-
-                // Clean up any stale socket file
-                try? FileManager.default.removeItem(atPath: socketPath)
-
+            // Connect to extension socket if we started the extension daemon
+            if let socket = socketPath, extensionProcess != nil {
                 arguments.append(contentsOf: [
-                    "--extension", extPath,
-                    "--extensions_socket", socketPath,
-                    "--extensions_timeout", "30",
-                    "--extensions_require", "macadmins_extension",  // Wait for extension to register
-                    "--allow_unsafe"  // Skip ownership check
+                    "--extensions_socket", socket,
+                    "--extensions_timeout", "5"  // Quick timeout since extension is already running
                 ])
             }
             
@@ -153,6 +196,16 @@ public class OSQueryService {
                 let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
                 
                 task.waitUntilExit()
+                
+                // Cleanup extension process
+                defer {
+                    if let extProcess = extensionProcess, extProcess.isRunning {
+                        extProcess.terminate()
+                    }
+                    if let socket = socketPath {
+                        try? FileManager.default.removeItem(atPath: socket)
+                    }
+                }
                 
                 if task.terminationStatus != 0 {
                     let errorMessage = String(data: errorData, encoding: .utf8) ?? "Unknown error"
