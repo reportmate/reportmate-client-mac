@@ -1563,8 +1563,9 @@ private func collectBatteryInfo() async throws -> [String: Any] {
                 let userFolders = try fileManager.contentsOfDirectory(atPath: usersDir)
                 print("[\(timestamp())] Found \(userFolders.count) items in /Users")
                 for userFolder in userFolders {
-                    // Skip hidden folders
+                    // Skip hidden folders and system users
                     if userFolder.hasPrefix(".") { continue }
+                    if userFolder == "Shared" { continue }  // Skip Shared folder for detailed breakdown
                     
                     let userPath = (usersDir as NSString).appendingPathComponent(userFolder)
                     var isDir: ObjCBool = false
@@ -1572,7 +1573,7 @@ private func collectBatteryInfo() async throws -> [String: Any] {
                         print("[\(timestamp())] Getting size for: \(userFolder) (using du)")
                         // Use fast du command instead of deep enumeration
                         if let size = await fastDirectorySizeWithDu(path: userPath) {
-                            let userInfo: [String: Any] = [
+                            var userInfo: [String: Any] = [
                                 "name": userFolder,
                                 "path": userPath,
                                 "size": size,
@@ -1581,6 +1582,15 @@ private func collectBatteryInfo() async throws -> [String: Any] {
                                 "driveRoot": "/",
                                 "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity)
                             ]
+                            
+                            // Collect user home folder breakdown (Desktop, Documents, Downloads, Pictures, etc.)
+                            print("[\(timestamp())]   Collecting user folder breakdown for: \(userFolder)")
+                            let userFolderBreakdown = await collectUserFolderBreakdown(userPath: userPath, totalCapacity: totalCapacity)
+                            if !userFolderBreakdown.isEmpty {
+                                userInfo["subdirectories"] = userFolderBreakdown
+                                print("[\(timestamp())]   Found \(userFolderBreakdown.count) user subdirectories for: \(userFolder)")
+                            }
+                            
                             userBreakdown.append(userInfo)
                             print("[\(timestamp())] Completed: \(userFolder) - \(formatBytes(size))")
                         }
@@ -1589,6 +1599,23 @@ private func collectBatteryInfo() async throws -> [String: Any] {
             } catch {
                 // Continue without user breakdown
                 print("[\(timestamp())] Error listing user folders: \(error)")
+            }
+            
+            // Also get Shared folder if it exists (without detailed breakdown)
+            let sharedPath = (usersDir as NSString).appendingPathComponent("Shared")
+            if fileManager.fileExists(atPath: sharedPath) {
+                if let size = await fastDirectorySizeWithDu(path: sharedPath) {
+                    let sharedInfo: [String: Any] = [
+                        "name": "Shared",
+                        "path": sharedPath,
+                        "size": size,
+                        "depth": 2,
+                        "category": "Users",
+                        "driveRoot": "/",
+                        "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity)
+                    ]
+                    userBreakdown.append(sharedInfo)
+                }
             }
             
             // Build /Users analysis without slow FileManager enumeration
@@ -1747,6 +1774,96 @@ private func collectBatteryInfo() async throws -> [String: Any] {
         }
         
         return nil
+    }
+    
+    /// Collect breakdown of standard user home folder directories (Desktop, Documents, Downloads, Pictures, etc.)
+    /// This enables the UI to show detailed storage usage within each user's home folder
+    private func collectUserFolderBreakdown(userPath: String, totalCapacity: Int64) async -> [[String: Any]] {
+        let fileManager = FileManager.default
+        var breakdown: [[String: Any]] = []
+        
+        // Standard macOS user directories to analyze
+        let standardFolders = [
+            "Desktop",
+            "Documents",
+            "Downloads",
+            "Movies",
+            "Music",
+            "Pictures",
+            "Library",  // User's Library folder (contains caches, app support, etc.)
+            "Applications",  // Some users have local Applications folders
+            "Developer",  // Xcode/development files
+            "Public"
+        ]
+        
+        for folderName in standardFolders {
+            let folderPath = (userPath as NSString).appendingPathComponent(folderName)
+            
+            // Check if folder exists
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: folderPath, isDirectory: &isDir), isDir.boolValue {
+                // Use fast du command for size calculation
+                if let size = await fastDirectorySizeWithDu(path: folderPath), size > 0 {
+                    let folderInfo: [String: Any] = [
+                        "name": folderName,
+                        "path": folderPath,
+                        "size": size,
+                        "depth": 3,
+                        "category": determineFolderCategory(folderName: folderName),
+                        "driveRoot": "/",
+                        "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity),
+                        "formattedSize": formatBytes(size)
+                    ]
+                    breakdown.append(folderInfo)
+                }
+            }
+        }
+        
+        // Also check for any large hidden folders that might be significant
+        let hiddenFolders = [".Trash", ".cache"]
+        for folderName in hiddenFolders {
+            let folderPath = (userPath as NSString).appendingPathComponent(folderName)
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: folderPath, isDirectory: &isDir), isDir.boolValue {
+                if let size = await fastDirectorySizeWithDu(path: folderPath), size > 100_000_000 {  // Only include if > 100MB
+                    let displayName = folderName == ".Trash" ? "Trash" : folderName.replacingOccurrences(of: ".", with: "")
+                    let folderInfo: [String: Any] = [
+                        "name": displayName,
+                        "path": folderPath,
+                        "size": size,
+                        "depth": 3,
+                        "category": "Cache",
+                        "driveRoot": "/",
+                        "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity),
+                        "formattedSize": formatBytes(size)
+                    ]
+                    breakdown.append(folderInfo)
+                }
+            }
+        }
+        
+        // Sort by size descending
+        breakdown.sort { 
+            ($0["size"] as? Int64 ?? 0) > ($1["size"] as? Int64 ?? 0) 
+        }
+        
+        return breakdown
+    }
+    
+    /// Determine category for user folder based on name
+    private func determineFolderCategory(folderName: String) -> String {
+        switch folderName {
+        case "Desktop", "Documents", "Downloads", "Public":
+            return "Documents"
+        case "Movies", "Music", "Pictures":
+            return "Media"
+        case "Library":
+            return "System"
+        case "Applications", "Developer":
+            return "Applications"
+        default:
+            return "Other"
+        }
     }
     
     /// Format bytes to human-readable string
