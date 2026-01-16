@@ -659,8 +659,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // osquery doesn't have model_name, so we add it by extracting from ioreg
@@ -773,8 +772,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         var result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // Enhance with system_profiler data for number_processors (proc total:perf:eff format)
@@ -858,8 +856,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         var result = try await executeWithFallback(
             osquery: systemMemoryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // Enhance with system_profiler SPMemoryDataType for type and manufacturer
@@ -934,8 +931,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -957,8 +953,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -1087,8 +1082,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // Check if wireless is available
@@ -1225,8 +1219,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         """
         var result = try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // If the result is wrapped in "output" (JSON parsing failed), try to unwrap it
@@ -1314,8 +1307,7 @@ private func collectBatteryInfo() async throws -> [String: Any] {
         
         return try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -1348,8 +1340,7 @@ private func collectBatteryInfo() async throws -> [String: Any] {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -1375,8 +1366,7 @@ private func collectBatteryInfo() async throws -> [String: Any] {
         do {
             let result = try await executeWithFallback(
                 osquery: nil,
-                bash: bashScript,
-                python: nil
+                bash: bashScript
             )
             return result
         } catch {
@@ -1439,8 +1429,7 @@ private func collectBatteryInfo() async throws -> [String: Any] {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -1484,8 +1473,7 @@ private func collectBatteryInfo() async throws -> [String: Any] {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -1747,18 +1735,32 @@ private func collectBatteryInfo() async throws -> [String: Any] {
     
     /// Fast directory size calculation using du command (10-100x faster than FileManager for large directories)
     /// Use this for user home directories which can contain millions of files
-    private func fastDirectorySizeWithDu(path: String) async -> Int64? {
+    /// Includes timeout to prevent hanging on TCC-protected directories
+    private func fastDirectorySizeWithDu(path: String, timeoutSeconds: Int = 30) async -> Int64? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/du")
-        process.arguments = ["-sk", path]  // -s = summary only, -k = kilobytes
+        // -s = summary only, -k = kilobytes, -x = don't cross filesystem boundaries
+        process.arguments = ["-skx", path]
         
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()  // Suppress error output
+        process.standardError = Pipe()  // Suppress error output (permission denied, etc.)
         
         do {
             try process.run()
-            process.waitUntilExit()
+            
+            // Wait with timeout to prevent hanging on TCC-protected directories
+            let deadline = Date().addingTimeInterval(Double(timeoutSeconds))
+            while process.isRunning && Date() < deadline {
+                try await Task.sleep(nanoseconds: 100_000_000)  // 100ms
+            }
+            
+            if process.isRunning {
+                // Timeout reached - terminate the process
+                print("[\(timestamp())] du timeout for: \(path) - terminating")
+                process.terminate()
+                return nil
+            }
             
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             if let output = String(data: data, encoding: .utf8) {
@@ -1770,6 +1772,9 @@ private func collectBatteryInfo() async throws -> [String: Any] {
                 }
             }
         } catch {
+            if process.isRunning {
+                process.terminate()
+            }
             return nil
         }
         

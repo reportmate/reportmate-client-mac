@@ -113,7 +113,6 @@ public struct ModuleExecutionStatus: Codable, Sendable {
 public enum DataCollectionMethod: String, Codable, Sendable {
     case osquery = "osquery"
     case bash = "bash"
-    case python = "python"
     case native = "native"
     case systemProfiler = "system_profiler"
     case iokit = "iokit"
@@ -123,7 +122,6 @@ public enum DataCollectionMethod: String, Codable, Sendable {
         switch self {
         case .osquery: return "OSQuery"
         case .bash: return "Bash Scripts"
-        case .python: return "Python Scripts"
         case .native: return "Native macOS APIs"
         case .systemProfiler: return "System Profiler"
         case .iokit: return "IOKit Framework"

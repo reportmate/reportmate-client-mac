@@ -133,33 +133,48 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
             FROM usb_devices;
             """
         
-        // Bash fallback using system_profiler
+        // Enhanced bash fallback using system_profiler with more fields
         let bashScript = """
             echo "["
             first=true
             
             system_profiler SPUSBDataType 2>/dev/null | awk '
-            BEGIN { name=""; vendor=""; vendor_id=""; product_id=""; serial=""; speed=""; first=1 }
+            BEGIN { name=""; vendor=""; vendor_id=""; product_id=""; serial=""; speed=""; location=""; conn_type=""; power=""; version=""; first=1 }
             /^[[:space:]]+[A-Za-z].*:$/ {
                 if (name != "" && name !~ /USB/ && name !~ /Bus/ && name !~ /Host/) {
                     if (!first) printf ","
-                    printf "{\\"name\\": \\"%s\\", \\"vendor\\": \\"%s\\", \\"vendorId\\": \\"%s\\", \\"productId\\": \\"%s\\", \\"serial\\": \\"%s\\", \\"speed\\": \\"%s\\"}", name, vendor, vendor_id, product_id, serial, speed
+                    gsub(/"/, "\\\\\\"", name)
+                    gsub(/"/, "\\\\\\"", vendor)
+                    gsub(/"/, "\\\\\\"", serial)
+                    gsub(/"/, "\\\\\\"", speed)
+                    gsub(/"/, "\\\\\\"", power)
+                    printf "{\\"name\\": \\"%s\\", \\"vendor\\": \\"%s\\", \\"vendorId\\": \\"%s\\", \\"productId\\": \\"%s\\", \\"serial\\": \\"%s\\", \\"speed\\": \\"%s\\", \\"locationId\\": \\"%s\\", \\"connectionType\\": \\"%s\\", \\"powerAllocated\\": \\"%s\\", \\"version\\": \\"%s\\"}", name, vendor, vendor_id, product_id, serial, speed, location, conn_type, power, version
                     first = 0
                 }
                 gsub(/^[[:space:]]+/, "")
                 gsub(/:$/, "")
                 name = $0
-                vendor = ""; vendor_id = ""; product_id = ""; serial = ""; speed = ""
+                vendor = ""; vendor_id = ""; product_id = ""; serial = ""; speed = ""; location = ""; conn_type = ""; power = ""; version = ""
             }
             /Manufacturer:/ { gsub(/.*Manufacturer:[[:space:]]*/, ""); vendor = $0 }
             /Vendor ID:/ { gsub(/.*Vendor ID:[[:space:]]*/, ""); vendor_id = $0 }
             /Product ID:/ { gsub(/.*Product ID:[[:space:]]*/, ""); product_id = $0 }
             /Serial Number:/ { gsub(/.*Serial Number:[[:space:]]*/, ""); serial = $0 }
             /Speed:/ { gsub(/.*Speed:[[:space:]]*/, ""); speed = $0 }
+            /Link Speed:/ { gsub(/.*Link Speed:[[:space:]]*/, ""); speed = $0 }
+            /Location ID:/ { gsub(/.*Location ID:[[:space:]]*/, ""); location = $0 }
+            /Connection Type:/ { gsub(/.*Connection Type:[[:space:]]*/, ""); conn_type = $0 }
+            /Power Allocated:/ { gsub(/.*Power Allocated:[[:space:]]*/, ""); power = $0 }
+            /USB Product Version:/ { gsub(/.*USB Product Version:[[:space:]]*/, ""); version = $0 }
             END {
                 if (name != "" && name !~ /USB/ && name !~ /Bus/ && name !~ /Host/) {
                     if (!first) printf ","
-                    printf "{\\"name\\": \\"%s\\", \\"vendor\\": \\"%s\\", \\"vendorId\\": \\"%s\\", \\"productId\\": \\"%s\\", \\"serial\\": \\"%s\\", \\"speed\\": \\"%s\\"}", name, vendor, vendor_id, product_id, serial, speed
+                    gsub(/"/, "\\\\\\"", name)
+                    gsub(/"/, "\\\\\\"", vendor)
+                    gsub(/"/, "\\\\\\"", serial)
+                    gsub(/"/, "\\\\\\"", speed)
+                    gsub(/"/, "\\\\\\"", power)
+                    printf "{\\"name\\": \\"%s\\", \\"vendor\\": \\"%s\\", \\"vendorId\\": \\"%s\\", \\"productId\\": \\"%s\\", \\"serial\\": \\"%s\\", \\"speed\\": \\"%s\\", \\"locationId\\": \\"%s\\", \\"connectionType\\": \\"%s\\", \\"powerAllocated\\": \\"%s\\", \\"version\\": \\"%s\\"}", name, vendor, vendor_id, product_id, serial, speed, location, conn_type, power, version
                 }
             }
             '
@@ -178,6 +193,10 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
             let name = device["name"] as? String ?? device["model"] as? String ?? "Unknown USB Device"
             let deviceType = determineUSBDeviceType(name: name, deviceClass: device["class"] as? String ?? "")
             
+            // Determine connection type (removable vs built-in)
+            let connectionType = device["connectionType"] as? String ?? 
+                                (device["removable"] as? String == "1" ? "Removable" : "Built-in")
+            
             return [
                 "name": name,
                 "vendor": device["vendor"] as? String ?? "",
@@ -185,9 +204,13 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
                 "productId": device["model_id"] as? String ?? device["productId"] as? String ?? "",
                 "serialNumber": device["serial"] as? String ?? "",
                 "speed": device["speed"] as? String ?? device["version"] as? String ?? "",
+                "linkSpeed": device["speed"] as? String ?? "",  // Enhanced: "10 Gb/s" format
+                "locationId": device["locationId"] as? String ?? "",  // Enhanced: "0x21310000"
+                "powerAllocated": device["powerAllocated"] as? String ?? "",  // Enhanced: "4.48 W (896 mA)"
+                "usbVersion": device["version"] as? String ?? "",  // Enhanced: "0x5603"
                 "isRemovable": device["removable"] as? String == "1",
                 "deviceType": deviceType,
-                "connectionType": "USB"
+                "connectionType": connectionType  // Enhanced: "Removable" or "Built-in"
             ]
         }
     }
@@ -721,49 +744,70 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
               AND m.path NOT LIKE '/private/%';
             """
         
-        // awk-based solution to avoid subshell issues
-        let bashScript = """
-            disks=$(diskutil list external 2>/dev/null | grep -E "^/dev/disk" | awk '{print $1}')
+        // Use simple df + diskutil approach - execute from Swift directly
+        let dfOutput = try await BashService.execute("df -H | grep '^/dev/disk' | awk '{print $1}' | sort -u")
+        let devices = dfOutput.split(separator: "\n").map(String.init)
+        
+        var storageDevices: [[String: Any]] = []
+        
+        for device in devices {
+            let trimmedDevice = device.trimmingCharacters(in: .whitespaces)
+            guard !trimmedDevice.isEmpty else { continue }
             
-            if [ -n "$disks" ]; then
-                echo "$disks" | while read disk; do
-                    diskutil info "$disk" 2>/dev/null
-                    echo "---DISK_SEPARATOR---"
-                done | awk '
-                BEGIN { first=1; print "["; name=""; device=""; mount=""; fs=""; size=""; protocol="" }
-                /---DISK_SEPARATOR---/ {
-                    if (name != "") {
-                        gsub(/"/, "\\\\\"", name)
-                        gsub(/"/, "\\\\\"", mount)
-                        if (!first) printf ","
-                        printf "{\\"name\\": \\"%s\\", \\"device\\": \\"%s\\", \\"mountPoint\\": \\"%s\\", \\"fileSystem\\": \\"%s\\", \\"size\\": \\"%s\\", \\"protocol\\": \\"%s\\"}", name, device, mount, fs, size, protocol
-                        first = 0
+            // Get detailed info for each device
+            let infoCmd = "diskutil info '\(trimmedDevice)'"
+            if let infoOutput = try? await BashService.execute(infoCmd) {
+                var volumeName = ""
+                var mountPoint = ""
+                var fileSystem = ""
+                var diskSize = ""
+                var deviceProtocol = ""
+                
+                // Parse the output line by line
+                for line in infoOutput.split(separator: "\n") {
+                    let lineStr = String(line).trimmingCharacters(in: .whitespaces)
+                    
+                    if lineStr.hasPrefix("Volume Name:") {
+                        volumeName = lineStr.replacingOccurrences(of: "Volume Name:", with: "").trimmingCharacters(in: .whitespaces)
+                    } else if lineStr.hasPrefix("Mount Point:") {
+                        mountPoint = lineStr.replacingOccurrences(of: "Mount Point:", with: "").trimmingCharacters(in: .whitespaces)
+                    } else if lineStr.hasPrefix("Type (Bundle):") {
+                        fileSystem = lineStr.replacingOccurrences(of: "Type (Bundle):", with: "").trimmingCharacters(in: .whitespaces)
+                    } else if lineStr.hasPrefix("Disk Size:") {
+                        let sizeStr = lineStr.replacingOccurrences(of: "Disk Size:", with: "").trimmingCharacters(in: .whitespaces)
+                        // Extract just "2.0 TB" part
+                        if let match = sizeStr.range(of: "^[0-9.]+ [KMGT]B", options: .regularExpression) {
+                            diskSize = String(sizeStr[match])
+                        }
+                    } else if lineStr.hasPrefix("Protocol:") {
+                        deviceProtocol = lineStr.replacingOccurrences(of: "Protocol:", with: "").trimmingCharacters(in: .whitespaces)
                     }
-                    name = ""; device = ""; mount = ""; fs = ""; size = ""; protocol = ""
-                    next
                 }
-                /Device Identifier:/ { device = $NF }
-                /Volume Name:/ { gsub(/.*Volume Name:[[:space:]]*/, ""); name = $0 }
-                /Media Name:/ { if (name == "") { gsub(/.*Media Name:[[:space:]]*/, ""); name = $0 } }
-                /Mount Point:/ { gsub(/.*Mount Point:[[:space:]]*/, ""); mount = $0 }
-                /Type \\(Bundle\\):/ { gsub(/.*Type \\(Bundle\\):[[:space:]]*/, ""); fs = $0 }
-                /Total Size:/ { gsub(/.*Total Size:[[:space:]]*/, ""); gsub(/\\(.*/, ""); gsub(/[[:space:]]*$/, ""); size = $0 }
-                /Protocol:/ { gsub(/.*Protocol:[[:space:]]*/, ""); protocol = $0 }
-                END { print "]" }
-                '
-            else
-                echo "[]"
-            fi
-            """
-        
-        let result = try await executeWithFallback(osquery: osqueryScript, bash: bashScript)
-        
-        var devices: [[String: Any]] = []
-        if let items = result["items"] as? [[String: Any]] {
-            devices = items
+                
+                // Use volume name or fallback
+                if volumeName.isEmpty || volumeName == "Not applicable" {
+                    volumeName = "External Storage"
+                }
+                
+                // ONLY include actual external devices - skip internal Apple Fabric drives
+                let isExternal = !deviceProtocol.isEmpty && 
+                                 !deviceProtocol.lowercased().contains("apple fabric") &&
+                                 !deviceProtocol.lowercased().contains("internal")
+                
+                if isExternal {
+                    storageDevices.append([
+                        "name": volumeName,
+                        "device": trimmedDevice,
+                        "mountPoint": mountPoint,
+                        "fileSystem": fileSystem,
+                        "size": diskSize,
+                        "protocol": deviceProtocol
+                    ])
+                }
+            }
         }
         
-        return devices.map { device in
+        return storageDevices.map { device in
             let deviceProtocol = device["protocol"] as? String ?? ""
             
             var storageType = "External Storage"
@@ -774,8 +818,8 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
             return [
                 "name": device["name"] as? String ?? "External Storage",
                 "devicePath": device["device"] as? String ?? "",
-                "mountPoint": device["path"] as? String ?? device["mountPoint"] as? String ?? "",
-                "fileSystem": device["type"] as? String ?? device["fileSystem"] as? String ?? "",
+                "mountPoint": device["mountPoint"] as? String ?? "",
+                "fileSystem": device["fileSystem"] as? String ?? "",
                 "totalSize": device["size"] as? String ?? "",
                 "protocol": deviceProtocol,
                 "storageType": storageType,
@@ -787,152 +831,77 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
     // MARK: - Printers (HIGHEST PRIORITY)
     
     private func collectPrinters() async throws -> [[String: Any]] {
-        // Enhanced printer collection with lpoptions and system_profiler
+        // Simplified printer collection - just get basic info that works reliably
         let bashScript = """
-            default_printer=$(lpstat -d 2>/dev/null | sed 's/.*: //' || echo "")
+            echo "["
+            first=true
             
-            # Get comprehensive printer info from system_profiler
-            profiler_data=$(system_profiler SPPrintersDataType 2>/dev/null)
+            # Get default printer
+            default_printer=$(lpstat -d 2>/dev/null | awk '{print $NF}' || echo "")
             
-            # Get basic printer list from lpstat
-            lpstat -v 2>/dev/null | awk -v default_printer="$default_printer" '
-            BEGIN { first=1; print "[" }
-            {
-                line = $0
-                gsub(/^device for /, "", line)
-                idx = index(line, ": ")
-                if (idx > 0) {
-                    printer = substr(line, 1, idx-1)
-                    uri = substr(line, idx+2)
-                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", printer)
-                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", uri)
-                    
-                    if (printer == "") next
-                    
-                    # Connection type from URI
-                    conn_type = "Unknown"
-                    if (uri ~ /^usb:/) conn_type = "USB"
-                    else if (uri ~ /^ipp:/ || uri ~ /^ipps:/) conn_type = "Network (IPP)"
-                    else if (uri ~ /^socket:/) conn_type = "Network (Socket)"
-                    else if (uri ~ /^lpd:/) conn_type = "Network (LPD)"
-                    else if (uri ~ /^smb:/) conn_type = "Network (SMB)"
-                    else if (uri ~ /^dnssd:/) conn_type = "Network (Bonjour)"
-                    
-                    is_default = "false"
-                    if (printer == default_printer) is_default = "true"
-                    
-                    # Get lpoptions for this printer
-                    cmd = "lpoptions -p " printer " 2>/dev/null || echo \\"\\""
-                    cmd | getline lpopts
-                    close(cmd)
-                    
-                    # Parse lpoptions key=value pairs
-                    auth_info = ""
-                    device_uri = uri
-                    make_model = ""
-                    printer_state = ""
-                    printer_state_reasons = ""
-                    printer_type = ""
-                    printer_uri = ""
-                    printer_commands = ""
-                    
-                    split(lpopts, pairs, " ")
-                    for (i in pairs) {
-                        split(pairs[i], kv, "=")
-                        key = kv[1]
-                        val = kv[2]
-                        
-                        if (key == "auth-info-required") auth_info = val
-                        else if (key == "device-uri") device_uri = val
-                        else if (key == "printer-make-and-model") make_model = val
-                        else if (key == "printer-state") printer_state = val
-                        else if (key == "printer-state-reasons") printer_state_reasons = val
-                        else if (key == "printer-type") printer_type = val
-                        else if (key == "printer-uri-supported") printer_uri = val
-                        else if (key == "printer-commands") printer_commands = val
-                    }
-                    
-                    # Output JSON for this printer
-                    if (!first) printf ","
-                    printf "{\\"name\\": \\"%s\\", \\"uri\\": \\"%s\\", \\"connectionType\\": \\"%s\\", \\"isDefault\\": %s, \\"authInfoRequired\\": \\"%s\\", \\"makeAndModel\\": \\"%s\\", \\"printerState\\": \\"%s\\", \\"printerStateReasons\\": \\"%s\\", \\"printerType\\": \\"%s\\", \\"printerUriSupported\\": \\"%s\\", \\"printerCommands\\": \\"%s\\"}", printer, device_uri, conn_type, is_default, auth_info, make_model, printer_state, printer_state_reasons, printer_type, printer_uri, printer_commands
-                    first = 0
-                }
-            }
-            END { print "]" }
-            '
-            
-            # Now parse system_profiler data for additional details
-            echo "$profiler_data" | awk '
-            BEGIN { in_printer=0; printer_name=""; status=""; driver=""; ppd=""; ppd_version=""; cups_version=""; scanning=""; commands=""; date_added=""; cups_filters=""; fax=""; pdes="" }
-            /^[[:space:]]+[A-Za-z0-9].*:$/ && !/Printers:/ {
-                # Save previous printer data if we have it
-                if (printer_name != "") {
-                    # Print separator for merging later
-                    printf "PRINTER_DETAILS:%s|status=%s|driver=%s|ppd=%s|ppd_version=%s|cups_version=%s|scanning=%s|commands=%s|date_added=%s|cups_filters=%s|fax=%s|pdes=%s\\n", printer_name, status, driver, ppd, ppd_version, cups_version, scanning, commands, date_added, cups_filters, fax, pdes
-                }
+            # Process each printer
+            lpstat -v 2>/dev/null | while IFS=: read -r device_part uri_part; do
+                # Extract printer name (remove "device for " prefix)
+                printer_name=$(echo "$device_part" | sed 's/^device for //')
+                # Extract URI (trim whitespace)
+                printer_uri=$(echo "$uri_part" | sed 's/^[[:space:]]*//')
                 
-                # New printer
-                gsub(/^[[:space:]]+/, "")
-                gsub(/:$/, "")
-                printer_name = $0
-                status = ""
-                driver = ""
-                ppd = ""
-                ppd_version = ""
-                cups_version = ""
-                scanning = ""
-                commands = ""
-                date_added = ""
-                cups_filters = ""
-                fax = ""
-                pdes = ""
-                in_printer = 1
+                [ -z "$printer_name" ] && continue
+                
+                # Determine connection type
+                case "$printer_uri" in
+                    usb:*) conn_type="USB" ;;
+                    ipp:*|ipps:*) conn_type="Network (IPP)" ;;
+                    socket:*) conn_type="Network (Socket)" ;;
+                    lpd:*) conn_type="Network (LPD)" ;;
+                    smb:*) conn_type="Network (SMB)" ;;
+                    dnssd:*) conn_type="Network (Bonjour)" ;;
+                    *) conn_type="Unknown" ;;
+                esac
+                
+                # Check if default
+                is_default="false"
+                [ "$printer_name" = "$default_printer" ] && is_default="true"
+                
+                # Get lpoptions details
+                lp_info=$(lpoptions -p "$printer_name" 2>/dev/null || echo "")
+                
+                # Extract make and model
+                make_model=$(echo "$lp_info" | grep -o "printer-make-and-model='[^']*'" | sed "s/printer-make-and-model='//;s/'$//")
+                [ -z "$make_model" ] && make_model="Unknown"
+                
+                # Extract state
+                state=$(echo "$lp_info" | grep -o "printer-state=[0-9]*" | cut -d= -f2)
+                [ -z "$state" ] && state="3"
+                
+                # Extract state reasons
+                state_reasons=$(echo "$lp_info" | grep -o "printer-state-reasons=[^[:space:]]*" | cut -d= -f2)
+                [ -z "$state_reasons" ] && state_reasons="none"
+                
+                # Output JSON
+                [ "$first" = false ] && echo ","
+                cat <<-EOF
+            {
+              "name": "$printer_name",
+              "uri": "$printer_uri",
+              "connectionType": "$conn_type",
+              "isDefault": $is_default,
+              "makeAndModel": "$make_model",
+              "printerState": "$state",
+              "printerStateReasons": "$state_reasons"
             }
-            in_printer && /Status:/ { gsub(/.*Status:[[:space:]]*/, ""); status = $0 }
-            in_printer && /Driver Version:/ { gsub(/.*Driver Version:[[:space:]]*/, ""); driver = $0 }
-            in_printer && /PPD:/ && !/PPD File Version:/ { gsub(/.*PPD:[[:space:]]*/, ""); ppd = $0 }
-            in_printer && /PPD File Version:/ { gsub(/.*PPD File Version:[[:space:]]*/, ""); ppd_version = $0 }
-            in_printer && /CUPS Version:/ { gsub(/.*CUPS Version:[[:space:]]*/, ""); cups_version = $0 }
-            in_printer && /Scanning support:/ { gsub(/.*Scanning support:[[:space:]]*/, ""); scanning = $0 }
-            in_printer && /Printer Commands:/ { gsub(/.*Printer Commands:[[:space:]]*/, ""); commands = $0 }
-            in_printer && /Added:/ { gsub(/.*Added:[[:space:]]*/, ""); date_added = $0 }
-            in_printer && /CUPS filters:/ { gsub(/.*CUPS filters:[[:space:]]*/, ""); cups_filters = $0 }
-            in_printer && /Fax support:/ { gsub(/.*Fax support:[[:space:]]*/, ""); fax = $0 }
-            in_printer && /PDEs:/ { gsub(/.*PDEs:[[:space:]]*/, ""); pdes = $0 }
-            END {
-                if (printer_name != "") {
-                    printf "PRINTER_DETAILS:%s|status=%s|driver=%s|ppd=%s|ppd_version=%s|cups_version=%s|scanning=%s|commands=%s|date_added=%s|cups_filters=%s|fax=%s|pdes=%s\\n", printer_name, status, driver, ppd, ppd_version, cups_version, scanning, commands, date_added, cups_filters, fax, pdes
-                }
-            }
-            '
+            EOF
+                first=false
+            done
+            
+            echo "]"
             """
         
         let result = try await executeWithFallback(osquery: nil, bash: bashScript)
         
-        // Parse the output which now includes both JSON array and PRINTER_DETAILS lines
         var printers: [[String: Any]] = []
         if let items = result["items"] as? [[String: Any]] {
             printers = items
-        }
-        
-        // Also check for raw output containing PRINTER_DETAILS
-        var detailsMap: [String: [String: String]] = [:]
-        if let rawOutput = result["raw_output"] as? String {
-            let lines = rawOutput.components(separatedBy: "\n")
-            for line in lines where line.hasPrefix("PRINTER_DETAILS:") {
-                let parts = line.replacingOccurrences(of: "PRINTER_DETAILS:", with: "").components(separatedBy: "|")
-                if parts.count > 0 {
-                    let printerName = parts[0]
-                    var details: [String: String] = [:]
-                    for i in 1..<parts.count {
-                        let kv = parts[i].components(separatedBy: "=")
-                        if kv.count == 2 {
-                            details[kv[0]] = kv[1]
-                        }
-                    }
-                    detailsMap[printerName] = details
-                }
-            }
         }
         
         return printers.map { printer in
@@ -940,22 +909,18 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
             let uri = printer["uri"] as? String ?? ""
             let makeAndModel = printer["makeAndModel"] as? String ?? ""
             
-            // Get additional details from system_profiler
-            let details = detailsMap[name] ?? [:]
-            
             // Determine printer type
             var printerType = "Standard Printer"
             let nameLower = name.lowercased()
-            let makeModelLower = makeAndModel.lowercased()
-            if nameLower.contains("fax") || details["fax"] == "Yes" { printerType = "Fax" }
+            if nameLower.contains("fax") { printerType = "Fax" }
             else if nameLower.contains("pdf") { printerType = "Virtual (PDF)" }
             else if uri.contains("dnssd") { printerType = "AirPrint" }
-            else if nameLower.contains("label") || makeModelLower.contains("dymo") || makeModelLower.contains("zebra") { printerType = "Label Printer" }
+            else if nameLower.contains("label") || nameLower.contains("dymo") || nameLower.contains("zebra") { printerType = "Label Printer" }
             
             // Parse make and model
             var make = ""
             var model = ""
-            if !makeAndModel.isEmpty {
+            if !makeAndModel.isEmpty && makeAndModel != "Unknown" {
                 let parts = makeAndModel.components(separatedBy: " ")
                 if parts.count > 0 {
                     make = parts[0]
@@ -966,27 +931,26 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
             }
             
             // Parse state
-            let stateStr = printer["printerState"] as? String ?? ""
+            let stateStr = printer["printerState"] as? String ?? "3"
             var state = "idle"
             var isAcceptingJobs = true
             if stateStr == "3" { state = "idle" }
             else if stateStr == "4" { state = "processing" }
             else if stateStr == "5" { state = "stopped"; isAcceptingJobs = false }
             
-            // Parse capabilities from printer type
-            let typeValue = Int(printer["printerType"] as? String ?? "0") ?? 0
-            let colorCapable = (typeValue & 0x4) != 0
-            let duplexCapable = (typeValue & 0x8) != 0
+            // Parse state reasons into array
+            let stateReasonsStr = printer["printerStateReasons"] as? String ?? "none"
+            let stateReasons = stateReasonsStr.components(separatedBy: ",")
             
             return [
                 "name": name,
                 "displayName": name,
                 "uri": uri,
                 "connectionType": printer["connectionType"] as? String ?? "Unknown",
-                "status": details["status"] ?? "Available",
+                "status": state == "idle" ? "Idle" : state == "processing" ? "Processing" : "Stopped",
                 "state": state,
-                "stateMessage": details["status"] ?? "",
-                "stateReasons": (printer["printerStateReasons"] as? String ?? "none").components(separatedBy: ","),
+                "stateMessage": state,
+                "stateReasons": stateReasons,
                 "isDefault": printer["isDefault"] as? Bool ?? false,
                 "isShared": false,
                 "isAcceptingJobs": isAcceptingJobs,
@@ -995,21 +959,7 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
                 "deviceType": "Printer",
                 "make": make,
                 "model": model,
-                "makeAndModel": makeAndModel,
-                "driverName": details["driver"] ?? "",
-                "ppd": details["ppd"] ?? "",
-                "ppdVersion": details["ppd_version"] ?? "",
-                "cupsVersion": details["cups_version"] ?? "",
-                "authInfoRequired": printer["authInfoRequired"] as? String ?? "none",
-                "printerCommands": (printer["printerCommands"] as? String ?? "").components(separatedBy: ","),
-                "printerUriSupported": printer["printerUriSupported"] as? String ?? uri,
-                "scanningSupport": details["scanning"] ?? "No",
-                "dateAdded": details["date_added"] ?? "",
-                "cupsFilters": details["cups_filters"] ?? "",
-                "faxSupport": details["fax"] ?? "No",
-                "pdes": details["pdes"] ?? "",
-                "colorCapable": colorCapable,
-                "duplexCapable": duplexCapable
+                "makeAndModel": makeAndModel
             ]
         }
     }

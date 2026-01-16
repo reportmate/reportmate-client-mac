@@ -1,4 +1,5 @@
 import Foundation
+import CoreWLAN
 
 /// Network module processor for collecting network information  
 public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
@@ -28,33 +29,75 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         // Collect standard network info
         let networkInfo = try await collectNetworkInfo()
         
+        // Collect hostname information
+        let hostnameInfo = try await collectHostnameInfo()
+        
         // Collect extension-based data in parallel
         async let networkQualityData = collectNetworkQuality()
         async let wifiNetworkData = collectWiFiNetwork()
+        async let vpnData = collectVPNConnections()
+        async let savedWifiData = collectSavedWiFiNetworks()
+        async let dnsData = collectDNSConfiguration()
         
         let networkQuality = try await networkQualityData
         let wifiNetwork = try await wifiNetworkData
+        let vpnConnections = try await vpnData
+        let savedWifi = try await savedWifiData
+        let dnsConfig = try await dnsData
         
         // Convert NetworkInfo to [String: Any]
         let jsonData = try JSONEncoder().encode(networkInfo)
         var dictionary = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] ?? [:]
         
+        // Add hostname information at the top level
+        dictionary["hostname"] = hostnameInfo["hostname"]
+        dictionary["localHostname"] = hostnameInfo["localHostname"]
+        dictionary["sharingName"] = hostnameInfo["sharingName"]
+        
         // Add extension data
         dictionary["networkQuality"] = networkQuality
-        dictionary["currentWiFiNetwork"] = wifiNetwork
+        
+        // If SSID is unavailable due to location services, use first known network as fallback
+        var updatedWifiNetwork = wifiNetwork
+        if let ssid = updatedWifiNetwork["ssid"] as? String,
+           ssid == "[Location Services Required]",
+           let firstKnownNetwork = savedWifi.first as? [String: Any],
+           let knownSSID = firstKnownNetwork["ssid"] as? String {
+            updatedWifiNetwork["ssid"] = knownSSID
+            updatedWifiNetwork["note"] = "SSID from known networks (location services disabled)"
+        }
+        dictionary["currentWiFiNetwork"] = updatedWifiNetwork
+        
+        dictionary["vpnConnections"] = vpnConnections
+        
+        // Merge DNS configuration (overwrite the empty one from NetworkInfo)
+        if !dnsConfig.isEmpty {
+            dictionary["dnsConfiguration"] = dnsConfig
+        }
+        
+        // Merge saved WiFi into wifiInfo
+        if var wifiInfo = dictionary["wifiInfo"] as? [String: Any] {
+            wifiInfo["knownNetworks"] = savedWifi
+            dictionary["wifiInfo"] = wifiInfo
+        } else {
+            dictionary["wifiInfo"] = [
+                "knownNetworks": savedWifi,
+                "powerStatus": true
+            ]
+        }
         
         return BaseModuleData(moduleId: moduleId, data: dictionary)
     }
     
     private func collectNetworkInfo() async throws -> NetworkInfo {
+        // Use osquery for interface data, then enhance with bash for VPN/WiFi/activeConnection
         let rawData = try await executeWithFallback(
             osquery: """
-            SELECT interface, address, mask, type, mac 
+            SELECT interface, address, mask, interface_details.type as type, mac 
             FROM interface_addresses 
             JOIN interface_details USING (interface);
             """,
-            bash: nil,
-            python: networkInfoPythonScript()
+            bash: nil
         )
         
         // Unwrap logic
@@ -134,17 +177,32 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             }
         }
         
+        // Filter to only physical interfaces (en*) - exclude bridge, utun, lo, etc.
+        let filteredRawInterfaces = rawInterfaces.filter { raw -> Bool in
+            let name = raw.name.lowercased()
+            // Only keep en* interfaces (physical network interfaces)
+            // Exclude enc* which are encrypted tunnel interfaces
+            return name.hasPrefix("en") && !name.hasPrefix("enc")
+        }
+        
+        // Get active connection info from default route
+        let activeConnectionInfo = try await getActiveConnectionInfo()
+        let activeInterfaceName = activeConnectionInfo["interface"] as? String
+        let gateway = activeConnectionInfo["gateway"] as? String
+        
         // Map RawNetworkInterface to global NetworkInterface
-        let interfaces = rawInterfaces.map { raw -> NetworkInterface in
+        let interfaces = filteredRawInterfaces.map { raw -> NetworkInterface in
+            // Determine if this is the active interface
+            let isActive = raw.name == activeInterfaceName
+            
+            // Determine interface type - en0 is typically WiFi on Mac
             let type: NetworkInterfaceType
-            if let rawType = raw.type {
-                let lower = rawType.lowercased()
-                if lower.contains("ether") { type = .ethernet }
-                else if lower.contains("wifi") || lower.contains("wireless") { type = .wifi }
-                else if lower.contains("loop") { type = .loopback }
-                else { type = .other }
+            if raw.name == "en0" {
+                type = .wifi
+            } else if raw.name.hasPrefix("en") {
+                type = .ethernet
             } else {
-                type = .unknown
+                type = .other
             }
             
             var addresses: [NetworkAddress] = []
@@ -153,11 +211,47 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 addresses.append(NetworkAddress(address: addr, netmask: raw.mask, family: family))
             }
             
+            // Interface is "up" if it's the active one or has a valid IPv4 address
+            let hasIPv4 = raw.address != nil && raw.address!.contains(".") && !raw.address!.hasPrefix("169.254.")
+            
             return NetworkInterface(
                 name: raw.name,
                 type: type,
                 macAddress: raw.mac,
+                isUp: isActive || hasIPv4,
                 addresses: addresses
+            )
+        }
+        
+        // Build activeConnection from detected active interface
+        // If the active interface is a tunnel (utun/ppp), find the physical interface instead
+        var physicalIfaceName = activeInterfaceName
+        if let activeIface = activeInterfaceName, 
+           (activeIface.hasPrefix("utun") || activeIface.hasPrefix("ppp")) {
+            // VPN is active - find the physical interface with an IPv4 address
+            // Prefer en0 (WiFi) or en1 (Ethernet)
+            if let en0 = filteredRawInterfaces.first(where: { $0.name == "en0" && $0.address?.contains(".") == true }) {
+                physicalIfaceName = en0.name
+            } else if let en1 = filteredRawInterfaces.first(where: { $0.name == "en1" && $0.address?.contains(".") == true }) {
+                physicalIfaceName = en1.name
+            } else {
+                // Fall back to any en* with IPv4
+                physicalIfaceName = filteredRawInterfaces.first(where: { $0.address?.contains(".") == true })?.name
+            }
+        }
+        
+        if let physicalIface = physicalIfaceName {
+            // Find the first IPv4 address for the active interface
+            let activeIfaceData = filteredRawInterfaces.first { $0.name == physicalIface && $0.address?.contains(".") == true }
+            
+            let connType = physicalIface == "en0" ? "WiFi" : "Ethernet"
+            
+            activeConnection = ActiveConnection(
+                interface: physicalIface,
+                ipAddress: activeIfaceData?.address ?? "",
+                gateway: gateway,
+                connectionType: connType,
+                isPrimary: true
             )
         }
         
@@ -168,6 +262,23 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             activeConnection: activeConnection,
             vpnConnections: vpnConnections
         )
+    }
+    
+    /// Get active connection info from default route
+    private func getActiveConnectionInfo() async throws -> [String: Any] {
+        let output = try await BashService.execute("""
+            route -n get default 2>/dev/null | awk '
+                /interface:/ { iface=$2 }
+                /gateway:/ { gw=$2 }
+                END { print "{\\"interface\\": \\"" iface "\\", \\"gateway\\": \\"" gw "\\"}" }
+            '
+        """)
+        
+        if let data = output.data(using: String.Encoding.utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return json
+        }
+        return [:]
     }
     
     /// Helper to parse WiFi security type string to enum
@@ -735,17 +846,83 @@ print(json.dumps(get_network_info()))
             FROM network_quality LIMIT 1;
         """
         
-        let bashScript = """
-            if ! command -v networkQuality &> /dev/null; then
-                echo '{"error": "Not Available (macOS 12+ required)"}'
-                exit 0
-            fi
-            # Network quality test takes 15-30 seconds and requires active internet
-            # Skip for regular collections, run manually if needed
-            echo '{"status": "skipped", "reason": "Network quality test takes 15-30 seconds, run manually if needed"}'
-        """
+        // Actually run networkQuality test - parse output in Swift for reliability
+        let bashScript = #"""
+command -v networkQuality >/dev/null 2>&1 || { echo "NOT_AVAILABLE"; exit 0; }
+networkQuality -s 2>&1
+"""#
         
-        return try await executeWithFallback(osquery: osqueryScript, bash: bashScript)
+        let result = try await executeWithFallback(osquery: osqueryScript, bash: bashScript)
+        
+        // If osquery worked, return as-is
+        if result["dl_throughput"] != nil || result["items"] != nil {
+            return result
+        }
+        
+        // Parse bash output
+        if let output = result["output"] as? String {
+            if output.contains("NOT_AVAILABLE") {
+                return ["error": "Not Available (macOS 12+ required)"]
+            }
+            
+            // Parse networkQuality output
+            var parsed: [String: Any] = [:]
+            
+            // "Downlink capacity: 864.179 Mbps"
+            for line in output.components(separatedBy: "\n") {
+                if line.contains("Downlink capacity:") {
+                    let parts = line.components(separatedBy: ":")
+                    if parts.count > 1 {
+                        let value = parts[1].trimmingCharacters(in: .whitespaces).components(separatedBy: " ").first ?? "0"
+                        parsed["dl_throughput"] = value
+                    }
+                } else if line.contains("Uplink capacity:") {
+                    let parts = line.components(separatedBy: ":")
+                    if parts.count > 1 {
+                        let value = parts[1].trimmingCharacters(in: .whitespaces).components(separatedBy: " ").first ?? "0"
+                        parsed["ul_throughput"] = value
+                    }
+                } else if line.contains("Downlink Responsiveness:") {
+                    // Format: "Downlink Responsiveness: High (48.400 milliseconds | 1239 RPM)"
+                    let parts = line.components(separatedBy: ":")
+                    if parts.count > 1 {
+                        let ratingPart = parts[1].trimmingCharacters(in: .whitespaces)
+                        let ratingWord = ratingPart.components(separatedBy: " ").first ?? "Unknown"
+                        parsed["dl_rating"] = ratingWord
+                    }
+                } else if line.contains("Uplink Responsiveness:") {
+                    let parts = line.components(separatedBy: ":")
+                    if parts.count > 1 {
+                        let ratingPart = parts[1].trimmingCharacters(in: .whitespaces)
+                        let ratingWord = ratingPart.components(separatedBy: " ").first ?? "Unknown"
+                        parsed["ul_rating"] = ratingWord
+                    }
+                } else if line.contains("Idle Latency:") {
+                    let parts = line.components(separatedBy: ":")
+                    if parts.count > 1 {
+                        let value = parts[1].trimmingCharacters(in: .whitespaces).components(separatedBy: " ").first ?? "0"
+                        parsed["idle_latency"] = value
+                    }
+                }
+            }
+            
+            // Overall rating (lower of dl/ul)
+            let dlRating = parsed["dl_rating"] as? String ?? "Unknown"
+            let ulRating = parsed["ul_rating"] as? String ?? "Unknown"
+            if dlRating == "Low" || ulRating == "Low" {
+                parsed["rating"] = "Low"
+            } else if dlRating == "Medium" || ulRating == "Medium" {
+                parsed["rating"] = "Medium"
+            } else if dlRating == "High" && ulRating == "High" {
+                parsed["rating"] = "High"
+            } else {
+                parsed["rating"] = dlRating != "Unknown" ? dlRating : ulRating
+            }
+            
+            return parsed
+        }
+        
+        return ["error": "Failed to run network quality test"]
     }
     
     private func collectWiFiNetwork() async throws -> [String: Any] {
@@ -755,51 +932,251 @@ print(json.dumps(get_network_info()))
             FROM wifi_network LIMIT 1;
         """
         
-        let bashScript = """
-            # Get WiFi interface
-            wifi_if=$(networksetup -listallhardwareports | awk '/Wi-Fi|AirPort/{getline; print $2}')
-            if [ -z "$wifi_if" ]; then
-                echo '{"error": "No WiFi interface"}'
-                exit 0
-            fi
-            
-            # Check if connected (has IP address)
-            wifi_ip=$(ifconfig "$wifi_if" 2>/dev/null | awk '/inet / {print $2}')
-            if [ -z "$wifi_ip" ]; then
-                echo '{"error": "Not connected to WiFi"}'
-                exit 0
-            fi
-            
-            # Note: SSID access requires Location Services permission on modern macOS
-            # For enterprise deployment, grant Location Services to the app or use MDM profile
-            ssid="[Location Services Required]"
-            
-            # Get additional details from system_profiler
-            wifi_info=$(system_profiler SPAirPortDataType 2>/dev/null)
-            
-            # Extract details from the main WiFi section
-            phy_mode=$(echo "$wifi_info" | awk '/^[[:space:]]*PHY Mode:/ {print $3; exit}')
-            channel=$(echo "$wifi_info" | awk '/^[[:space:]]*Channel:/ {print $2; exit}')
-            channel_band=$(echo "$wifi_info" | awk '/^[[:space:]]*Channel:/ {print $3; exit}' | tr -d '()')
-            country_code=$(echo "$wifi_info" | awk '/^[[:space:]]*Country Code:/ {print $3; exit}')
-            network_type=$(echo "$wifi_info" | awk '/^[[:space:]]*Network Type:/ {print $3; exit}')
-            
-            # Get router IP as identifier
-            router=$(networksetup -getinfo Wi-Fi 2>/dev/null | awk '/Router:/ {print $2}')
-            
-            echo "{"
-            echo "  \\"ssid\\": \\"$ssid\\","
-            echo "  \\"bssid\\": \\"$router\\","
-            echo "  \\"network_name\\": \\"$ssid\\","
-            echo "  \\"channel\\": \\"$channel\\","
-            echo "  \\"channel_band\\": \\"$channel_band\\","
-            echo "  \\"mode\\": \\"$phy_mode\\","
-            echo "  \\"country_code\\": \\"$country_code\\","
-            echo "  \\"network_type\\": \\"$network_type\\","
-            echo "  \\"note\\": \\"SSID access requires Location Services permission - grant to app or deploy via MDM\\""
-            echo "}"
-        """
+        // Use system_profiler for WiFi info (simplest cross-version approach)
+        // Note: SSID may show "[Location Services Required]" if location services disabled
+        let bashScript = #"""
+system_profiler SPAirPortDataType -json 2>/dev/null
+"""#
         
-        return try await executeWithFallback(osquery: osqueryScript, bash: bashScript)
+        let result = try await executeWithFallback(osquery: osqueryScript, bash: bashScript)
+        
+        // If osquery worked, return as-is (look in items)
+        if let items = result["items"] as? [[String: Any]], let first = items.first {
+            return first
+        }
+        
+        // Check for error messages
+        if let error = result["error"] as? String {
+            return ["error": error]
+        }
+        
+        // Parse system_profiler output and enhance with CoreWLAN SSID if available
+        var parsed = parseSystemProfilerWiFiData(result)
+        
+        // Try to get real SSID from CoreWLAN (doesn't require location services)
+        if let actualSSID = getCoreWLANSSID(), !actualSSID.isEmpty {
+            parsed["ssid"] = actualSSID
+            parsed.removeValue(forKey: "note") // Remove location services warning
+        }
+        
+        return parsed
+    }
+    
+    /// Get SSID using CoreWLAN framework (doesn't require location services permission)
+    private func getCoreWLANSSID() -> String? {
+        print("[DEBUG] Attempting to get SSID via CoreWLAN...")
+        let client = CWWiFiClient.shared()
+        print("[DEBUG] CoreWLAN client: \(client)")
+        guard let interface = client.interface() else { 
+            print("[DEBUG] No CoreWLAN interface available")
+            return nil 
+        }
+        print("[DEBUG] CoreWLAN interface: \(interface.interfaceName ?? "unknown")")
+        let ssid = interface.ssid()
+        print("[DEBUG] CoreWLAN SSID: '\(ssid ?? "nil")'")
+        return ssid
+    }
+    
+    /// Parse system_profiler WiFi data
+    private func parseSystemProfilerWiFiData(_ result: [String: Any]) -> [String: Any] {
+        var parsed: [String: Any] = ["ssid": "[Location Services Required]", "note": "SSID requires Location Services permission"]
+        
+        // If we have SPAirPortDataType, this is the system_profiler JSON output
+        if let airportData = result["SPAirPortDataType"] as? [[String: Any]],
+           let firstInterface = airportData.first,
+           let interfaces = firstInterface["spairport_airport_interfaces"] as? [[String: Any]],
+           let wifiInterface = interfaces.first {
+            
+            // Get current network info from spairport_current_network_info
+            if let currentNetwork = wifiInterface["spairport_current_network_info"] as? [String: Any] {
+                if let channel = currentNetwork["spairport_network_channel"] as? String {
+                    // Format: "165 (6GHz, 160MHz)"
+                    let channelParts = channel.components(separatedBy: " ")
+                    if let channelNum = Int(channelParts.first ?? "") {
+                        parsed["channel"] = "\(channelNum)"
+                    }
+                    if channel.contains("2GHz") { parsed["channel_band"] = "2.4GHz" }
+                    else if channel.contains("5GHz") { parsed["channel_band"] = "5GHz" }
+                    else if channel.contains("6GHz") { parsed["channel_band"] = "6GHz" }
+                }
+                if let mode = currentNetwork["spairport_network_phymode"] as? String {
+                    parsed["mode"] = mode
+                    if mode.contains("ax") { parsed["wifi_version"] = "WiFi 6" }
+                    else if mode.contains("ac") { parsed["wifi_version"] = "WiFi 5" }
+                    else if mode.contains("n") { parsed["wifi_version"] = "WiFi 4" }
+                }
+                if let security = currentNetwork["spairport_security_mode"] as? String {
+                    if security.contains("wpa3") { parsed["security"] = "WPA3" }
+                    else if security.contains("wpa2") { parsed["security"] = "WPA2" }
+                    else if security.contains("wpa") { parsed["security"] = "WPA" }
+                    else if security.contains("none") { parsed["security"] = "Open" }
+                    else { parsed["security"] = security }
+                }
+            }
+            // Fallback: try first network in other_local_wireless_networks
+            else if let networks = wifiInterface["spairport_airport_other_local_wireless_networks"] as? [[String: Any]],
+                    let firstNetwork = networks.first {
+                if let channel = firstNetwork["spairport_network_channel"] as? String {
+                    let channelParts = channel.components(separatedBy: " ")
+                    if let channelNum = Int(channelParts.first ?? "") {
+                        parsed["channel"] = "\(channelNum)"
+                    }
+                    if channel.contains("2GHz") { parsed["channel_band"] = "2.4GHz" }
+                    else if channel.contains("5GHz") { parsed["channel_band"] = "5GHz" }
+                    else if channel.contains("6GHz") { parsed["channel_band"] = "6GHz" }
+                }
+                if let mode = firstNetwork["spairport_network_phymode"] as? String {
+                    parsed["mode"] = mode
+                    if mode.contains("ax") { parsed["wifi_version"] = "WiFi 6" }
+                    else if mode.contains("ac") { parsed["wifi_version"] = "WiFi 5" }
+                    else if mode.contains("n") { parsed["wifi_version"] = "WiFi 4" }
+                }
+                if let security = firstNetwork["spairport_security_mode"] as? String {
+                    if security.contains("wpa3") { parsed["security"] = "WPA3" }
+                    else if security.contains("wpa2") { parsed["security"] = "WPA2" }
+                    else if security.contains("wpa") { parsed["security"] = "WPA" }
+                    else if security.contains("none") { parsed["security"] = "Open" }
+                    else { parsed["security"] = security }
+                }
+            }
+            
+            // Get country code from interface level
+            if let countryCode = wifiInterface["spairport_country_code"] as? String {
+                parsed["country_code"] = countryCode
+            }
+        }
+        
+        return parsed
+    }
+    
+    private func collectVPNConnections() async throws -> [[String: Any]] {
+        let output = try await BashService.execute(#"""
+scutil --nc list 2>/dev/null | while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  name=$(echo "$line" | sed -n 's/.*"\([^"]*\)".*/\1/p')
+  [ -z "$name" ] && continue
+  [ "$name" = "Unknown VPN" ] && continue
+  status="Disconnected"
+  case "$line" in *"(Connected)"*) status="Connected";; *"(Connecting)"*) status="Connecting";; esac
+  vpn_type=$(echo "$line" | sed -n 's/.*\[\([^]]*\)\].*/\1/p')
+  [ -z "$vpn_type" ] && vpn_type="VPN"
+  case "$vpn_type" in *VPN*|*PPP*|*IPSec*|*IKEv2*|*L2TP*|*Cisco*)
+    printf '%s\t%s\t%s\n' "$name" "$status" "$vpn_type"
+  ;; esac
+done
+"""#)
+        
+        // Parse tab-separated output
+        var vpnList: [[String: Any]] = []
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+            if parts.count >= 3 {
+                vpnList.append([
+                    "name": String(parts[0]),
+                    "status": String(parts[1]),
+                    "type": String(parts[2])
+                ])
+            }
+        }
+        return vpnList
+    }
+    
+    private func collectSavedWiFiNetworks() async throws -> [[String: Any]] {
+        let output = try await BashService.execute(#"""
+wifi_if=$(networksetup -listallhardwareports | awk '/Wi-Fi|AirPort/{getline; print $2}')
+[ -z "$wifi_if" ] && wifi_if="en0"
+networksetup -listpreferredwirelessnetworks "$wifi_if" 2>/dev/null | tail -n +2 | sed 's/^[[:space:]]*//'
+"""#)
+        
+        // Parse line-by-line output
+        var networks: [[String: Any]] = []
+        for line in output.split(separator: "\n") {
+            let ssid = String(line).trimmingCharacters(in: .whitespaces)
+            if !ssid.isEmpty {
+                networks.append([
+                    "ssid": ssid,
+                    "securityType": "Unknown",
+                    "isHidden": 0,
+                    "captivePortal": 0
+                ])
+            }
+        }
+        return networks
+    }
+    
+    private func collectDNSConfiguration() async throws -> [String: Any] {
+        // Collect DNS configuration using scutil --dns
+        let output = try await BashService.execute(#"""
+scutil --dns 2>/dev/null | awk '
+    /nameserver\[/ { gsub(/.*: /, ""); dns[NR]=$0 }
+    /search domain\[/ { gsub(/.*: /, ""); search[NR]=$0 }
+    END {
+        printf "NAMESERVERS:"
+        for (i in dns) printf "%s,", dns[i]
+        printf "\nSEARCHDOMAINS:"
+        for (i in search) printf "%s,", search[i]
+        printf "\n"
+    }
+'
+"""#)
+        
+        var nameservers: [String] = []
+        var searchDomains: [String] = []
+        
+        for line in output.split(separator: "\n") {
+            let lineStr = String(line)
+            if lineStr.hasPrefix("NAMESERVERS:") {
+                let servers = lineStr.dropFirst("NAMESERVERS:".count)
+                nameservers = servers.split(separator: ",")
+                    .map { String($0).trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+            } else if lineStr.hasPrefix("SEARCHDOMAINS:") {
+                let domains = lineStr.dropFirst("SEARCHDOMAINS:".count)
+                searchDomains = domains.split(separator: ",")
+                    .map { String($0).trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+            }
+        }
+        
+        // Remove duplicates while preserving order
+        nameservers = Array(NSOrderedSet(array: nameservers)) as? [String] ?? nameservers
+        searchDomains = Array(NSOrderedSet(array: searchDomains)) as? [String] ?? searchDomains
+        
+        return [
+            "nameservers": nameservers,
+            "searchDomains": searchDomains,
+            "options": [] as [String],
+            "sortList": [] as [String]
+        ]
+    }
+    
+    private func collectHostnameInfo() async throws -> [String: Any] {
+        // Get hostname (Computer Name), local hostname, and sharing name using scutil
+        let output = try await BashService.execute(#"""
+printf "HOSTNAME:%s\n" "$(scutil --get ComputerName 2>/dev/null || hostname)"
+printf "LOCALHOSTNAME:%s\n" "$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
+printf "SHARINGNAME:%s\n" "$(scutil --get ComputerName 2>/dev/null || hostname)"
+"""#)
+        
+        var hostname = ""
+        var localHostname = ""
+        var sharingName = ""
+        
+        for line in output.split(separator: "\n") {
+            let lineStr = String(line)
+            if lineStr.hasPrefix("HOSTNAME:") {
+                hostname = String(lineStr.dropFirst("HOSTNAME:".count))
+            } else if lineStr.hasPrefix("LOCALHOSTNAME:") {
+                localHostname = String(lineStr.dropFirst("LOCALHOSTNAME:".count))
+            } else if lineStr.hasPrefix("SHARINGNAME:") {
+                sharingName = String(lineStr.dropFirst("SHARINGNAME:".count))
+            }
+        }
+        
+        return [
+            "hostname": hostname,
+            "localHostname": localHostname,
+            "sharingName": sharingName
+        ]
     }
 }

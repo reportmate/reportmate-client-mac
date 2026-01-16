@@ -24,38 +24,7 @@ public class InventoryModuleProcessor: BaseModuleProcessor, @unchecked Sendable 
             echo "  \\"uuid\\": \\"$(system_profiler SPHardwareDataType | grep 'Hardware UUID' | awk '{print $3}')\\","
             echo "  \\"hostname\\": \\"$(hostname)\\""
             echo "}"
-            """,
-            python: """
-import json
-import subprocess
-import uuid
-import platform
-
-def get_inventory_info():
-    info = {
-        "mac_address": hex(uuid.getnode())[2:],
-        "python_uuid": str(uuid.uuid4()),
-        "hostname": platform.node()
-    }
-    
-    # Get hardware info
-    try:
-        result = subprocess.run(['system_profiler', 'SPHardwareDataType'], 
-                               capture_output=True, text=True)
-        if result.returncode == 0:
-            output = result.stdout
-            for line in output.split('\\n'):
-                if 'Serial Number' in line:
-                    info["serial"] = line.split(': ')[-1].strip()
-                elif 'Hardware UUID' in line:
-                    info["uuid"] = line.split(': ')[-1].strip()
-    except:
-        pass
-    
-    return info
-
-print(json.dumps(get_inventory_info()))
-"""
+            """
         )
         
         var finalData: [String: Any] = rawData

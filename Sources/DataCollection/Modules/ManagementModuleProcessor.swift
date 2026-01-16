@@ -127,8 +127,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         // Use executeWithFallback which tries osquery (with extension), then bash
         return try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -205,8 +204,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -261,8 +259,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
 
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -319,15 +316,13 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         // Try osquery first
         let osqueryResult = try? await executeWithFallback(
             osquery: osqueryScript,
-            bash: nil,
-            python: nil
+            bash: nil
         )
         
         // Get bash result for asset tag and additional details
         let bashResult = try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // Merge results - osquery fields are already snake_case
@@ -400,8 +395,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     

@@ -1,6 +1,17 @@
 import Foundation
 
-/// Python script execution service for last-resort data collection
+/// DEPRECATED: Python script execution service for last-resort data collection
+///
+/// ⚠️ WARNING: This service is DEPRECATED and should NOT be used.
+///
+/// ReportMate uses only native Swift, osquery (with macadmins extension), and bash for data collection.
+/// Python is not permitted as per project architecture guidelines in CLAUDE.md.
+///
+/// This file is kept for historical reference only and will be removed in a future release.
+/// All module processors now use only osquery and bash fallbacks.
+///
+/// - SeeAlso: CLAUDE.md for technology stack requirements
+@available(*, deprecated, message: "Python is not allowed in ReportMate. Use osquery or bash instead.")
 public class PythonService {
     
     /// Execute a Python script and return JSON output
