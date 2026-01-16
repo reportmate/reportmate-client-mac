@@ -79,8 +79,7 @@ public class ApplicationsModuleProcessor: BaseModuleProcessor, @unchecked Sendab
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: nil,
-            python: nil
+            bash: nil
         )
         
         var applications: [[String: Any]] = []
@@ -152,8 +151,7 @@ public class ApplicationsModuleProcessor: BaseModuleProcessor, @unchecked Sendab
         
         let result = try await executeWithFallback(
             osquery: nil,
-            bash: "echo '['; " + bashScript + " echo ']'",
-            python: nil
+            bash: "echo '['; " + bashScript + " echo ']'"
         )
         
         if let items = result["items"] as? [[String: Any]] {
@@ -210,8 +208,7 @@ public class ApplicationsModuleProcessor: BaseModuleProcessor, @unchecked Sendab
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: "echo '['; " + bashScript + " echo ']'",
-            python: nil
+            bash: "echo '['; " + bashScript + " echo ']'"
         )
         
         var processes: [[String: Any]] = []
@@ -358,8 +355,7 @@ public class ApplicationsModuleProcessor: BaseModuleProcessor, @unchecked Sendab
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var startupItems: [[String: Any]] = []

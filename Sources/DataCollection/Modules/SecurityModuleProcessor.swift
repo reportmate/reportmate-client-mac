@@ -33,6 +33,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         async let sofaUnpatchedCVEs = collectSofaUnpatchedCVEs()
         async let sofaSecurityRelease = collectSofaSecurityReleaseInfo()
         async let remoteManagement = collectRemoteManagement()
+        async let certificatesData = collectCertificates()
         
         // Await all results
         let sip = try await sipStatus
@@ -55,6 +56,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let unpatchedCVEs = try await sofaUnpatchedCVEs
         let securityRelease = try await sofaSecurityRelease
         let remoteMgmt = try await remoteManagement
+        let certificates = try await certificatesData
         
         // Build security data dictionary
         let securityData: [String: Any] = [
@@ -77,7 +79,8 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "authorizationDB": authdb,
             "unpatchedCVEs": unpatchedCVEs,
             "securityReleaseInfo": securityRelease,
-            "remoteManagement": remoteMgmt
+            "remoteManagement": remoteMgmt,
+            "certificates": certificates
         ]
         
         return BaseModuleData(moduleId: moduleId, data: securityData)
@@ -135,8 +138,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -175,15 +177,13 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         // Try osquery first for detailed config
         let osqueryResult = try? await executeWithFallback(
             osquery: osqueryScript,
-            bash: nil,
-            python: nil
+            bash: nil
         )
         
         // Always get bash result for main status
         let bashResult = try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var result = bashResult
@@ -244,8 +244,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // Normalize the result
@@ -323,8 +322,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // Normalize osquery vs bash results
@@ -426,8 +424,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // Handle osquery multi-disk results vs bash single result
@@ -487,7 +484,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 fi
                 echo "{\\"personalRecoveryKey\\": $prk, \\"institutionalRecoveryKey\\": $irk}"
             """
-            if let prkResult = try? await executeWithFallback(osquery: nil, bash: prkScript, python: nil) {
+            if let prkResult = try? await executeWithFallback(osquery: nil, bash: prkScript) {
                 personalRecoveryKey = (prkResult["personalRecoveryKey"] as? Bool == true) ||
                                       (prkResult["personalRecoveryKey"] as? String == "true")
                 institutionalRecoveryKey = (prkResult["institutionalRecoveryKey"] as? Bool == true) ||
@@ -549,8 +546,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // Return users array
@@ -611,8 +607,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -660,8 +655,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -712,15 +706,13 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         // Get signature count from osquery
         let osqueryResult = try? await executeWithFallback(
             osquery: osqueryScript,
-            bash: nil,
-            python: nil
+            bash: nil
         )
         
         // Get version and status from bash
         let bashResult = try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var result = bashResult
@@ -785,8 +777,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -849,8 +840,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -888,8 +878,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -922,8 +911,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -965,8 +953,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -1018,8 +1005,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -1118,8 +1104,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -1231,6 +1216,8 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     user_tokens="false"
                     user_last_login=""
                     user_state=""
+                    token_received=""
+                    token_expiration=""
                     
                     if [ -n "$user_sso" ]; then
                         # Check User Configuration section for this user's SSO data
@@ -1261,9 +1248,23 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                             
                             # Extract user state
                             user_state=$(echo "$user_sso" | grep '"state"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
+                        fi
+                        
+                        # Check for SSO Tokens section (appears at end of output, not in JSON format)
+                        # Format is:
+                        # SSO Tokens:
+                        # Received:
+                        # 2026-01-16T17:48:17Z
+                        # Expiration:
+                        # 2026-01-30T17:48:16Z (Not Expired)
+                        if echo "$user_sso" | grep -q "^SSO Tokens:"; then
+                            # Extract the token received timestamp (line after "Received:")
+                            token_received=$(echo "$user_sso" | awk '/^Received:/{getline; print; exit}' | tr -d ' ')
+                            # Extract the token expiration (line after "Expiration:")
+                            token_expiration=$(echo "$user_sso" | awk '/^Expiration:/{getline; print; exit}' | sed 's/ *(.*$//' | tr -d ' ')
                             
-                            # Check for SSO Tokens
-                            if echo "$user_sso" | grep -q "SSO Tokens:" && echo "$user_sso" | grep -A3 "SSO Tokens:" | grep -q "Received:"; then
+                            # If we have a received timestamp, tokens are present
+                            if [ -n "$token_received" ] && [ "$token_received" != "" ]; then
                                 user_tokens="true"
                             fi
                         fi
@@ -1276,14 +1277,31 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                         else
                             users_json="$users_json,"
                         fi
+                        
+                        # Convert boolean to integer for tokensPresent (1 or 0)
+                        if [ "$user_tokens" = "true" ]; then
+                            tokens_val=1
+                        else
+                            tokens_val=0
+                        fi
+                        
+                        # Convert registered boolean to integer
+                        if [ "$user_registered" = "true" ]; then
+                            registered_val=1
+                        else
+                            registered_val=0
+                        fi
+                        
                         users_json="$users_json{"
                         users_json="$users_json\\"username\\": \\"$user\\","
-                        users_json="$users_json\\"registered\\": $user_registered,"
+                        users_json="$users_json\\"registered\\": $registered_val,"
                         users_json="$users_json\\"upn\\": \\"$user_upn\\","
                         users_json="$users_json\\"loginEmail\\": \\"$user_email\\","
                         users_json="$users_json\\"lastLogin\\": \\"$user_last_login\\","
                         users_json="$users_json\\"state\\": \\"$user_state\\","
-                        users_json="$users_json\\"tokensPresent\\": $user_tokens"
+                        users_json="$users_json\\"tokensPresent\\": $tokens_val,"
+                        users_json="$users_json\\"tokenReceived\\": \\"$token_received\\","
+                        users_json="$users_json\\"tokenExpiration\\": \\"$token_expiration\\""
                         users_json="$users_json}"
                     fi
                 done
@@ -1305,9 +1323,16 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 fi
             fi
             
+            # Convert device-level registered to integer
+            if [ "$registered" = "true" ]; then
+                registered_int=1
+            else
+                registered_int=0
+            fi
+            
             echo "{"
-            echo "  \\"supported\\": true,"
-            echo "  \\"registered\\": $registered,"
+            echo "  \\"supported\\": 1,"
+            echo "  \\"registered\\": $registered_int,"
             echo "  \\"provider\\": \\"$sso_provider\\","
             echo "  \\"method\\": \\"$method\\","
             echo "  \\"extensionIdentifier\\": \\"$extension_id\\","
@@ -1321,8 +1346,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -1517,5 +1541,277 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             osquery: osqueryScript,
             bash: bashScript
         )
+    }
+    
+    // MARK: - Certificates (osquery: certificates table + security command)
+    
+    private func collectCertificates() async throws -> [[String: Any]] {
+        // osquery: certificates table provides system keychain certificates
+        // Collects from System.keychain and login.keychain
+        let osqueryScript = """
+            SELECT 
+                common_name,
+                subject,
+                issuer,
+                ca,
+                self_signed,
+                not_valid_before,
+                not_valid_after,
+                signing_algorithm,
+                key_algorithm,
+                key_strength,
+                key_usage,
+                serial,
+                path
+            FROM certificates
+            WHERE path LIKE '/Library/Keychains/%' 
+               OR path LIKE '/Users/%/Library/Keychains/%'
+               OR path LIKE '/System/Library/Keychains/%'
+            ORDER BY not_valid_after DESC;
+        """
+        
+        let bashScript = """
+            # Fallback: Use security command to list certificates
+            # Get certificates from System keychain and user's login keychain
+            
+            now_epoch=$(date +%s)
+            thirty_days_ahead=$((now_epoch + 30*24*60*60))
+            
+            output="["
+            first=true
+            
+            # Function to process certificates from a keychain
+            process_keychain() {
+                keychain="$1"
+                store_name="$2"
+                
+                # List all certificates with their details
+                security find-certificate -a -p "$keychain" 2>/dev/null | while IFS= read -r line; do
+                    echo "$line"
+                done | openssl crl2pkcs7 -nocrl -certfile /dev/stdin 2>/dev/null | \
+                openssl pkcs7 -print_certs -text -noout 2>/dev/null | \
+                awk -v store="$store_name" -v now="$now_epoch" -v soon="$thirty_days_ahead" '
+                    BEGIN { cert_count=0; first=1 }
+                    /Certificate:/ { 
+                        if (cert_count > 0 && subject != "") {
+                            # Output previous certificate
+                            if (!first) print ","
+                            first=0
+                            is_expired = (not_after_epoch != "" && not_after_epoch < now) ? "true" : "false"
+                            is_expiring_soon = (not_after_epoch != "" && not_after_epoch >= now && not_after_epoch <= soon) ? "true" : "false"
+                            days_until = (not_after_epoch != "") ? int((not_after_epoch - now) / 86400) : 0
+                            status = (is_expired == "true") ? "Expired" : ((is_expiring_soon == "true") ? "ExpiringSoon" : "Valid")
+                            
+                            print "{"
+                            print "  \\"commonName\\": \\"" common_name "\\","
+                            print "  \\"subject\\": \\"" subject "\\","
+                            print "  \\"issuer\\": \\"" issuer "\\","
+                            print "  \\"serialNumber\\": \\"" serial "\\","
+                            print "  \\"storeName\\": \\"" store "\\","
+                            print "  \\"storeLocation\\": \\"System\\","
+                            print "  \\"notBefore\\": \\"" not_before "\\","
+                            print "  \\"notAfter\\": \\"" not_after "\\","
+                            print "  \\"keyAlgorithm\\": \\"" key_algo "\\","
+                            print "  \\"signingAlgorithm\\": \\"" sig_algo "\\","
+                            print "  \\"isSelfSigned\\": " is_self_signed ","
+                            print "  \\"isExpired\\": " is_expired ","
+                            print "  \\"isExpiringSoon\\": " is_expiring_soon ","
+                            print "  \\"daysUntilExpiry\\": " days_until ","
+                            print "  \\"status\\": \\"" status "\\""
+                            print -n "}"
+                        }
+                        cert_count++
+                        common_name=""; subject=""; issuer=""; serial=""
+                        not_before=""; not_after=""; key_algo=""; sig_algo=""
+                        not_after_epoch=""; is_self_signed="false"
+                    }
+                    /Subject:/ { 
+                        gsub(/^.*Subject: */, "")
+                        subject=$0
+                        # Extract CN from subject
+                        if (match($0, /CN ?= ?[^,]+/)) {
+                            common_name = substr($0, RSTART+3, RLENGTH-3)
+                            gsub(/^ +| +$/, "", common_name)
+                        }
+                    }
+                    /Issuer:/ { 
+                        gsub(/^.*Issuer: */, "")
+                        issuer=$0
+                        # Check if self-signed (issuer == subject)
+                        if (issuer == subject) is_self_signed="true"
+                    }
+                    /Serial Number:/ { 
+                        gsub(/^.*Serial Number: */, "")
+                        serial=$0
+                    }
+                    /Not Before:/ { 
+                        gsub(/^.*Not Before: */, "")
+                        not_before=$0
+                    }
+                    /Not After *:/ { 
+                        gsub(/^.*Not After *: */, "")
+                        not_after=$0
+                        # Try to convert to epoch for comparison
+                        cmd = "date -j -f \"%b %d %H:%M:%S %Y\" \"" not_after "\" +%s 2>/dev/null"
+                        cmd | getline not_after_epoch
+                        close(cmd)
+                    }
+                    /Public Key Algorithm:/ { 
+                        gsub(/^.*Public Key Algorithm: */, "")
+                        key_algo=$0
+                    }
+                    /Signature Algorithm:/ && sig_algo=="" { 
+                        gsub(/^.*Signature Algorithm: */, "")
+                        sig_algo=$0
+                    }
+                    END {
+                        if (cert_count > 0 && subject != "") {
+                            if (!first) print ","
+                            is_expired = (not_after_epoch != "" && not_after_epoch < now) ? "true" : "false"
+                            is_expiring_soon = (not_after_epoch != "" && not_after_epoch >= now && not_after_epoch <= soon) ? "true" : "false"
+                            days_until = (not_after_epoch != "") ? int((not_after_epoch - now) / 86400) : 0
+                            status = (is_expired == "true") ? "Expired" : ((is_expiring_soon == "true") ? "ExpiringSoon" : "Valid")
+                            
+                            print "{"
+                            print "  \\"commonName\\": \\"" common_name "\\","
+                            print "  \\"subject\\": \\"" subject "\\","
+                            print "  \\"issuer\\": \\"" issuer "\\","
+                            print "  \\"serialNumber\\": \\"" serial "\\","
+                            print "  \\"storeName\\": \\"" store "\\","
+                            print "  \\"storeLocation\\": \\"System\\","
+                            print "  \\"notBefore\\": \\"" not_before "\\","
+                            print "  \\"notAfter\\": \\"" not_after "\\","
+                            print "  \\"keyAlgorithm\\": \\"" key_algo "\\","
+                            print "  \\"signingAlgorithm\\": \\"" sig_algo "\\","
+                            print "  \\"isSelfSigned\\": " is_self_signed ","
+                            print "  \\"isExpired\\": " is_expired ","
+                            print "  \\"isExpiringSoon\\": " is_expiring_soon ","
+                            print "  \\"daysUntilExpiry\\": " days_until ","
+                            print "  \\"status\\": \\"" status "\\""
+                            print -n "}"
+                        }
+                    }
+                '
+            }
+            
+            # Process System keychain
+            system_certs=$(process_keychain "/Library/Keychains/System.keychain" "System")
+            
+            # Process user login keychain if it exists
+            user_keychain="$HOME/Library/Keychains/login.keychain-db"
+            if [ ! -f "$user_keychain" ]; then
+                user_keychain="$HOME/Library/Keychains/login.keychain"
+            fi
+            
+            user_certs=""
+            if [ -f "$user_keychain" ]; then
+                user_certs=$(process_keychain "$user_keychain" "User")
+            fi
+            
+            # Combine results
+            if [ -n "$system_certs" ] && [ -n "$user_certs" ]; then
+                echo "[$system_certs,$user_certs]"
+            elif [ -n "$system_certs" ]; then
+                echo "[$system_certs]"
+            elif [ -n "$user_certs" ]; then
+                echo "[$user_certs]"
+            else
+                echo "[]"
+            fi
+        """
+        
+        let result = try await executeWithFallback(
+            osquery: osqueryScript,
+            bash: bashScript
+        )
+        
+        // Process results into certificate array
+        var certificates: [[String: Any]] = []
+        let now = Date()
+        let thirtyDaysFromNow = Calendar.current.date(byAdding: .day, value: 30, to: now)!
+        
+        if let items = result["items"] as? [[String: Any]] {
+            print("[DEBUG] Certificate collection: found \(items.count) raw certificates from osquery")
+            
+            for item in items {
+                var cert: [String: Any] = [:]
+                
+                cert["commonName"] = item["common_name"] as? String ?? ""
+                cert["subject"] = item["subject"] as? String ?? ""
+                cert["issuer"] = item["issuer"] as? String ?? ""
+                cert["serialNumber"] = item["serial"] as? String ?? ""
+                cert["keyAlgorithm"] = item["key_algorithm"] as? String ?? ""
+                cert["signingAlgorithm"] = item["signing_algorithm"] as? String ?? ""
+                cert["keyLength"] = item["key_strength"] as? Int ?? 0
+                cert["isSelfSigned"] = (item["self_signed"] as? String == "1") || (item["self_signed"] as? Int == 1)
+                
+                // Parse store info from path - INCLUDE the actual path for keychain identification
+                if let path = item["path"] as? String {
+                    cert["path"] = path  // Include actual path/keychain location
+                    if path.contains("/Users/") {
+                        cert["storeLocation"] = "User"
+                    } else {
+                        cert["storeLocation"] = "System"
+                    }
+                }
+                
+                // Parse dates - osquery returns Unix timestamps (can be String or Int)
+                // Helper to get timestamp from either String or numeric type
+                func getTimestamp(_ value: Any?) -> Double? {
+                    if let str = value as? String, let ts = Double(str) {
+                        return ts
+                    } else if let intVal = value as? Int64 {
+                        return Double(intVal)
+                    } else if let intVal = value as? Int {
+                        return Double(intVal)
+                    } else if let dblVal = value as? Double {
+                        return dblVal
+                    }
+                    return nil
+                }
+                
+                if let notBeforeTimestamp = getTimestamp(item["not_valid_before"]) {
+                    let notBefore = Date(timeIntervalSince1970: notBeforeTimestamp)
+                    cert["notBefore"] = ISO8601DateFormatter().string(from: notBefore)
+                }
+                
+                if let notAfterTimestamp = getTimestamp(item["not_valid_after"]) {
+                    let notAfter = Date(timeIntervalSince1970: notAfterTimestamp)
+                    cert["notAfter"] = ISO8601DateFormatter().string(from: notAfter)
+                    
+                    // Calculate expiry status
+                    let daysUntilExpiry = Calendar.current.dateComponents([.day], from: now, to: notAfter).day ?? 0
+                    cert["daysUntilExpiry"] = daysUntilExpiry
+                    cert["isExpired"] = notAfter < now
+                    cert["isExpiringSoon"] = notAfter >= now && notAfter <= thirtyDaysFromNow
+                    
+                    if notAfter < now {
+                        cert["status"] = "Expired"
+                    } else if notAfter <= thirtyDaysFromNow {
+                        cert["status"] = "ExpiringSoon"
+                    } else {
+                        cert["status"] = "Valid"
+                    }
+                } else {
+                    cert["status"] = "Unknown"
+                    cert["isExpired"] = false
+                    cert["isExpiringSoon"] = false
+                    cert["daysUntilExpiry"] = 0
+                }
+                
+                certificates.append(cert)
+            }
+            
+            // Debug logging: status breakdown
+            let validCount = certificates.filter { ($0["status"] as? String) == "Valid" }.count
+            let expiredCount = certificates.filter { ($0["status"] as? String) == "Expired" }.count
+            let expiringCount = certificates.filter { ($0["status"] as? String) == "ExpiringSoon" }.count
+            let unknownCount = certificates.filter { ($0["status"] as? String) == "Unknown" }.count
+            print("[DEBUG] Certificate processing complete: \(certificates.count) total - Valid: \(validCount), Expired: \(expiredCount), ExpiringSoon: \(expiringCount), Unknown: \(unknownCount)")
+        } else {
+            print("[DEBUG] Certificate collection: no 'items' key in result, keys: \(result.keys)")
+        }
+        
+        return certificates
     }
 }

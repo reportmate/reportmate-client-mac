@@ -306,8 +306,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var info: [String: Any] = [:]
@@ -407,8 +406,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var history: [[String: Any]] = []
@@ -464,8 +462,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var packages: [[String: Any]] = []
@@ -556,8 +553,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var items: [MunkiItem] = []
@@ -673,8 +669,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var updates: [[String: Any]] = []
