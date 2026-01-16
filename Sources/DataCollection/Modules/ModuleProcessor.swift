@@ -32,19 +32,17 @@ open class BaseModuleProcessor: ModuleProcessor, @unchecked Sendable {
         return true
     }
     
-    /// Execute osquery with fallback to bash/python
+    /// Execute osquery with fallback to bash
     /// 
-    /// Three-tier fallback strategy:
+    /// Two-tier fallback strategy:
     /// 1. Try osquery (with macadmins extension if available - provides mdm, macos_profiles, alt_system_info, etc.)
     /// 2. Try bash command fallback
-    /// 3. Try python script fallback
     ///
     /// The extension is automatically loaded by OSQueryService when available.
     /// Extension tables: mdm, macos_profiles, filevault_users, alt_system_info, unified_log, pending_apple_updates, etc.
-    internal func executeWithFallback(
+    public func executeWithFallback(
         osquery: String? = nil,
-        bash: String? = nil,
-        python: String? = nil
+        bash: String? = nil
     ) async throws -> [String: Any] {
         
         // Try osquery first (extension loaded automatically if available)
@@ -89,19 +87,7 @@ open class BaseModuleProcessor: ModuleProcessor, @unchecked Sendable {
                 print("[DEBUG] WARNING: Bash output not JSON, returning as string")
                 return ["output": output]
             } catch {
-                print("WARNING: Bash fallback failed, trying python fallback: \(error)")
-            }
-        }
-        
-        // Try python fallback
-        if let pythonScript = python {
-            do {
-                print("[DEBUG] Trying python fallback for module \(moduleId)...")
-                let result = try await PythonService.executeScript(pythonScript)
-                print("[DEBUG] Python succeeded for module \(moduleId)")
-                return result
-            } catch {
-                print("ERROR: Python fallback failed: \(error)")
+                print("ERROR: Bash fallback failed: \(error)")
             }
         }
         

@@ -109,8 +109,7 @@ public class ProfilesModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var profiles: [[String: Any]] = []
@@ -218,8 +217,7 @@ public class ProfilesModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var services: [[String: Any]] = []

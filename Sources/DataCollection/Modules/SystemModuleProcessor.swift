@@ -107,8 +107,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // Transform osquery result to match expected format
@@ -135,8 +134,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let osqueryResult = try? await executeWithFallback(
             osquery: osqueryScript,
-            bash: nil,
-            python: nil
+            bash: nil
         )
         
         // bash for additional details that osquery doesn't provide
@@ -225,8 +223,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let bashResult = try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // Merge osquery and bash results, preferring osquery for UUID
@@ -266,8 +263,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         let totalSeconds = (result["total_seconds"] as? Int) ?? Int(result["total_seconds"] as? String ?? "0") ?? 0
@@ -303,8 +299,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // Parse kernel arguments if present
@@ -340,8 +335,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: nil,
-            python: nil
+            bash: nil
         )
         
         // Handle both single result and array of results
@@ -463,8 +457,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 echo '['
                 \(bashScript) | sed '$ s/,$//'
                 echo ']'
-                """,
-            python: nil
+                """
         )
         
         // Get detailed info from osquery launchd table
@@ -480,8 +473,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let launchdDetails = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: nil,
-            python: nil
+            bash: nil
         )
         
         // Build a lookup map from osquery results
@@ -641,8 +633,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         if let items = result["items"] as? [[String: Any]] {
@@ -720,8 +711,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var updates: [[String: Any]] = []
@@ -823,8 +813,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         return try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
     }
     
@@ -852,8 +841,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         // Convert to [String: String]
@@ -869,9 +857,9 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     // MARK: - Install History (osquery: package_receipts)
     
     private func collectInstallHistory() async throws -> [[String: Any]] {
-        // Get packages installed in the last 30 days
-        // Calculate timestamp for 30 days ago
-        let thirtyDaysAgo = Int(Date().timeIntervalSince1970) - (30 * 24 * 60 * 60)
+        // Get packages installed in the last 90 days (3 months)
+        // Calculate timestamp for 90 days ago
+        let ninetyDaysAgo = Int(Date().timeIntervalSince1970) - (90 * 24 * 60 * 60)
         
         // osquery package_receipts provides macOS install history
         let osqueryScript = """
@@ -884,13 +872,13 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 installer_name,
                 path
             FROM package_receipts
-            WHERE install_time >= '\(thirtyDaysAgo)'
+            WHERE install_time >= '\(ninetyDaysAgo)'
             ORDER BY install_time DESC;
         """
         
         let bashScript = """
-            # Fallback: parse receipts from filesystem (last 30 days)
-            thirty_days_ago=$(date -v-30d +%s 2>/dev/null || date -d "30 days ago" +%s 2>/dev/null || echo "0")
+            # Fallback: parse receipts from filesystem (last 90 days)
+            ninety_days_ago=$(date -v-90d +%s 2>/dev/null || date -d "90 days ago" +%s 2>/dev/null || echo "0")
             
             echo "["
             first=true
@@ -899,7 +887,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 
                 # Get modification time of receipt file
                 mod_time=$(stat -f%m "$receipt" 2>/dev/null || echo "0")
-                [ "$mod_time" -lt "$thirty_days_ago" ] && continue
+                [ "$mod_time" -lt "$ninety_days_ago" ] && continue
                 
                 pkg_id=$(/usr/libexec/PlistBuddy -c "Print :PackageIdentifier" "$receipt" 2>/dev/null || echo "")
                 version=$(/usr/libexec/PlistBuddy -c "Print :PackageVersion" "$receipt" 2>/dev/null || echo "")
@@ -920,8 +908,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var history: [[String: Any]] = []
@@ -1009,8 +996,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var items: [[String: Any]] = []
@@ -1050,8 +1036,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let sysExtResult = try? await executeWithFallback(
             osquery: osqueryScript,
-            bash: nil,
-            python: nil
+            bash: nil
         )
         
         if let items = sysExtResult?["items"] as? [[String: Any]] {
@@ -1147,8 +1132,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 echo "["
                 \(appExtScript)
                 echo "]"
-                """,
-            python: nil
+                """
         )
         
         if let items = appExtResult["items"] as? [[String: Any]] {
@@ -1221,8 +1205,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let pluginsResult = try await executeWithFallback(
             osquery: nil,
-            bash: pluginsScript,
-            python: nil
+            bash: pluginsScript
         )
         
         // Deduplicate by identifier (pluginkit may have found them already)
@@ -1295,8 +1278,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: osqueryScript,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var kexts: [[String: Any]] = []
@@ -1368,8 +1350,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         let result = try await executeWithFallback(
             osquery: nil,
-            bash: bashScript,
-            python: nil
+            bash: bashScript
         )
         
         var helpers: [[String: Any]] = []
