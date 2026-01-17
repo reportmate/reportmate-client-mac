@@ -61,7 +61,7 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         var updatedWifiNetwork = wifiNetwork
         if let ssid = updatedWifiNetwork["ssid"] as? String,
            ssid == "[Location Services Required]",
-           let firstKnownNetwork = savedWifi.first as? [String: Any],
+           let firstKnownNetwork = savedWifi.first,
            let knownSSID = firstKnownNetwork["ssid"] as? String {
             updatedWifiNetwork["ssid"] = knownSSID
             updatedWifiNetwork["note"] = "SSID from known networks (location services disabled)"
