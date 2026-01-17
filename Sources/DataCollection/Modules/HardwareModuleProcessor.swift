@@ -6,6 +6,11 @@ import Foundation
 /// osquery tables: system_info, memory_devices, virtual_memory_info, mounts, battery
 public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
+    /// Cache file path for storage analysis results
+    private let storageAnalysisCachePath = "/Library/Managed Reports/cache/storage_analysis.json"
+    /// Cache validity period (24 hours in seconds)
+    private let cacheValiditySeconds: TimeInterval = 24 * 60 * 60
+    
     public init(configuration: ReportMateConfiguration) {
         super.init(moduleId: "hardware", configuration: configuration)
     }
@@ -15,6 +20,89 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
         return formatter.string(from: Date())
+    }
+    
+    // MARK: - Storage Analysis Caching
+    
+    /// Check if cached storage analysis exists and is still valid (<24 hours old)
+    private func isCacheValid() -> Bool {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: storageAnalysisCachePath) else {
+            print("[\(timestamp())] Storage analysis cache not found")
+            return false
+        }
+        
+        do {
+            let attrs = try fileManager.attributesOfItem(atPath: storageAnalysisCachePath)
+            if let modDate = attrs[.modificationDate] as? Date {
+                let age = Date().timeIntervalSince(modDate)
+                let isValid = age < cacheValiditySeconds
+                let ageHours = age / 3600
+                print("[\(timestamp())] Storage analysis cache age: \(String(format: "%.1f", ageHours)) hours, valid: \(isValid)")
+                return isValid
+            }
+        } catch {
+            print("[\(timestamp())] Error checking cache age: \(error)")
+        }
+        return false
+    }
+    
+    /// Load cached storage analysis results
+    private func loadCachedStorageAnalysis() -> [[String: Any]]? {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: storageAnalysisCachePath) else {
+            return nil
+        }
+        
+        do {
+            let data = try Data(contentsOf: URL(fileURLWithPath: storageAnalysisCachePath))
+            if let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                print("[\(timestamp())] Loaded \(json.count) items from storage analysis cache")
+                return json
+            }
+        } catch {
+            print("[\(timestamp())] Error loading cache: \(error)")
+        }
+        return nil
+    }
+    
+    /// Save storage analysis results to cache
+    private func saveStorageAnalysisCache(_ analysis: [[String: Any]]) {
+        let fileManager = FileManager.default
+        let cacheDir = (storageAnalysisCachePath as NSString).deletingLastPathComponent
+        
+        // Ensure cache directory exists
+        do {
+            if !fileManager.fileExists(atPath: cacheDir) {
+                try fileManager.createDirectory(atPath: cacheDir, withIntermediateDirectories: true, attributes: nil)
+            }
+            
+            let data = try JSONSerialization.data(withJSONObject: analysis, options: [.prettyPrinted])
+            try data.write(to: URL(fileURLWithPath: storageAnalysisCachePath))
+            print("[\(timestamp())] Saved storage analysis cache with \(analysis.count) items")
+        } catch {
+            print("[\(timestamp())] Error saving cache: \(error)")
+        }
+    }
+    
+    /// Determine if deep storage analysis should run based on storage mode and cache
+    private func shouldRunDeepAnalysis() -> Bool {
+        switch configuration.storageMode {
+        case .quick:
+            print("[\(timestamp())] Storage mode: quick - skipping deep analysis")
+            return false
+        case .deep:
+            print("[\(timestamp())] Storage mode: deep - forcing deep analysis")
+            return true
+        case .auto:
+            let cacheValid = isCacheValid()
+            if cacheValid {
+                print("[\(timestamp())] Storage mode: auto - cache valid, skipping deep analysis")
+            } else {
+                print("[\(timestamp())] Storage mode: auto - cache expired/missing, running deep analysis")
+            }
+            return !cacheValid
+        }
     }
     
     public override func collectData() async throws -> ModuleData {
@@ -475,25 +563,39 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             // Find the primary internal storage device (root volume "/")
             for i in 0..<windowsStorage.count {
                 if windowsStorage[i]["is_internal"] as? Bool == true {
-                    // Collect directory analysis using native Swift FileManager (inherits FDA)
-                    do {
-                        print("[\(timestamp())] Starting storage directory analysis...")
-                        let directoryAnalysis = try await collectStorageDirectoryAnalysis(forDrivePath: "/")
-                        print("[\(timestamp())] Directory analysis complete, adding to device...")
-                        addStorageAnalysisToDevice(&windowsStorage[i], directoryAnalysis: directoryAnalysis)
-                        print("[\(timestamp())] Storage analysis added successfully")
-                        
-                        // DISABLED: APFS purgeable space detection can hang on some systems
-                        // TODO: Re-enable with timeout mechanism
-                        // if let apfsPurgeable = try? await collectAPFSPurgeableSpaceDetails() {
-                        //     windowsStorage[i]["apfsPurgeableDetails"] = apfsPurgeable
-                        //     if let snapshotCount = apfsPurgeable["localSnapshotCount"] as? Int {
-                        //         windowsStorage[i]["localSnapshotCount"] = snapshotCount
-                        //     }
-                        // }
-                    } catch {
-                        // Continue without directory analysis - storage will still work
+                    // Check storage mode and cache to determine if deep analysis should run
+                    // IMPORTANT: Always try to include cached analysis data to preserve rich data
+                    // from previous deep scans, even in quick mode
+                    if shouldRunDeepAnalysis() {
+                        // Run deep storage analysis
+                        do {
+                            print("[\(timestamp())] Starting deep storage directory analysis...")
+                            let directoryAnalysis = try await collectStorageDirectoryAnalysis(forDrivePath: "/")
+                            print("[\(timestamp())] Directory analysis complete, adding to device...")
+                            addStorageAnalysisToDevice(&windowsStorage[i], directoryAnalysis: directoryAnalysis)
+                            // Save to cache for future runs
+                            saveStorageAnalysisCache(directoryAnalysis)
+                            print("[\(timestamp())] Storage analysis added and cached successfully")
+                        } catch {
+                            // Deep analysis failed - try to use cache as fallback
+                            if let cachedAnalysis = loadCachedStorageAnalysis() {
+                                print("[\(timestamp())] Deep analysis failed, using cached data as fallback")
+                                addStorageAnalysisToDevice(&windowsStorage[i], directoryAnalysis: cachedAnalysis)
+                            } else {
+                                windowsStorage[i]["storageAnalysisEnabled"] = false
+                                print("[\(timestamp())] Storage analysis failed and no cache available: \(error)")
+                            }
+                        }
+                    } else if let cachedAnalysis = loadCachedStorageAnalysis() {
+                        // Auto mode with valid cache OR quick mode - use cached analysis if available
+                        // This ensures rich data from previous deep scans is preserved
+                        print("[\(timestamp())] Using cached storage analysis (mode: \(configuration.storageMode))...")
+                        addStorageAnalysisToDevice(&windowsStorage[i], directoryAnalysis: cachedAnalysis)
+                        print("[\(timestamp())] Cached storage analysis applied - preserving rich directory data")
+                    } else {
+                        // No cache available - mark as disabled (first run or cache cleared)
                         windowsStorage[i]["storageAnalysisEnabled"] = false
+                        print("[\(timestamp())] No cached storage analysis available (mode: \(configuration.storageMode))")
                     }
                     break  // Only analyze the first internal drive
                 }
@@ -1534,59 +1636,64 @@ private func collectBatteryInfo() async throws -> [String: Any] {
         
         // Special handling for /Users - Use native FileManager (inherits FDA from signed binary)
         // Note: du subprocess does NOT inherit TCC/FDA permissions, so we must use FileManager
+        // User folders are processed sequentially, but each user's subfolders are processed in parallel
         print("[\(timestamp())] Starting /Users analysis...")
         let usersDir = "/Users"
         if fileManager.fileExists(atPath: usersDir) {
             print("[\(timestamp())] Getting /Users folder sizes with FileManager (FDA-aware)...")
             
-            // Get individual user folder sizes using FileManager (inherits FDA)
-            var userBreakdown: [[String: Any]] = []
-            var totalUsersSize: Int64 = 0
-            
+            // Get list of user folders first
+            var userFolderPaths: [(name: String, path: String)] = []
             do {
                 let userFolders = try fileManager.contentsOfDirectory(atPath: usersDir)
                 print("[\(timestamp())] Found \(userFolders.count) items in /Users")
                 for userFolder in userFolders {
-                    // Skip hidden folders
-                    if userFolder.hasPrefix(".") { continue }
+                    // Skip hidden folders and special folders
+                    if userFolder.hasPrefix(".") || userFolder == "Shared" || userFolder == ".localized" { continue }
                     
                     let userPath = (usersDir as NSString).appendingPathComponent(userFolder)
                     var isDir: ObjCBool = false
                     if fileManager.fileExists(atPath: userPath, isDirectory: &isDir), isDir.boolValue {
-                        print("[\(timestamp())] Getting size for: \(userFolder) (using FileManager with FDA)")
-                        
-                        // Use FileManager-based size with timeout (inherits FDA permissions)
-                        let size = await directorySizeWithTimeout(path: userPath, timeoutSeconds: 60)
-                        totalUsersSize += size
-                        
-                        var userInfo: [String: Any] = [
-                            "name": userFolder,
-                            "path": userPath,
-                            "size": size,
-                            "depth": 2,
-                            "category": "Users",
-                            "driveRoot": "/",
-                            "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity)
-                        ]
-                        
-                        // Collect user home folder breakdown (Desktop, Documents, Downloads, Pictures, etc.)
-                        if userFolder != "Shared" && userFolder != ".localized" {
-                            print("[\(timestamp())]   Collecting user folder breakdown for: \(userFolder)")
-                            let userFolderBreakdown = await collectUserFolderBreakdownFDA(userPath: userPath, totalCapacity: totalCapacity)
-                            if !userFolderBreakdown.isEmpty {
-                                userInfo["subdirectories"] = userFolderBreakdown
-                                print("[\(timestamp())]   Found \(userFolderBreakdown.count) user subdirectories for: \(userFolder)")
-                            }
-                        }
-                        
-                        userBreakdown.append(userInfo)
-                        print("[\(timestamp())] Completed: \(userFolder) - \(formatBytes(size))")
+                        userFolderPaths.append((name: userFolder, path: userPath))
                     }
                 }
             } catch {
-                // Continue without user breakdown
                 print("[\(timestamp())] Error listing user folders: \(error)")
             }
+            
+            // Process users sequentially (subfolders of each user are processed in parallel internally)
+            var userBreakdown: [[String: Any]] = []
+            for user in userFolderPaths {
+                print("[\(timestamp())] Getting size for: \(user.name) (FDA-aware)")
+                
+                // Use FileManager-based size with timeout (inherits FDA permissions)
+                let size = await directorySizeWithTimeout(path: user.path, timeoutSeconds: 120)
+                
+                var userInfo: [String: Any] = [
+                    "name": user.name,
+                    "path": user.path,
+                    "size": size,
+                    "depth": 2,
+                    "category": "Users",
+                    "driveRoot": "/",
+                    "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity)
+                ]
+                
+                // Collect user home folder breakdown (ALL folders, dynamically enumerated)
+                // This uses parallel processing internally via TaskGroup
+                print("[\(timestamp())]   Collecting user folder breakdown for: \(user.name)")
+                let userFolderBreakdown = await collectUserFolderBreakdownFDA(userPath: user.path, totalCapacity: totalCapacity)
+                if !userFolderBreakdown.isEmpty {
+                    userInfo["subdirectories"] = userFolderBreakdown
+                    print("[\(timestamp())]   Found \(userFolderBreakdown.count) user subdirectories for: \(user.name)")
+                }
+                
+                print("[\(timestamp())] Completed: \(user.name) - \(formatBytes(size))")
+                userBreakdown.append(userInfo)
+            }
+            
+            // Calculate total /Users size from collected data
+            let totalUsersSize = userBreakdown.reduce(Int64(0)) { $0 + (($1["size"] as? Int64) ?? 0) }
             
             // Build /Users analysis
             var usersAnalysis: [String: Any] = [
@@ -1600,7 +1707,11 @@ private func collectBatteryInfo() async throws -> [String: Any] {
             ]
             
             if !userBreakdown.isEmpty {
-                usersAnalysis["subdirectories"] = userBreakdown
+                // Sort by size descending
+                let sortedBreakdown = userBreakdown.sorted { 
+                    ($0["size"] as? Int64 ?? 0) > ($1["size"] as? Int64 ?? 0) 
+                }
+                usersAnalysis["subdirectories"] = sortedBreakdown
             }
             results.append(usersAnalysis)
         }
@@ -1762,73 +1873,110 @@ private func collectBatteryInfo() async throws -> [String: Any] {
     }
     
     /// Collect user folder breakdown using FileManager (inherits FDA permissions)
-    /// This is the FDA-aware version that works with TCC-protected user directories
+    /// DYNAMIC ENUMERATION: Gets ALL folders in user home directory, not just standard ones
+    /// Uses parallel processing via TaskGroup for faster enumeration of large home folders
     private func collectUserFolderBreakdownFDA(userPath: String, totalCapacity: Int64) async -> [[String: Any]] {
         let fileManager = FileManager.default
-        var breakdown: [[String: Any]] = []
+        var folderPaths: [(name: String, path: String, isHidden: Bool)] = []
         
-        // Standard macOS user directories to analyze
-        let standardFolders = [
-            "Desktop",
-            "Documents",
-            "Downloads",
-            "Movies",
-            "Music",
-            "Pictures",
-            "Library",
-            "Applications",
-            "Developer",
-            "Public"
-        ]
+        // Dynamically enumerate ALL directories in user home folder
+        do {
+            let contents = try fileManager.contentsOfDirectory(atPath: userPath)
+            for item in contents {
+                let itemPath = (userPath as NSString).appendingPathComponent(item)
+                var isDir: ObjCBool = false
+                if fileManager.fileExists(atPath: itemPath, isDirectory: &isDir), isDir.boolValue {
+                    let isHidden = item.hasPrefix(".")
+                    folderPaths.append((name: item, path: itemPath, isHidden: isHidden))
+                }
+            }
+        } catch {
+            print("[\(timestamp())] Error enumerating \(userPath): \(error)")
+            return []
+        }
         
-        for folderName in standardFolders {
-            let folderPath = (userPath as NSString).appendingPathComponent(folderName)
+        print("[\(timestamp())]   Found \(folderPaths.count) folders in \(userPath)")
+        
+        // Sendable-friendly result type for TaskGroup
+        struct FolderResult: Sendable {
+            let name: String
+            let displayName: String
+            let path: String
+            let size: Int64
+            let category: String
+            let percentageOfDrive: Double
+            let formattedSize: String
+            let hasData: Bool
+        }
+        
+        // Process folders in parallel using TaskGroup (6 concurrent tasks for speed)
+        let folderResults = await withTaskGroup(of: FolderResult.self, returning: [FolderResult].self) { group in
+            // Add all tasks - TaskGroup handles concurrency
+            for folder in folderPaths {
+                let folderName = folder.name
+                let folderPath = folder.path
+                let isHidden = folder.isHidden
+                
+                group.addTask {
+                    // For hidden folders, only include if they're significant (> 100MB)
+                    // For regular folders, include all with content
+                    let timeoutSeconds = isHidden ? 15 : 30
+                    let minimumSize: Int64 = isHidden ? 100_000_000 : 0  // 100MB minimum for hidden
+                    
+                    let size = await self.directorySizeWithTimeout(path: folderPath, timeoutSeconds: timeoutSeconds)
+                    
+                    if size > minimumSize {
+                        var displayName = folderName
+                        if isHidden && folderName == ".Trash" {
+                            displayName = "Trash"
+                        } else if isHidden {
+                            displayName = folderName.replacingOccurrences(of: ".", with: "")
+                        }
+                        
+                        return FolderResult(
+                            name: folderName,
+                            displayName: displayName,
+                            path: folderPath,
+                            size: size,
+                            category: self.determineFolderCategory(folderName: folderName),
+                            percentageOfDrive: self.calculatePercentageOfDrive(size: size, capacity: totalCapacity),
+                            formattedSize: self.formatBytes(size),
+                            hasData: true
+                        )
+                    }
+                    return FolderResult(name: folderName, displayName: "", path: "", size: 0, category: "", percentageOfDrive: 0, formattedSize: "", hasData: false)
+                }
+            }
             
-            // Check if folder exists
-            var isDir: ObjCBool = false
-            if fileManager.fileExists(atPath: folderPath, isDirectory: &isDir), isDir.boolValue {
-                // Use FileManager with timeout (inherits FDA)
-                let size = await directorySizeWithTimeout(path: folderPath, timeoutSeconds: 30)
-                if size > 0 {
-                    let folderInfo: [String: Any] = [
-                        "name": folderName,
-                        "path": folderPath,
-                        "size": size,
-                        "depth": 3,
-                        "category": determineFolderCategory(folderName: folderName),
-                        "driveRoot": "/",
-                        "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity),
-                        "formattedSize": formatBytes(size)
-                    ]
-                    breakdown.append(folderInfo)
+            var results: [FolderResult] = []
+            for await result in group {
+                if result.hasData {
+                    results.append(result)
                 }
             }
+            return results
         }
         
-        // Also check for significant hidden folders
-        let hiddenFolders = [".Trash", ".cache"]
-        for folderName in hiddenFolders {
-            let folderPath = (userPath as NSString).appendingPathComponent(folderName)
-            var isDir: ObjCBool = false
-            if fileManager.fileExists(atPath: folderPath, isDirectory: &isDir), isDir.boolValue {
-                let size = await directorySizeWithTimeout(path: folderPath, timeoutSeconds: 15)
-                if size > 100_000_000 {  // Only include if > 100MB
-                    let displayName = folderName == ".Trash" ? "Trash" : folderName.replacingOccurrences(of: ".", with: "")
-                    let folderInfo: [String: Any] = [
-                        "name": displayName,
-                        "path": folderPath,
-                        "size": size,
-                        "depth": 3,
-                        "category": "Cache",
-                        "driveRoot": "/",
-                        "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity),
-                        "formattedSize": formatBytes(size)
-                    ]
-                    breakdown.append(folderInfo)
-                }
-            }
+        // Convert FolderResult to [String: Any] dictionaries
+        var breakdown: [[String: Any]] = folderResults.map { result in
+            [
+                "name": result.displayName,
+                "path": result.path,
+                "size": result.size,
+                "depth": 3,
+                "category": result.category,
+                "driveRoot": "/",
+                "percentageOfDrive": result.percentageOfDrive,
+                "formattedSize": result.formattedSize
+            ]
         }
         
+        // Sort by size descending for better UI display
+        breakdown.sort { 
+            ($0["size"] as? Int64 ?? 0) > ($1["size"] as? Int64 ?? 0) 
+        }
+        
+        print("[\(timestamp())]   Processed \(breakdown.count) folders with data in \(userPath)")
         return breakdown
     }
     
@@ -1956,18 +2104,63 @@ private func collectBatteryInfo() async throws -> [String: Any] {
     
     /// Determine category for user folder based on name
     private func determineFolderCategory(folderName: String) -> String {
+        let lowercased = folderName.lowercased()
+        
+        // Standard macOS user directories
         switch folderName {
         case "Desktop", "Documents", "Downloads", "Public":
             return "Documents"
-        case "Movies", "Music", "Pictures":
+        case "Movies", "Music", "Pictures", "Photos Library.photoslibrary":
             return "Media"
         case "Library":
             return "System"
         case "Applications", "Developer":
             return "Applications"
         default:
-            return "Other"
+            break
         }
+        
+        // Hidden folders are typically caches
+        if folderName.hasPrefix(".") {
+            switch folderName {
+            case ".Trash":
+                return "Trash"
+            case ".cache", ".npm", ".gem", ".cargo", ".gradle", ".m2", ".cocoapods":
+                return "Cache"
+            case ".ssh", ".gnupg":
+                return "Security"
+            case ".git", ".svn":
+                return "Development"
+            default:
+                return "Cache"  // Most hidden folders are caches/configs
+            }
+        }
+        
+        // Development folders
+        if lowercased.contains("dev") || lowercased.contains("code") || 
+           lowercased.contains("projects") || lowercased.contains("repos") ||
+           lowercased.contains("workspace") || lowercased == "go" || lowercased == "src" {
+            return "Development"
+        }
+        
+        // Virtual machines and containers
+        if lowercased.contains("vm") || lowercased.contains("virtual") ||
+           lowercased.contains("docker") || lowercased.contains("parallels") {
+            return "VirtualMachines"
+        }
+        
+        // Cloud storage folders
+        if lowercased.contains("dropbox") || lowercased.contains("onedrive") ||
+           lowercased.contains("google") || lowercased.contains("icloud") {
+            return "CloudStorage"
+        }
+        
+        // Games
+        if lowercased.contains("games") || lowercased.contains("steam") {
+            return "Games"
+        }
+        
+        return "Other"
     }
     
     /// Format bytes to human-readable string

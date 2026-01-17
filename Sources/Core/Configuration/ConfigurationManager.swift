@@ -184,6 +184,13 @@ public class ConfigurationManager {
     }
 }
 
+/// Storage analysis mode for hardware module
+public enum StorageAnalysisMode: String {
+    case quick = "quick"   // Drive totals only (capacity, free space)
+    case deep = "deep"     // Full directory analysis with per-folder sizes
+    case auto = "auto"     // Deep if cache expired (>24h), otherwise use cache
+}
+
 /// ReportMate configuration structure
 public struct ReportMateConfiguration {
     public var apiUrl: String?
@@ -215,6 +222,12 @@ public struct ReportMateConfiguration {
     public var validateSSL: Bool = true
     public var timeout: Int = 300 // 5 minutes
     
+    /// Storage analysis mode: quick, deep, or auto (default: auto)
+    /// - quick: Drive totals only (fast, ~1 second)
+    /// - deep: Full directory analysis with per-folder sizes (slow, ~minutes to hours depending on drive size)
+    /// - auto: Use cached deep analysis if available and <24h old, otherwise run deep analysis
+    public var storageMode: StorageAnalysisMode = .auto
+    
     /// Merge configuration with another dictionary
     mutating func merge(with other: [String: Any]) {
         if let apiUrl = other["ApiUrl"] as? String { self.apiUrl = apiUrl }
@@ -229,5 +242,7 @@ public struct ReportMateConfiguration {
         if let useAltSystemInfo = other["UseAltSystemInfo"] as? Bool { self.useAltSystemInfo = useAltSystemInfo }
         if let validateSSL = other["ValidateSSL"] as? Bool { self.validateSSL = validateSSL }
         if let timeout = other["Timeout"] as? Int { self.timeout = timeout }
+        if let storageMode = other["StorageMode"] as? String, 
+           let mode = StorageAnalysisMode(rawValue: storageMode) { self.storageMode = mode }
     }
 }
