@@ -730,20 +730,6 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
     // MARK: - External Storage
     
     private func collectExternalStorage() async throws -> [[String: Any]] {
-        let osqueryScript = """
-            SELECT 
-                m.device,
-                m.path,
-                m.type,
-                m.blocks,
-                m.blocks_available,
-                m.blocks_free
-            FROM mounts m
-            WHERE m.device LIKE '/dev/disk%'
-              AND m.path NOT LIKE '/System/%'
-              AND m.path NOT LIKE '/private/%';
-            """
-        
         // Use simple df + diskutil approach - execute from Swift directly
         let dfOutput = try await BashService.execute("df -H | grep '^/dev/disk' | awk '{print $1}' | sort -u")
         let devices = dfOutput.split(separator: "\n").map(String.init)
@@ -831,7 +817,100 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
     // MARK: - Printers (HIGHEST PRIORITY)
     
     private func collectPrinters() async throws -> [[String: Any]] {
-        // Simplified printer collection - just get basic info that works reliably
+        // Use system_profiler with jq for comprehensive printer data (NO PYTHON - see CLAUDE.md)
+        let bashScript = """
+            system_profiler SPPrintersDataType -json 2>/dev/null | jq '[.SPPrintersDataType[]? | {
+                name: (._name // "Unknown"),
+                status: (.status // "Unknown"),
+                uri: (.uri // ""),
+                ppd: (.ppd // ""),
+                ppdFileVersion: (.ppdfileversion // ""),
+                driverVersion: (.driverversion // ""),
+                postScriptVersion: (.psversion // ""),
+                cupsVersion: (.cupsversion // ""),
+                isDefault: ((.default // "no") | ascii_downcase == "yes"),
+                isShared: ((.shared // "no") | ascii_downcase == "yes"),
+                printerCommands: (.printercommands // ""),
+                scanningSupport: (."Scanning support" // "No"),
+                faxSupport: (."Fax Support" // "No"),
+                dateAdded: (.addeddate // ""),
+                cupsFilters: [."cups filters"[]? | {
+                    name: (._name // ""),
+                    path: (."filter path" // ""),
+                    permissions: (."filter permissions" // ""),
+                    version: (."filter version" // "")
+                }]
+            }]'
+            """
+        
+        let result = try await executeWithFallback(osquery: nil, bash: bashScript)
+        
+        var printers: [[String: Any]] = []
+        if let items = result["items"] as? [[String: Any]] {
+            printers = items
+        } else if let output = result["output"] as? String,
+                  let data = output.data(using: .utf8),
+                  let jsonArray = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            printers = jsonArray
+        }
+        
+        // Fallback to lpstat if system_profiler fails
+        if printers.isEmpty {
+            printers = try await collectPrintersWithLpstat()
+        }
+        
+        return printers.map { printer in
+            let name = printer["name"] as? String ?? "Unknown Printer"
+            let uri = printer["uri"] as? String ?? ""
+            let ppd = printer["ppd"] as? String ?? ""
+            
+            // Determine connection type from URI
+            var connectionType = "Unknown"
+            if uri.contains("usb:") { connectionType = "USB" }
+            else if uri.contains("ipp:") || uri.contains("ipps:") { connectionType = "Network (IPP)" }
+            else if uri.contains("socket:") { connectionType = "Network (Socket)" }
+            else if uri.contains("lpd:") { connectionType = "Network (LPD)" }
+            else if uri.contains("smb:") { connectionType = "Network (SMB)" }
+            else if uri.contains("dnssd:") { connectionType = "Network (Bonjour)" }
+            
+            // Parse make and model from PPD
+            var make = ""
+            let model = ppd
+            if !ppd.isEmpty {
+                let parts = ppd.components(separatedBy: " ")
+                if parts.count > 0 {
+                    make = parts[0]
+                }
+            }
+            
+            // Parse status
+            let statusStr = printer["status"] as? String ?? "Idle"
+            
+            return [
+                "name": name,
+                "displayName": name,
+                "uri": uri,
+                "connectionType": connectionType,
+                "status": statusStr.capitalized,
+                "make": make,
+                "model": model,
+                "makeAndModel": ppd,
+                "ppd": ppd,
+                "ppdFileVersion": printer["ppdFileVersion"] as? String ?? "",
+                "driverVersion": printer["driverVersion"] as? String ?? "",
+                "postScriptVersion": printer["postScriptVersion"] as? String ?? "",
+                "cupsVersion": printer["cupsVersion"] as? String ?? "",
+                "printerCommands": printer["printerCommands"] as? String ?? "",
+                "scanningSupport": printer["scanningSupport"] as? String ?? "",
+                "faxSupport": printer["faxSupport"] as? String ?? "",
+                "dateAdded": printer["dateAdded"] as? String ?? "",
+                "cupsFilters": printer["cupsFilters"] as? [[String: Any]] ?? []
+            ]
+        }
+    }
+    
+    // Fallback method using lpstat for basic printer info
+    private func collectPrintersWithLpstat() async throws -> [[String: Any]] {
         let bashScript = """
             echo "["
             first=true
@@ -848,17 +927,6 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
                 
                 [ -z "$printer_name" ] && continue
                 
-                # Determine connection type
-                case "$printer_uri" in
-                    usb:*) conn_type="USB" ;;
-                    ipp:*|ipps:*) conn_type="Network (IPP)" ;;
-                    socket:*) conn_type="Network (Socket)" ;;
-                    lpd:*) conn_type="Network (LPD)" ;;
-                    smb:*) conn_type="Network (SMB)" ;;
-                    dnssd:*) conn_type="Network (Bonjour)" ;;
-                    *) conn_type="Unknown" ;;
-                esac
-                
                 # Check if default
                 is_default="false"
                 [ "$printer_name" = "$default_printer" ] && is_default="true"
@@ -870,25 +938,14 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
                 make_model=$(echo "$lp_info" | grep -o "printer-make-and-model='[^']*'" | sed "s/printer-make-and-model='//;s/'$//")
                 [ -z "$make_model" ] && make_model="Unknown"
                 
-                # Extract state
-                state=$(echo "$lp_info" | grep -o "printer-state=[0-9]*" | cut -d= -f2)
-                [ -z "$state" ] && state="3"
-                
-                # Extract state reasons
-                state_reasons=$(echo "$lp_info" | grep -o "printer-state-reasons=[^[:space:]]*" | cut -d= -f2)
-                [ -z "$state_reasons" ] && state_reasons="none"
-                
                 # Output JSON
                 [ "$first" = false ] && echo ","
                 cat <<-EOF
             {
               "name": "$printer_name",
               "uri": "$printer_uri",
-              "connectionType": "$conn_type",
               "isDefault": $is_default,
-              "makeAndModel": "$make_model",
-              "printerState": "$state",
-              "printerStateReasons": "$state_reasons"
+              "ppd": "$make_model"
             }
             EOF
                 first=false
@@ -904,64 +961,7 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
             printers = items
         }
         
-        return printers.map { printer in
-            let name = printer["name"] as? String ?? "Unknown Printer"
-            let uri = printer["uri"] as? String ?? ""
-            let makeAndModel = printer["makeAndModel"] as? String ?? ""
-            
-            // Determine printer type
-            var printerType = "Standard Printer"
-            let nameLower = name.lowercased()
-            if nameLower.contains("fax") { printerType = "Fax" }
-            else if nameLower.contains("pdf") { printerType = "Virtual (PDF)" }
-            else if uri.contains("dnssd") { printerType = "AirPrint" }
-            else if nameLower.contains("label") || nameLower.contains("dymo") || nameLower.contains("zebra") { printerType = "Label Printer" }
-            
-            // Parse make and model
-            var make = ""
-            var model = ""
-            if !makeAndModel.isEmpty && makeAndModel != "Unknown" {
-                let parts = makeAndModel.components(separatedBy: " ")
-                if parts.count > 0 {
-                    make = parts[0]
-                    if parts.count > 1 {
-                        model = parts[1...].joined(separator: " ")
-                    }
-                }
-            }
-            
-            // Parse state
-            let stateStr = printer["printerState"] as? String ?? "3"
-            var state = "idle"
-            var isAcceptingJobs = true
-            if stateStr == "3" { state = "idle" }
-            else if stateStr == "4" { state = "processing" }
-            else if stateStr == "5" { state = "stopped"; isAcceptingJobs = false }
-            
-            // Parse state reasons into array
-            let stateReasonsStr = printer["printerStateReasons"] as? String ?? "none"
-            let stateReasons = stateReasonsStr.components(separatedBy: ",")
-            
-            return [
-                "name": name,
-                "displayName": name,
-                "uri": uri,
-                "connectionType": printer["connectionType"] as? String ?? "Unknown",
-                "status": state == "idle" ? "Idle" : state == "processing" ? "Processing" : "Stopped",
-                "state": state,
-                "stateMessage": state,
-                "stateReasons": stateReasons,
-                "isDefault": printer["isDefault"] as? Bool ?? false,
-                "isShared": false,
-                "isAcceptingJobs": isAcceptingJobs,
-                "pendingJobs": 0,
-                "printerType": printerType,
-                "deviceType": "Printer",
-                "make": make,
-                "model": model,
-                "makeAndModel": makeAndModel
-            ]
-        }
+        return printers
     }
     
     // MARK: - Scanners
