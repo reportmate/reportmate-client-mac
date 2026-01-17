@@ -873,15 +873,72 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
             else if uri.contains("smb:") { connectionType = "Network (SMB)" }
             else if uri.contains("dnssd:") { connectionType = "Network (Bonjour)" }
             
-            // Parse make and model from PPD
-            var make = ""
-            let model = ppd
+            // Find and parse PPD file for manufacturer and model
+            var manufacturer = ""
+            var model = ""
             if !ppd.isEmpty {
-                let parts = ppd.components(separatedBy: " ")
-                if parts.count > 0 {
-                    make = parts[0]
+                // PPD files are in /Library/Printers/PPDs/Contents/Resources/
+                let ppdBasePath = "/Library/Printers/PPDs/Contents/Resources/"
+                
+                // Try to find PPD file (may have no extension, .ppd, or .gz)
+                var ppdFilePath = ""
+                let fileManager = FileManager.default
+                
+                // Try exact match first (no extension)
+                let exactPath = ppdBasePath + ppd
+                if fileManager.fileExists(atPath: exactPath) {
+                    ppdFilePath = exactPath
+                } else {
+                    // Try with .ppd extension
+                    let ppdPath = ppdBasePath + ppd + ".ppd"
+                    if fileManager.fileExists(atPath: ppdPath) {
+                        ppdFilePath = ppdPath
+                    } else {
+                        // Try with .gz extension
+                        let gzPath = ppdBasePath + ppd + ".gz"
+                        if fileManager.fileExists(atPath: gzPath) {
+                            ppdFilePath = gzPath
+                        }
+                    }
+                }
+                
+                // Parse PPD file if found
+                if !ppdFilePath.isEmpty {
+                    do {
+                        let ppdContent = try String(contentsOfFile: ppdFilePath, encoding: .utf8)
+                        
+                        // Extract *Manufacturer: "VALUE"
+                        if let manufacturerMatch = ppdContent.range(of: #"\*Manufacturer:\s*"([^"]+)""#, options: .regularExpression) {
+                            let matchString = String(ppdContent[manufacturerMatch])
+                            if let valueMatch = matchString.range(of: #""([^"]+)""#, options: .regularExpression) {
+                                manufacturer = String(matchString[valueMatch]).replacingOccurrences(of: "\"", with: "")
+                            }
+                        }
+                        
+                        // Extract *ModelName: "VALUE"
+                        if let modelMatch = ppdContent.range(of: #"\*ModelName:\s*"([^"]+)""#, options: .regularExpression) {
+                            let matchString = String(ppdContent[modelMatch])
+                            if let valueMatch = matchString.range(of: #""([^"]+)""#, options: .regularExpression) {
+                                model = String(matchString[valueMatch]).replacingOccurrences(of: "\"", with: "")
+                                
+                                // Remove manufacturer prefix from model if present
+                                if !manufacturer.isEmpty && model.lowercased().hasPrefix(manufacturer.lowercased()) {
+                                    // Remove manufacturer name and any following whitespace
+                                    let prefixLength = manufacturer.count
+                                    if model.count > prefixLength {
+                                        model = String(model.dropFirst(prefixLength)).trimmingCharacters(in: .whitespaces)
+                                    }
+                                }
+                            }
+                        }
+                    } catch {
+                        print("[WARNING] Failed to read PPD file at \(ppdFilePath): \(error)")
+                    }
                 }
             }
+            
+            // Generate identifier from URI hash (for unique identification)
+            let identifier = uri.isEmpty ? "" : String(format: "%08X", uri.hashValue & 0xFFFFFFFF)
             
             // Parse status
             let statusStr = printer["status"] as? String ?? "Idle"
@@ -892,9 +949,9 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
                 "uri": uri,
                 "connectionType": connectionType,
                 "status": statusStr.capitalized,
-                "make": make,
+                "manufacturer": manufacturer,
                 "model": model,
-                "makeAndModel": ppd,
+                "identifier": identifier,
                 "ppd": ppd,
                 "ppdFileVersion": printer["ppdFileVersion"] as? String ?? "",
                 "driverVersion": printer["driverVersion"] as? String ?? "",
