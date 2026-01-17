@@ -389,7 +389,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 
                 // Capacity and free space (snake_case to match osquery)
                 if let sizeBytes = volume["size_in_bytes"] as? Int64 {
-                    drive["size"] = sizeBytes
+                    drive["capacity"] = sizeBytes
                 }
                 if let freeBytes = volume["free_space_in_bytes"] as? Int64 {
                     drive["free_space"] = freeBytes
@@ -455,7 +455,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                         let blockSize = Int64(item["blocks_size"] as? String ?? "4096") ?? (item["blocks_size"] as? Int64 ?? 4096)
                         
                         drive["name"] = "Macintosh HD"
-                        drive["size"] = blocks * blockSize
+                        drive["capacity"] = blocks * blockSize
                         drive["free_space"] = blocksFree * blockSize
                         drive["type"] = "SSD"
                         drive["interface"] = item["type"] as? String ?? "APFS"
@@ -1532,56 +1532,55 @@ private func collectBatteryInfo() async throws -> [String: Any] {
             }
         }
         
-        // Special handling for /Users - ONLY use fast du command (no FileManager enumeration)
+        // Special handling for /Users - Use native FileManager (inherits FDA from signed binary)
+        // Note: du subprocess does NOT inherit TCC/FDA permissions, so we must use FileManager
         print("[\(timestamp())] Starting /Users analysis...")
         let usersDir = "/Users"
         if fileManager.fileExists(atPath: usersDir) {
-            print("[\(timestamp())] Getting /Users total size with du (fast)...")
+            print("[\(timestamp())] Getting /Users folder sizes with FileManager (FDA-aware)...")
             
-            // Get total /Users size with fast du command
-            var totalUsersSize: Int64 = 0
-            if let size = await fastDirectorySizeWithDu(path: usersDir) {
-                totalUsersSize = size
-                print("[\(timestamp())] /Users total: \(formatBytes(size))")
-            }
-            
-            // Get individual user folder sizes using fast du command
+            // Get individual user folder sizes using FileManager (inherits FDA)
             var userBreakdown: [[String: Any]] = []
+            var totalUsersSize: Int64 = 0
+            
             do {
                 let userFolders = try fileManager.contentsOfDirectory(atPath: usersDir)
                 print("[\(timestamp())] Found \(userFolders.count) items in /Users")
                 for userFolder in userFolders {
-                    // Skip hidden folders and system users
+                    // Skip hidden folders
                     if userFolder.hasPrefix(".") { continue }
-                    if userFolder == "Shared" { continue }  // Skip Shared folder for detailed breakdown
                     
                     let userPath = (usersDir as NSString).appendingPathComponent(userFolder)
                     var isDir: ObjCBool = false
                     if fileManager.fileExists(atPath: userPath, isDirectory: &isDir), isDir.boolValue {
-                        print("[\(timestamp())] Getting size for: \(userFolder) (using du)")
-                        // Use fast du command instead of deep enumeration
-                        if let size = await fastDirectorySizeWithDu(path: userPath) {
-                            var userInfo: [String: Any] = [
-                                "name": userFolder,
-                                "path": userPath,
-                                "size": size,
-                                "depth": 2,
-                                "category": "Users",
-                                "driveRoot": "/",
-                                "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity)
-                            ]
-                            
-                            // Collect user home folder breakdown (Desktop, Documents, Downloads, Pictures, etc.)
+                        print("[\(timestamp())] Getting size for: \(userFolder) (using FileManager with FDA)")
+                        
+                        // Use FileManager-based size with timeout (inherits FDA permissions)
+                        let size = await directorySizeWithTimeout(path: userPath, timeoutSeconds: 60)
+                        totalUsersSize += size
+                        
+                        var userInfo: [String: Any] = [
+                            "name": userFolder,
+                            "path": userPath,
+                            "size": size,
+                            "depth": 2,
+                            "category": "Users",
+                            "driveRoot": "/",
+                            "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity)
+                        ]
+                        
+                        // Collect user home folder breakdown (Desktop, Documents, Downloads, Pictures, etc.)
+                        if userFolder != "Shared" && userFolder != ".localized" {
                             print("[\(timestamp())]   Collecting user folder breakdown for: \(userFolder)")
-                            let userFolderBreakdown = await collectUserFolderBreakdown(userPath: userPath, totalCapacity: totalCapacity)
+                            let userFolderBreakdown = await collectUserFolderBreakdownFDA(userPath: userPath, totalCapacity: totalCapacity)
                             if !userFolderBreakdown.isEmpty {
                                 userInfo["subdirectories"] = userFolderBreakdown
                                 print("[\(timestamp())]   Found \(userFolderBreakdown.count) user subdirectories for: \(userFolder)")
                             }
-                            
-                            userBreakdown.append(userInfo)
-                            print("[\(timestamp())] Completed: \(userFolder) - \(formatBytes(size))")
                         }
+                        
+                        userBreakdown.append(userInfo)
+                        print("[\(timestamp())] Completed: \(userFolder) - \(formatBytes(size))")
                     }
                 }
             } catch {
@@ -1589,24 +1588,7 @@ private func collectBatteryInfo() async throws -> [String: Any] {
                 print("[\(timestamp())] Error listing user folders: \(error)")
             }
             
-            // Also get Shared folder if it exists (without detailed breakdown)
-            let sharedPath = (usersDir as NSString).appendingPathComponent("Shared")
-            if fileManager.fileExists(atPath: sharedPath) {
-                if let size = await fastDirectorySizeWithDu(path: sharedPath) {
-                    let sharedInfo: [String: Any] = [
-                        "name": "Shared",
-                        "path": sharedPath,
-                        "size": size,
-                        "depth": 2,
-                        "category": "Users",
-                        "driveRoot": "/",
-                        "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity)
-                    ]
-                    userBreakdown.append(sharedInfo)
-                }
-            }
-            
-            // Build /Users analysis without slow FileManager enumeration
+            // Build /Users analysis
             var usersAnalysis: [String: Any] = [
                 "name": "Users",
                 "path": usersDir,
@@ -1731,6 +1713,123 @@ private func collectBatteryInfo() async throws -> [String: Any] {
         }
         
         return totalSize
+    }
+    
+    /// Directory size with timeout using FileManager (inherits FDA from signed binary)
+    /// Unlike du subprocess, FileManager operations inherit TCC/FDA permissions from the parent process
+    private func directorySizeWithTimeout(path: String, timeoutSeconds: Int = 60) async -> Int64 {
+        // Run the enumeration in a separate task with timeout
+        let sizeTask = Task { () -> Int64 in
+            return directorySize(at: path)
+        }
+        
+        // Wait with timeout
+        let deadline = Date().addingTimeInterval(Double(timeoutSeconds))
+        while !sizeTask.isCancelled && Date() < deadline {
+            // Check if task completed
+            if let _ = try? await Task.sleep(nanoseconds: 500_000_000) {  // Check every 500ms
+                // Try to get the result with a very short timeout
+                // (Task.value is blocking, so we use a polling approach)
+                let result = await withTaskGroup(of: Int64?.self) { group in
+                    group.addTask {
+                        return await sizeTask.value
+                    }
+                    group.addTask {
+                        try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms
+                        return nil
+                    }
+                    
+                    // Return first completed result
+                    for await result in group {
+                        if result != nil {
+                            group.cancelAll()
+                            return result
+                        }
+                    }
+                    return nil
+                }
+                
+                if let size = result {
+                    return size
+                }
+            }
+        }
+        
+        // Timeout - cancel and return 0
+        sizeTask.cancel()
+        print("[\(timestamp())] FileManager timeout for: \(path)")
+        return 0
+    }
+    
+    /// Collect user folder breakdown using FileManager (inherits FDA permissions)
+    /// This is the FDA-aware version that works with TCC-protected user directories
+    private func collectUserFolderBreakdownFDA(userPath: String, totalCapacity: Int64) async -> [[String: Any]] {
+        let fileManager = FileManager.default
+        var breakdown: [[String: Any]] = []
+        
+        // Standard macOS user directories to analyze
+        let standardFolders = [
+            "Desktop",
+            "Documents",
+            "Downloads",
+            "Movies",
+            "Music",
+            "Pictures",
+            "Library",
+            "Applications",
+            "Developer",
+            "Public"
+        ]
+        
+        for folderName in standardFolders {
+            let folderPath = (userPath as NSString).appendingPathComponent(folderName)
+            
+            // Check if folder exists
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: folderPath, isDirectory: &isDir), isDir.boolValue {
+                // Use FileManager with timeout (inherits FDA)
+                let size = await directorySizeWithTimeout(path: folderPath, timeoutSeconds: 30)
+                if size > 0 {
+                    let folderInfo: [String: Any] = [
+                        "name": folderName,
+                        "path": folderPath,
+                        "size": size,
+                        "depth": 3,
+                        "category": determineFolderCategory(folderName: folderName),
+                        "driveRoot": "/",
+                        "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity),
+                        "formattedSize": formatBytes(size)
+                    ]
+                    breakdown.append(folderInfo)
+                }
+            }
+        }
+        
+        // Also check for significant hidden folders
+        let hiddenFolders = [".Trash", ".cache"]
+        for folderName in hiddenFolders {
+            let folderPath = (userPath as NSString).appendingPathComponent(folderName)
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: folderPath, isDirectory: &isDir), isDir.boolValue {
+                let size = await directorySizeWithTimeout(path: folderPath, timeoutSeconds: 15)
+                if size > 100_000_000 {  // Only include if > 100MB
+                    let displayName = folderName == ".Trash" ? "Trash" : folderName.replacingOccurrences(of: ".", with: "")
+                    let folderInfo: [String: Any] = [
+                        "name": displayName,
+                        "path": folderPath,
+                        "size": size,
+                        "depth": 3,
+                        "category": "Cache",
+                        "driveRoot": "/",
+                        "percentageOfDrive": calculatePercentageOfDrive(size: size, capacity: totalCapacity),
+                        "formattedSize": formatBytes(size)
+                    ]
+                    breakdown.append(folderInfo)
+                }
+            }
+        }
+        
+        return breakdown
     }
     
     /// Fast directory size calculation using du command (10-100x faster than FileManager for large directories)
