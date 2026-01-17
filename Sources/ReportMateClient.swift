@@ -37,6 +37,9 @@ struct ReportMateClient: AsyncParsableCommand {
     @Option(name: .long, help: "Override API URL")
     var apiUrl: String?
     
+    @Option(name: .long, help: "Storage analysis mode: 'quick' (drive totals only) or 'deep' (full directory analysis)")
+    var storageMode: String?
+    
     @Flag(name: .long, help: "Test configuration and exit")
     var test: Bool = false
     
@@ -81,6 +84,9 @@ struct ReportMateClient: AsyncParsableCommand {
             }
             if let deviceId = deviceId {
                 configManager.setOverride(key: "DeviceId", value: deviceId)
+            }
+            if let storageMode = storageMode {
+                configManager.setOverride(key: "StorageMode", value: storageMode)
             }
         } catch {
             logger.error("Failed to initialize configuration: \(error)")
