@@ -5,7 +5,7 @@ import Foundation
 /// This file is auto-generated at build time - do not edit manually
 public enum AppVersion {
     /// The current application version (generated at build time)
-    public static let current: String = "2026.01.16.1352"
+    public static let current: String = "YYYY.MM.DD.HHMM"
     
     /// Short version for display
     public static var short: String {
