@@ -99,6 +99,11 @@ public struct MunkiItem: Codable, Sendable {
     public var lastUpdate: String = ""
     public var itemSize: String?
     
+    // Error, warning, and pending reason messages (matches Windows CimianItem pattern)
+    public var lastError: String = ""          // Last error message for this item
+    public var lastWarning: String = ""        // Last warning message for this item
+    public var pendingReason: String = ""      // Why the package is pending (e.g., "Update available: 1.0 → 2.0")
+    
     public init() {}
     
     public init(name: String, displayName: String? = nil, version: String = "", installedVersion: String = "", installed: Bool = false) {
@@ -109,6 +114,15 @@ public struct MunkiItem: Codable, Sendable {
         self.installedVersion = installedVersion
         self.status = installed ? "Installed" : "Pending"
         self.type = "munki"
+        
+        // Derive pending reason for new items
+        if !installed && !version.isEmpty {
+            if installedVersion.isEmpty || installedVersion == "Unknown" {
+                self.pendingReason = "Not yet installed"
+            } else if version != installedVersion {
+                self.pendingReason = "Update available: \(installedVersion) → \(version)"
+            }
+        }
     }
 }
 
@@ -158,6 +172,7 @@ public struct CimianItem: Codable, Sendable {
     public var lastSeenInSession: String?
     public var lastError: String = ""
     public var lastWarning: String = ""
+    public var pendingReason: String = ""      // Why the package is pending (e.g., "Update available: 1.0 → 2.0")
     public var installCount: Int = 0
     public var updateCount: Int = 0
     public var failureCount: Int = 0
