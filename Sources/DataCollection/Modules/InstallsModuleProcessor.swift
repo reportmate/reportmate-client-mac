@@ -102,7 +102,10 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                             "status": item.status,
                             "type": item.type,
                             "installedSize": item.installedSize,
-                            "endTime": item.endTime
+                            "endTime": item.endTime,
+                            "lastError": item.lastError,
+                            "lastWarning": item.lastWarning,
+                            "pendingReason": item.pendingReason
                         ]
                     }
                 ]
@@ -594,6 +597,11 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     item.status = "Pending"
                 }
                 
+                // Derive pendingReason for pending items
+                if item.status == "Pending" {
+                    item.pendingReason = derivePendingReason(item: item)
+                }
+                
                 items.append(item)
             }
         }
@@ -686,5 +694,32 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 "source": update["source"] as? String ?? "unknown"
             ]
         }
+    }
+    
+    // MARK: - Derive Pending Reason
+    
+    /// Derives a human-readable pending reason for a MunkiItem based on its state
+    /// Mirrors the Windows CimianItem.DerivePendingReason() logic
+    private func derivePendingReason(item: MunkiItem) -> String {
+        let version = item.version.isEmpty ? "Unknown" : item.version
+        let installedVersion = item.installedVersion.isEmpty ? "Unknown" : item.installedVersion
+        
+        // Not yet installed (no installed version)
+        if installedVersion == "Unknown" || installedVersion.isEmpty {
+            return "Not yet installed"
+        }
+        
+        // Version mismatch = update available
+        if version != installedVersion && version != "Unknown" {
+            return "Update available: \(installedVersion) → \(version)"
+        }
+        
+        // Versions match but still pending (possible re-install or metadata sync)
+        if version == installedVersion {
+            return "Reinstallation pending"
+        }
+        
+        // Generic pending
+        return "Installation pending"
     }
 }
