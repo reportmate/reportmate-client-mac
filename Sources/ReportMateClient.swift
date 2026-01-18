@@ -388,10 +388,29 @@ struct ReportMateClient: AsyncParsableCommand {
             enabledModules: modulesToRun
         )
         
+        // Generate event message: "Hardware, System, Network data reported"
+        // Capitalize module names and join with comma
+        let nonInstallsModules = modulesToRun.filter { $0 != "installs" }
+        let moduleList = nonInstallsModules.map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: ", ")
+        let eventMessage = moduleList.isEmpty ? "Data collection complete" : "\(moduleList) data reported"
+        
+        // Create summary event matching Windows format
+        let summaryEvent = ReportMateEvent(
+            moduleId: "collection",
+            eventType: "info",
+            message: eventMessage,
+            timestamp: Date(),
+            details: [
+                "collectionType": "Full",
+                "moduleCount": String(nonInstallsModules.count),
+                "modules": nonInstallsModules.joined(separator: ", ")
+            ]
+        )
+        
         // Create UnifiedDevicePayload matching Windows format for API
         let unifiedPayload = UnifiedDevicePayload(
             metadata: metadata,
-            events: [],
+            events: [summaryEvent],
             modules: collectedData
         )
         
