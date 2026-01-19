@@ -254,25 +254,78 @@ public struct UnifiedDevicePayload: Codable, Sendable {
 }
 
 /// ReportMate event structure for the events array
+/// Updated to support flexible details with arrays for error/warning messages
 public struct ReportMateEvent: Codable, Sendable {
     public let moduleId: String
     public let eventType: String
     public let message: String
     public let timestamp: Date
-    public let details: [String: String]
+    public let details: [String: EventDetailValue]
     
     public init(
         moduleId: String,
         eventType: String,
         message: String,
         timestamp: Date = Date(),
-        details: [String: String] = [:]
+        details: [String: EventDetailValue] = [:]
     ) {
         self.moduleId = moduleId
         self.eventType = eventType
         self.message = message
         self.timestamp = timestamp
         self.details = details
+    }
+    
+    /// Convenience initializer for simple string-only details (backwards compatibility)
+    public init(
+        moduleId: String,
+        eventType: String,
+        message: String,
+        timestamp: Date = Date(),
+        stringDetails: [String: String]
+    ) {
+        self.moduleId = moduleId
+        self.eventType = eventType
+        self.message = message
+        self.timestamp = timestamp
+        self.details = stringDetails.mapValues { EventDetailValue.string($0) }
+    }
+}
+
+/// Flexible event detail value that can be string, int, bool, or array of strings
+public enum EventDetailValue: Codable, Sendable {
+    case string(String)
+    case int(Int)
+    case bool(Bool)
+    case stringArray([String])
+    case dictArray([[String: String]])
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode(Int.self) {
+            self = .int(value)
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode([String].self) {
+            self = .stringArray(value)
+        } else if let value = try? container.decode([[String: String]].self) {
+            self = .dictArray(value)
+        } else {
+            self = .string("")
+        }
+    }
+    
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let value): try container.encode(value)
+        case .int(let value): try container.encode(value)
+        case .bool(let value): try container.encode(value)
+        case .stringArray(let value): try container.encode(value)
+        case .dictArray(let value): try container.encode(value)
+        }
     }
 }
 

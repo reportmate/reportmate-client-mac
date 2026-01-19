@@ -393,23 +393,36 @@ struct ReportMateClient: AsyncParsableCommand {
         let moduleList = nonInstallsModules.map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: ", ")
         let eventMessage = moduleList.isEmpty ? "Data collection complete" : "\(moduleList) data reported"
         
-        // Create summary event matching Windows format
-        let summaryEvent = ReportMateEvent(
-            moduleId: "collection",
-            eventType: "info",
-            message: eventMessage,
-            timestamp: Date(),
-            details: [
-                "collectionType": "Full",
-                "moduleCount": String(nonInstallsModules.count),
-                "modules": nonInstallsModules.joined(separator: ", ")
-            ]
-        )
+        // Build events array - start with Munki events if installs module is present
+        var events: [ReportMateEvent] = []
+        
+        // Generate Munki/Installs events with actual error/warning messages
+        if modulesToRun.contains("installs"), let installsData = collectedData["installs"] as? [String: Any] {
+            let munkiEvents = generateMunkiEvents(from: installsData)
+            events.append(contentsOf: munkiEvents)
+            logger.info("Generated \(munkiEvents.count) Munki event(s)")
+        }
+        
+        // Add summary event for non-installs modules if any were collected
+        if !nonInstallsModules.isEmpty {
+            let summaryEvent = ReportMateEvent(
+                moduleId: "collection",
+                eventType: "info",
+                message: eventMessage,
+                timestamp: Date(),
+                stringDetails: [
+                    "collectionType": "Full",
+                    "moduleCount": String(nonInstallsModules.count),
+                    "modules": nonInstallsModules.joined(separator: ", ")
+                ]
+            )
+            events.append(summaryEvent)
+        }
         
         // Create UnifiedDevicePayload matching Windows format for API
         let unifiedPayload = UnifiedDevicePayload(
             metadata: metadata,
-            events: [summaryEvent],
+            events: events,
             modules: collectedData
         )
         
@@ -506,6 +519,190 @@ struct ReportMateClient: AsyncParsableCommand {
             print("[\(timestamp)] ERROR Transmission error: \(error.localizedDescription)")
             logger.error("Transmission error: \(error)")
         }
+    }
+    
+    // MARK: - Munki Event Generation
+    
+    /// Generates ReportMate events from Munki data with actual error/warning messages
+    /// Mirrors the Windows InstallsModuleProcessor.GenerateEventsFromDataAsync pattern
+    private func generateMunkiEvents(from installsData: [String: Any]) -> [ReportMateEvent] {
+        var events: [ReportMateEvent] = []
+        
+        guard let munkiData = installsData["munki"] as? [String: Any],
+              munkiData["isInstalled"] as? Bool == true else {
+            // Munki not installed - no events to generate
+            return events
+        }
+        
+        // Parse errors and warnings from semicolon-separated strings
+        let errorsString = munkiData["errors"] as? String ?? ""
+        let warningsString = munkiData["warnings"] as? String ?? ""
+        let problemInstalls = munkiData["problemInstalls"] as? String ?? ""
+        
+        // Parse into arrays - Munki stores these as semicolon-separated strings
+        let errorMessages = parseMessagesFromString(errorsString)
+        let warningMessages = parseMessagesFromString(warningsString)
+        let problemItems = parseMessagesFromString(problemInstalls)
+        
+        // Get item counts for context
+        let items = munkiData["items"] as? [[String: Any]] ?? []
+        let installedCount = items.filter { ($0["status"] as? String) == "Installed" }.count
+        let pendingCount = items.filter { ($0["status"] as? String) == "Pending" }.count
+        let failedItems = items.filter { !($0["lastError"] as? String ?? "").isEmpty }
+        let warningItems = items.filter { !($0["lastWarning"] as? String ?? "").isEmpty }
+        
+        // Build details dictionary
+        var details: [String: EventDetailValue] = [
+            "module_id": .string("installs"),
+            "total_managed_items": .int(items.count),
+            "installed_count": .int(installedCount),
+            "pending_count": .int(pendingCount)
+        ]
+        
+        // Determine event type and message based on priority
+        // PRIORITY 1: ERRORS (failed installs or Munki errors)
+        if !errorMessages.isEmpty || !failedItems.isEmpty {
+            let failedCount = max(errorMessages.count, failedItems.count)
+            var messageParts: [String] = []
+            
+            // Primary message: error count with first error text
+            if let firstError = errorMessages.first {
+                // Show the actual error message for single errors
+                if errorMessages.count == 1 {
+                    messageParts.append("Munki error: \(firstError)")
+                } else {
+                    messageParts.append("\(failedCount) Munki error\(failedCount == 1 ? "" : "s")")
+                }
+            } else if !failedItems.isEmpty {
+                messageParts.append("\(failedItems.count) failed install\(failedItems.count == 1 ? "" : "s")")
+            }
+            
+            // Add warning count if any
+            if !warningMessages.isEmpty || !warningItems.isEmpty {
+                let warnCount = max(warningMessages.count, warningItems.count)
+                messageParts.append("\(warnCount) warning\(warnCount == 1 ? "" : "s")")
+            }
+            
+            // Add installed count if any actual activity
+            if installedCount > 0 {
+                messageParts.append("\(installedCount) installed")
+            }
+            
+            // Include error details in payload for expansion
+            details["error_count"] = .int(errorMessages.count)
+            details["error_messages"] = .stringArray(errorMessages)
+            details["module_status"] = .string("error")
+            
+            if !warningMessages.isEmpty {
+                details["warning_count"] = .int(warningMessages.count)
+                details["warning_messages"] = .stringArray(warningMessages)
+            }
+            
+            if !problemItems.isEmpty {
+                details["problem_installs"] = .stringArray(problemItems)
+            }
+            
+            // Include failed item details
+            if !failedItems.isEmpty {
+                let failedItemDetails = failedItems.prefix(10).map { item -> [String: String] in
+                    [
+                        "name": item["name"] as? String ?? "Unknown",
+                        "displayName": item["displayName"] as? String ?? item["name"] as? String ?? "Unknown",
+                        "error": item["lastError"] as? String ?? ""
+                    ]
+                }
+                details["failed_items"] = .dictArray(failedItemDetails)
+            }
+            
+            let message = messageParts.joined(separator: ", ")
+            events.append(ReportMateEvent(
+                moduleId: "installs",
+                eventType: "error",
+                message: message,
+                timestamp: Date(),
+                details: details
+            ))
+        }
+        // PRIORITY 2: WARNINGS (Munki warnings without errors)
+        else if !warningMessages.isEmpty || !warningItems.isEmpty {
+            let warnCount = max(warningMessages.count, warningItems.count)
+            var messageParts: [String] = []
+            
+            // Show actual warning message for single warnings
+            if let firstWarning = warningMessages.first, warningMessages.count == 1 {
+                messageParts.append("Munki warning: \(firstWarning)")
+            } else {
+                messageParts.append("\(warnCount) Munki warning\(warnCount == 1 ? "" : "s")")
+            }
+            
+            // Add installed count if any
+            if installedCount > 0 {
+                messageParts.append("\(installedCount) installed")
+            }
+            
+            details["warning_count"] = .int(warningMessages.count)
+            details["warning_messages"] = .stringArray(warningMessages)
+            details["module_status"] = .string("warning")
+            
+            // Include warning item details
+            if !warningItems.isEmpty {
+                let warningItemDetails = warningItems.prefix(10).map { item -> [String: String] in
+                    [
+                        "name": item["name"] as? String ?? "Unknown",
+                        "displayName": item["displayName"] as? String ?? item["name"] as? String ?? "Unknown",
+                        "warning": item["lastWarning"] as? String ?? ""
+                    ]
+                }
+                details["warning_items"] = .dictArray(warningItemDetails)
+            }
+            
+            let message = messageParts.joined(separator: ", ")
+            events.append(ReportMateEvent(
+                moduleId: "installs",
+                eventType: "warning",
+                message: message,
+                timestamp: Date(),
+                details: details
+            ))
+        }
+        // PRIORITY 3: SUCCESS (items installed, no errors or warnings)
+        else if installedCount > 0 || pendingCount > 0 {
+            var messageParts: [String] = []
+            
+            if installedCount > 0 {
+                messageParts.append("\(installedCount) package\(installedCount == 1 ? "" : "s") installed")
+            }
+            
+            if pendingCount > 0 {
+                messageParts.append("\(pendingCount) pending")
+            }
+            
+            details["module_status"] = .string("success")
+            
+            let message = messageParts.joined(separator: ", ")
+            events.append(ReportMateEvent(
+                moduleId: "installs",
+                eventType: "success",
+                message: message,
+                timestamp: Date(),
+                details: details
+            ))
+        }
+        // NO ITEMS: Only generate event if Munki was run but nothing to report
+        else {
+            // Don't generate events for empty managed state - it's normal
+        }
+        
+        return events
+    }
+    
+    /// Parse semicolon-separated message strings into array, filtering empty entries
+    private func parseMessagesFromString(_ input: String) -> [String] {
+        guard !input.isEmpty else { return [] }
+        return input
+            .split(separator: ";")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 }
 
