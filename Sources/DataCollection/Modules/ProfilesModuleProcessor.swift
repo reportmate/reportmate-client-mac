@@ -1,11 +1,17 @@
 import Foundation
 
+/// @deprecated This module has been deprecated.
+/// Profiles functionality has been integrated into the Management module.
+/// Configuration profiles are now collected by ManagementModuleProcessor.collectInstalledProfiles()
+/// This file is kept for reference but is no longer used in production.
+///
 /// Profiles module processor - uses osquery first with bash fallback
 /// Based on MunkiReport patterns for profile collection
 /// Reference: https://github.com/munkireport/profile
 /// No Python - uses osquery for: managed_policies
 /// Bash fallback for: profiles command
 /// NOTE: Login Items, System Extensions, and Kernel Extensions have been moved to SystemModuleProcessor
+@available(*, deprecated, message: "Use ManagementModuleProcessor.collectInstalledProfiles() instead")
 public class ProfilesModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     public init(configuration: ReportMateConfiguration) {
