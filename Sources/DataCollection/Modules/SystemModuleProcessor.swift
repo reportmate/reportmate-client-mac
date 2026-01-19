@@ -851,6 +851,24 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 env[key] = strValue
             }
         }
+        
+        // Add HOSTS_FILE separately
+        let hostsScript = """
+            if [ -r "/etc/hosts" ]; then
+                cat /etc/hosts 2>/dev/null
+            fi
+        """
+        
+        do {
+            let hostsContent = try await BashService.execute(hostsScript)
+            if !hostsContent.isEmpty {
+                env["HOSTS_FILE"] = hostsContent
+            }
+        } catch {
+            // If hosts file can't be read, just skip it
+            print("[DEBUG] Could not read hosts file: \(error)")
+        }
+        
         return env
     }
     
