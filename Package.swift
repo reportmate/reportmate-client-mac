@@ -26,7 +26,7 @@ let package = Package(
         // Async HTTP Client
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.19.0"),
         // SQLite.swift for app usage persistence
-        .package(url: "https://github.com/stephencelis/SQLite.swift.git", from: "0.15.3"),
+        .package(url: "https://github.com/stephencelis/SQLite.swift.git", from: "0.15.4"),
     ],
     targets: [
         .executableTarget(
