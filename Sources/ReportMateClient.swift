@@ -246,7 +246,6 @@ struct ReportMateClient: AsyncParsableCommand {
             // Displays and Printers are now part of the unified Peripherals module
             return PeripheralsModuleProcessor(configuration: config)
         case "installs": return InstallsModuleProcessor(configuration: config)
-        case "profiles": return ProfilesModuleProcessor(configuration: config)
         default: return nil
         }
     }
