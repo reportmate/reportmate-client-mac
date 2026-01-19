@@ -20,8 +20,7 @@ public class DataCollectionService {
             "security": SecurityModuleProcessor(configuration: configuration),
             "applications": ApplicationsModuleProcessor(configuration: configuration, applicationUsageService: applicationUsageService),
             "management": ManagementModuleProcessor(configuration: configuration),
-            "inventory": InventoryModuleProcessor(configuration: configuration),
-            "profiles": ProfilesModuleProcessor(configuration: configuration)
+            "inventory": InventoryModuleProcessor(configuration: configuration)
         ]
     }
     
