@@ -1,6 +1,11 @@
 import Foundation
 
+/// @deprecated This module has been deprecated.
+/// Profiles functionality has been integrated into the Management module.
+/// See ManagementModuleProcessor for profile collection.
+///
 /// Profiles module data model for macOS - encompasses configuration profiles and system policies
+@available(*, deprecated, message: "Profiles now part of Management module")
 public struct ProfilesData: ModuleDataModel, Sendable {
     public var moduleId: String { "profiles" }
     public let collectionTimestamp: Date

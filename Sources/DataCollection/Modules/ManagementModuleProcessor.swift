@@ -27,6 +27,9 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         let ids = try await deviceIds
         let remote = try await remoteManagement
         let profiles = try await installedProfiles
+        
+        // Collect managed policies separately (osquery managed_policies table)
+        let policies = try await collectManagedPolicies()
 
         // Use snake_case for top-level keys to match osquery conventions
         let managementData: [String: Any] = [
@@ -35,7 +38,8 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             "ade_configuration": ade,
             "device_identifiers": ids,
             "remote_management": remote,
-            "installed_profiles": profiles
+            "installed_profiles": profiles,
+            "managed_policies": policies
         ]
 
         return BaseModuleData(moduleId: moduleId, data: managementData)
@@ -399,9 +403,137 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         )
     }
     
-    // MARK: - Installed Profiles (Native Swift)
+    // MARK: - Installed Profiles (Full details via /usr/bin/profiles -P)
     
     private func collectInstalledProfiles() async throws -> [[String: Any]] {
+        // Use /usr/bin/profiles -P -o <file> like munkireport does - much faster than system_profiler
+        let tempPath = "/tmp/reportmate_profile_temp.plist"
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/profiles")
+        process.arguments = ["-P", "-o", tempPath]
+        
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        
+        try process.run()
+        process.waitUntilExit()
+        
+        // Read the plist output file
+        guard let plistData = FileManager.default.contents(atPath: tempPath),
+              let plist = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any] else {
+            // Clean up temp file
+            try? FileManager.default.removeItem(atPath: tempPath)
+            // Fallback to basic profiles list
+            return try await collectInstalledProfilesBasic()
+        }
+        
+        // Clean up temp file
+        try? FileManager.default.removeItem(atPath: tempPath)
+        
+        var profiles: [[String: Any]] = []
+        
+        // Process all the profile data - plist is keyed by user (_computerlevel for system profiles)
+        for (profileUser, userProfiles) in plist {
+            guard let profileList = userProfiles as? [[String: Any]] else { continue }
+            
+            let userScope = profileUser == "_computerlevel" ? "System Level" : profileUser
+            
+            for innerProfile in profileList {
+                var profile: [String: Any] = [:]
+                
+                // Profile-level metadata
+                profile["uuid"] = innerProfile["ProfileUUID"] as? String ?? ""
+                profile["name"] = innerProfile["ProfileDisplayName"] as? String ?? ""
+                profile["identifier"] = innerProfile["ProfileIdentifier"] as? String ?? ""
+                profile["description"] = innerProfile["ProfileDescription"] as? String
+                profile["organization"] = innerProfile["ProfileOrganization"] as? String
+                profile["verification_state"] = innerProfile["ProfileVerificationState"] as? String ?? "not verified"
+                profile["user"] = userScope
+                profile["method"] = "Native"
+                
+                // Handle removal policy
+                if let removalDisallowed = innerProfile["ProfileRemovalDisallowed"] {
+                    profile["removal_disallowed"] = removalDisallowed as? Bool ?? false
+                } else if let uninstallPolicy = innerProfile["ProfileUninstallPolicy"] as? String {
+                    profile["removal_disallowed"] = uninstallPolicy.lowercased() == "disallowed"
+                } else {
+                    profile["removal_disallowed"] = false
+                }
+                
+                // Handle install date
+                if let installDate = innerProfile["ProfileInstallDate"] {
+                    if let dateString = installDate as? String {
+                        profile["install_date"] = dateString
+                    } else if let date = installDate as? Date {
+                        let formatter = ISO8601DateFormatter()
+                        profile["install_date"] = formatter.string(from: date)
+                    }
+                }
+                
+                // Process profile payload items
+                var payloads: [[String: Any]] = []
+                if let profileItems = innerProfile["ProfileItems"] as? [[String: Any]] {
+                    for payload in profileItems {
+                        var payloadData: [String: Any] = [:]
+                        
+                        payloadData["type"] = payload["PayloadType"] as? String ?? ""
+                        payloadData["display_name"] = payload["PayloadDisplayName"] as? String
+                        payloadData["identifier"] = payload["PayloadIdentifier"] as? String ?? ""
+                        payloadData["uuid"] = payload["PayloadUUID"] as? String ?? ""
+                        payloadData["version"] = payload["PayloadVersion"] as? Int ?? 1
+                        
+                        // Get payload content (the actual settings)
+                        if let payloadContent = payload["PayloadContent"] {
+                            // Convert to JSON-safe format (handles Date objects, etc.)
+                            let jsonSafeContent = makeJSONSafe(payloadContent)
+                            
+                            // Try to serialize as JSON for display
+                            if let contentData = try? JSONSerialization.data(withJSONObject: jsonSafeContent, options: [.sortedKeys]),
+                               let contentString = String(data: contentData, encoding: .utf8) {
+                                payloadData["settings_json"] = contentString
+                            }
+                            // Also store the safe content
+                            if let contentDict = jsonSafeContent as? [String: Any] {
+                                payloadData["settings"] = contentDict
+                            }
+                        }
+                        
+                        payloads.append(payloadData)
+                    }
+                }
+                profile["payloads"] = payloads
+                profile["payload_count"] = payloads.count
+                
+                profiles.append(profile)
+            }
+        }
+        
+        return profiles
+    }
+    
+    /// Convert any non-JSON-serializable types (Date, Data, etc.) to strings
+    private func makeJSONSafe(_ value: Any) -> Any {
+        if let dict = value as? [String: Any] {
+            return dict.mapValues { makeJSONSafe($0) }
+        } else if let array = value as? [Any] {
+            return array.map { makeJSONSafe($0) }
+        } else if let date = value as? Date {
+            let formatter = ISO8601DateFormatter()
+            return formatter.string(from: date)
+        } else if let data = value as? Data {
+            return data.base64EncodedString()
+        } else if JSONSerialization.isValidJSONObject([value]) {
+            return value
+        } else {
+            // Fallback: convert to string representation
+            return String(describing: value)
+        }
+    }
+    
+    /// Fallback method using profiles list command (basic info only)
+    private func collectInstalledProfilesBasic() async throws -> [[String: Any]] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/profiles")
         process.arguments = ["list"]
@@ -419,18 +551,113 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         }
         
         var profiles: [[String: Any]] = []
+        var currentProfile: [String: Any]? = nil
         
-        // Parse output format: "_computerlevel[1] attribute: profileIdentifier: ca.ecuad.macadmin.OfficePrefs"
+        // Parse output format with more detail extraction
         for line in output.components(separatedBy: .newlines) {
-            if let range = line.range(of: "profileIdentifier: ") {
-                let identifier = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
-                if !identifier.isEmpty {
-                    profiles.append(["identifier": identifier])
+            if line.contains("attribute: profileIdentifier:") {
+                // Save previous profile if exists
+                if let profile = currentProfile {
+                    profiles.append(profile)
                 }
+                // Start new profile
+                let identifier = extractValue(from: line, after: "profileIdentifier:")
+                currentProfile = ["identifier": identifier]
+            } else if line.contains("attribute: name:"), currentProfile != nil {
+                currentProfile?["name"] = extractValue(from: line, after: "name:")
+            } else if line.contains("attribute: organization:"), currentProfile != nil {
+                currentProfile?["organization"] = extractValue(from: line, after: "organization:")
+            } else if line.contains("attribute: installationDate:"), currentProfile != nil {
+                currentProfile?["install_date"] = extractValue(from: line, after: "installationDate:")
+            } else if line.contains("attribute: removalDisallowed:"), currentProfile != nil {
+                let value = extractValue(from: line, after: "removalDisallowed:")
+                currentProfile?["removal_disallowed"] = value.uppercased() == "TRUE"
+            } else if line.contains("attribute: installedByMDM:"), currentProfile != nil {
+                let value = extractValue(from: line, after: "installedByMDM:")
+                currentProfile?["install_source"] = value.uppercased() == "TRUE" ? "MDM" : "Manual"
             }
         }
         
+        // Add last profile
+        if let profile = currentProfile {
+            profiles.append(profile)
+        }
+        
         return profiles
+    }
+    
+    /// Helper to extract value after a key in profiles output
+    private func extractValue(from line: String, after key: String) -> String {
+        if let range = line.range(of: key) {
+            return String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+        }
+        return ""
+    }
+    
+    // MARK: - Managed Policies (osquery managed_policies table)
+    
+    /// Collect managed policies from osquery - provides key-value pairs for each managed preference domain
+    private func collectManagedPolicies() async throws -> [[String: Any]] {
+        let osqueryScript = """
+            SELECT domain, name, value, uuid
+            FROM managed_policies
+            ORDER BY domain, name;
+        """
+        
+        // Execute osquery and get raw results
+        let result = try await executeOsqueryRaw(osqueryScript)
+        
+        // Group policies by domain for better organization
+        var policiesByDomain: [String: [[String: Any]]] = [:]
+        
+        for policy in result {
+            guard let domain = policy["domain"] as? String else { continue }
+            
+            let policyEntry: [String: Any] = [
+                "name": policy["name"] as? String ?? "",
+                "value": policy["value"] as? String ?? "",
+                "uuid": policy["uuid"] as? String ?? ""
+            ]
+            
+            if policiesByDomain[domain] == nil {
+                policiesByDomain[domain] = []
+            }
+            policiesByDomain[domain]?.append(policyEntry)
+        }
+        
+        // Convert to array format with domain as a property
+        var policies: [[String: Any]] = []
+        for (domain, settings) in policiesByDomain.sorted(by: { $0.key < $1.key }) {
+            policies.append([
+                "domain": domain,
+                "settings": settings,
+                "setting_count": settings.count
+            ])
+        }
+        
+        return policies
+    }
+    
+    /// Execute osquery and return raw array of dictionaries
+    private func executeOsqueryRaw(_ query: String) async throws -> [[String: Any]] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/local/bin/osqueryi")
+        process.arguments = ["--json", query]
+        
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        
+        try process.run()
+        process.waitUntilExit()
+        
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        
+        guard let result = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return []
+        }
+        
+        return result
     }
     
     // MARK: - Helper to execute bash commands
