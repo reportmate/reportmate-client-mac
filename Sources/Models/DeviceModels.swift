@@ -228,6 +228,7 @@ public struct UnifiedDevicePayload: Codable, Sendable {
     public let printers: ModuleDataValue?
     public let applications: ModuleDataValue?
     public let peripherals: ModuleDataValue?
+    public let identity: ModuleDataValue?
     
     public init(
         metadata: EventMetadata,
@@ -250,6 +251,7 @@ public struct UnifiedDevicePayload: Codable, Sendable {
         self.printers = modules["printers"].map { ModuleDataValue($0) }
         self.applications = modules["applications"].map { ModuleDataValue($0) }
         self.peripherals = modules["peripherals"].map { ModuleDataValue($0) }
+        self.identity = modules["identity"].map { ModuleDataValue($0) }
     }
 }
 

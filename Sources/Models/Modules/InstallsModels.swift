@@ -98,6 +98,8 @@ public struct MunkiItem: Codable, Sendable {
     public var type: String = "munki"
     public var lastUpdate: String = ""
     public var itemSize: String?
+    public var category: String = ""           // Category from pkgsinfo (e.g., "Management", "Drivers", "Utilities")
+    public var developer: String = ""          // Developer from pkgsinfo
     
     // Error, warning, and pending reason messages (matches Windows CimianItem pattern)
     public var lastError: String = ""          // Last error message for this item
@@ -178,6 +180,8 @@ public struct CimianItem: Codable, Sendable {
     public var failureCount: Int = 0
     public var type: String = "cimian"
     public var lastUpdate: Date?
+    public var category: String = ""           // Category from pkgsinfo (e.g., "Management", "Drivers", "Utilities")
+    public var developer: String = ""          // Developer from pkgsinfo
     
     public init() {}
 }

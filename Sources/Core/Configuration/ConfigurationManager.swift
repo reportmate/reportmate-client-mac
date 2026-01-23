@@ -1,7 +1,13 @@
 import Foundation
 
 /// Configuration manager for ReportMate macOS client
-/// Handles configuration hierarchy: CLI args > Environment > Config Profiles > System plist > User plist > Defaults
+/// Handles configuration hierarchy: CLI args > Environment > UserDefaults (com.github.reportmate) > Defaults
+/// Configuration can be set via:
+/// - Configuration Profiles (MDM)
+/// - /Library/Preferences/com.github.reportmate.plist (system-wide)
+/// - ~/Library/Preferences/com.github.reportmate.plist (user-specific)
+/// - `defaults write com.github.reportmate <key> <value>`
+/// - Environment variables (REPORTMATE_*)
 public class ConfigurationManager {
     public private(set) var configuration: ReportMateConfiguration
     private var overrides: [String: Any] = [:]
@@ -21,46 +27,40 @@ public class ConfigurationManager {
         }
     }
     
-    /// Save system-wide configuration
+    /// Save system-wide configuration to standard macOS preferences
+    /// Uses /Library/Preferences/com.github.reportmate.plist via UserDefaults
     public func setSystemConfiguration(
         apiUrl: String,
-        deviceId: String? = nil,
-        apiKey: String? = nil
+        passphrase: String? = nil,
+        deviceId: String? = nil
     ) throws {
+        // Use standard macOS preferences location via UserDefaults
+        // This writes to /Library/Preferences/com.github.reportmate.plist when run as root
+        guard let defaults = UserDefaults(suiteName: "com.github.reportmate") else {
+            throw ConfigurationError.failedToAccessPreferences
+        }
         
-        let systemConfigPath = "/Library/Managed Reports/reportmate.plist"
+        defaults.set(apiUrl, forKey: "ApiUrl")
+        defaults.set(3600, forKey: "CollectionInterval")
+        defaults.set("info", forKey: "LogLevel")
+        defaults.set([
+            "hardware", "system", "network", "security",
+            "applications", "management", "inventory"
+        ], forKey: "EnabledModules")
         
-        // Ensure directory exists
-        let systemConfigDir = URL(fileURLWithPath: systemConfigPath).deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: systemConfigDir, withIntermediateDirectories: true)
-        
-        // Create configuration dictionary
-        var configDict: [String: Any] = [
-            "ApiUrl": apiUrl,
-            "CollectionInterval": 3600,
-            "LogLevel": "info",
-            "EnabledModules": [
-                "hardware", "system", "network", "security", 
-                "applications", "management", "inventory"
-            ]
-        ]
+        if let passphrase = passphrase {
+            defaults.set(passphrase, forKey: "Passphrase")
+        }
         
         if let deviceId = deviceId {
-            configDict["DeviceId"] = deviceId
+            defaults.set(deviceId, forKey: "DeviceId")
         }
         
-        if let apiKey = apiKey {
-            configDict["ApiKey"] = apiKey
-        }
-        
-        // Write plist file
-        let plistData = try PropertyListSerialization.data(
-            fromPropertyList: configDict,
-            format: .xml,
-            options: 0
-        )
-        
-        try plistData.write(to: URL(fileURLWithPath: systemConfigPath))
+        defaults.synchronize()
+    }
+    
+    public enum ConfigurationError: Error {
+        case failedToAccessPreferences
     }
     
     // MARK: - Private Configuration Loading
@@ -70,40 +70,18 @@ public class ConfigurationManager {
         
         // 1. Load defaults (already set in init)
         
-        // 2. Load user plist
-        if let userConfig = loadUserPlist() {
-            config.merge(with: userConfig)
-        }
-        
-        // 3. Load system plist  
-        if let systemConfig = loadSystemPlist() {
-            config.merge(with: systemConfig)
-        }
-        
-        // 4. Load Configuration Profiles
+        // 2. Load Configuration Profiles / UserDefaults (includes /Library/Preferences/com.github.reportmate.plist)
         if let profileConfig = loadConfigurationProfiles() {
             config.merge(with: profileConfig)
         }
         
-        // 5. Load environment variables
+        // 3. Load environment variables
         config.merge(with: loadEnvironmentVariables())
         
-        // 6. Apply runtime overrides
+        // 4. Apply runtime overrides
         config.merge(with: overrides)
         
         return config
-    }
-    
-    private static func loadUserPlist() -> [String: Any]? {
-        let userConfigPath = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Managed Reports/reportmate.plist")
-        
-        return loadPlist(at: userConfigPath)
-    }
-    
-    private static func loadSystemPlist() -> [String: Any]? {
-        let systemConfigPath = URL(fileURLWithPath: "/Library/Managed Reports/reportmate.plist")
-        return loadPlist(at: systemConfigPath)
     }
     
     private static func loadConfigurationProfiles() -> [String: Any]? {
@@ -164,23 +142,6 @@ public class ConfigurationManager {
         }
         
         return config
-    }
-    
-    private static func loadPlist(at url: URL) -> [String: Any]? {
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        
-        do {
-            let data = try Data(contentsOf: url)
-            let plist = try PropertyListSerialization.propertyList(
-                from: data,
-                options: [],
-                format: nil
-            )
-            return plist as? [String: Any]
-        } catch {
-            print("Warning: Failed to load plist at \(url.path): \(error)")
-            return nil
-        }
     }
 }
 

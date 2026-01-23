@@ -120,53 +120,54 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     }
     
     public func collectComprehensiveHardwareData() async throws -> [String: Any] {
-        print("[\(timestamp())] Starting comprehensive hardware collection...")
+        // Total collection steps for progress tracking
+        let totalSteps = 9
         
         // Collect all hardware data first
         var rawData: [String: Any] = [:]
         
         // Collect system information (osquery: system_info + bash fallback)
-        print("[\(timestamp())]   [1/9] Collecting system information...")
+        ConsoleFormatter.writeQueryProgress(queryName: "system_info", current: 1, total: totalSteps)
         let systemInfo = try await collectSystemInfo()
         rawData["system"] = systemInfo
         
         // Collect processor information (osquery: system_info + bash sysctl)
-        print("[\(timestamp())]   [2/9] Collecting processor information...")
+        ConsoleFormatter.writeQueryProgress(queryName: "processor_info", current: 2, total: totalSteps)
         let processorInfo = try await collectProcessorInfo()
         rawData["processor_raw"] = processorInfo
         
         // Collect memory information (osquery: memory_devices, virtual_memory_info + bash)
-        print("[\(timestamp())]   [3/9] Collecting memory information...")
+        ConsoleFormatter.writeQueryProgress(queryName: "memory_info", current: 3, total: totalSteps)
         let memoryInfo = try await collectMemoryInfo()
         rawData["memory_raw"] = memoryInfo
         
         // Collect storage information (osquery: mounts + bash diskutil)
-        print("[\(timestamp())]   [4/9] Collecting storage information...")
+        ConsoleFormatter.writeQueryProgress(queryName: "storage_info", current: 4, total: totalSteps)
         let storageInfo = try await collectStorageInfo()
         rawData["storage_raw"] = storageInfo
         
         // Collect graphics information (bash: system_profiler)
-        print("[\(timestamp())]   [5/9] Collecting graphics information...")
+        ConsoleFormatter.writeQueryProgress(queryName: "graphics_info", current: 5, total: totalSteps)
         let graphicsInfo = try await collectGraphicsInfo()
         rawData["graphics_raw"] = graphicsInfo
         
         // Collect battery information (osquery: battery + bash pmset)
-        print("[\(timestamp())]   [6/9] Collecting battery information...")
+        ConsoleFormatter.writeQueryProgress(queryName: "battery_info", current: 6, total: totalSteps)
         let batteryInfo = try await collectBatteryInfo()
         rawData["battery"] = batteryInfo
         
         // Collect wireless (Wi-Fi) information (bash: system_profiler + airport)
-        print("[\(timestamp())]   [7/9] Collecting wireless information...")
+        ConsoleFormatter.writeQueryProgress(queryName: "wireless_info", current: 7, total: totalSteps)
         let wirelessInfo = try await collectWirelessInfo()
         rawData["wireless"] = wirelessInfo
         
         // Collect Bluetooth information (bash: system_profiler)
-        print("[\(timestamp())]   [8/9] Collecting bluetooth information...")
+        ConsoleFormatter.writeQueryProgress(queryName: "bluetooth_info", current: 8, total: totalSteps)
         let bluetoothInfo = try await collectBluetoothInfo()
         rawData["bluetooth"] = bluetoothInfo
         
         // Collect thermal information (bash: pmset)
-        print("[\(timestamp())]   [9/9] Collecting thermal information...")
+        ConsoleFormatter.writeQueryProgress(queryName: "thermal_info", current: 9, total: totalSteps)
         rawData["thermal"] = try await collectThermalInfo()
         
         // Collect NPU information (bash: sysctl for Apple Silicon detection)

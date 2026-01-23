@@ -16,15 +16,20 @@ public class ApplicationsModuleProcessor: BaseModuleProcessor, @unchecked Sendab
     }
     
     public override func collectData() async throws -> ModuleData {
-        // Collect application data in parallel
-        async let installedApps = collectInstalledApplications()
-        async let runningProcesses = collectRunningProcesses()
-        async let startupPrograms = collectStartupPrograms()
+        // Total collection steps for progress tracking
+        let totalSteps = 4
         
-        // Await all results
-        let apps = try await installedApps
-        let processes = try await runningProcesses
-        let startup = try await startupPrograms
+        // Collect application data sequentially with progress tracking
+        ConsoleFormatter.writeQueryProgress(queryName: "installed_apps", current: 1, total: totalSteps)
+        let apps = try await collectInstalledApplications()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "running_processes", current: 2, total: totalSteps)
+        let processes = try await collectRunningProcesses()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "startup_programs", current: 3, total: totalSteps)
+        let startup = try await collectStartupPrograms()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "app_usage", current: 4, total: totalSteps)
         
         // Get application usage data if available
         var usageData: [String: Any] = [:]

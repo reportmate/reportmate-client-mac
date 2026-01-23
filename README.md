@@ -276,15 +276,17 @@ The application uses a configuration hierarchy optimized for macOS:
     <array>
         <dict>
             <key>PayloadType</key>
-            <string>com.reportmate.client</string>
+            <string>com.github.reportmate</string>
             <key>PayloadIdentifier</key>
-            <string>com.reportmate.client.settings</string>
+            <string>com.github.reportmate.settings</string>
             <key>PayloadUUID</key>
             <string>12345678-1234-1234-1234-123456789012</string>
             <key>PayloadVersion</key>
             <integer>1</integer>
             <key>ApiUrl</key>
             <string>https://api.reportmate.yourdomain.com</string>
+            <key>Passphrase</key>
+            <string>your-client-passphrase</string>
             <key>CollectionInterval</key>
             <integer>3600</integer>
             <key>LogLevel</key>
@@ -297,13 +299,14 @@ The application uses a configuration hierarchy optimized for macOS:
                 <string>security</string>
                 <string>applications</string>
                 <string>management</string>
+                <string>inventory</string>
             </array>
         </dict>
     </array>
     <key>PayloadDisplayName</key>
     <string>ReportMate Configuration</string>
     <key>PayloadIdentifier</key>
-    <string>com.reportmate.client</string>
+    <string>com.github.reportmate.config</string>
     <key>PayloadType</key>
     <string>Configuration</string>
     <key>PayloadUUID</key>

@@ -32,44 +32,38 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
     }
     
     public override func collectData() async throws -> ModuleData {
-        print("[\(timestamp())] === PERIPHERALS MODULE COLLECTION ===")
-        print("[\(timestamp())] Collecting comprehensive peripheral device data...")
-        print("[\(timestamp())] Using osquery + bash (no Python)")
-        print("[\(timestamp())] Categories: USB, Input, Audio, Bluetooth, Cameras, Thunderbolt, Printers, Scanners, Storage")
-        print("[\(timestamp())] NOTE: Displays are collected in Hardware module, not here")
-        print("[\(timestamp())] ─────────────────────────────────────")
-        
         let startTime = Date()
+        let totalSteps = 10
         
-        // Collect peripheral data
-        print("[\(timestamp())]   [1/10] Collecting USB devices...")
+        // Collect peripheral data with progress tracking
+        ConsoleFormatter.writeQueryProgress(queryName: "usb_devices", current: 1, total: totalSteps)
         let usbDevices = try await collectUSBDevices()
         
-        print("[\(timestamp())]   [2/10] Collecting input devices (keyboards, mice, trackpads, tablets)...")
+        ConsoleFormatter.writeQueryProgress(queryName: "input_devices", current: 2, total: totalSteps)
         let inputDevices = try await collectInputDevices()
         
-        print("[\(timestamp())]   [3/10] Collecting audio devices...")
+        ConsoleFormatter.writeQueryProgress(queryName: "audio_devices", current: 3, total: totalSteps)
         let audioDevices = try await collectAudioDevices()
         
-        print("[\(timestamp())]   [4/10] Collecting Bluetooth devices...")
+        ConsoleFormatter.writeQueryProgress(queryName: "bluetooth_devices", current: 4, total: totalSteps)
         let bluetoothDevices = try await collectBluetoothDevices()
         
-        print("[\(timestamp())]   [5/10] Collecting camera devices...")
+        ConsoleFormatter.writeQueryProgress(queryName: "camera_devices", current: 5, total: totalSteps)
         let cameraDevices = try await collectCameraDevices()
         
-        print("[\(timestamp())]   [6/10] Collecting Thunderbolt devices...")
+        ConsoleFormatter.writeQueryProgress(queryName: "thunderbolt_devices", current: 6, total: totalSteps)
         let thunderboltDevices = try await collectThunderboltDevices()
         
-        print("[\(timestamp())]   [7/10] Collecting printer information (PRIORITY)...")
+        ConsoleFormatter.writeQueryProgress(queryName: "printers", current: 7, total: totalSteps)
         let printerInfo = try await collectPrinters()
         
-        print("[\(timestamp())]   [8/10] Collecting scanner devices...")
+        ConsoleFormatter.writeQueryProgress(queryName: "scanners", current: 8, total: totalSteps)
         let scannerDevices = try await collectScanners()
         
-        print("[\(timestamp())]   [9/10] Collecting external storage...")
+        ConsoleFormatter.writeQueryProgress(queryName: "external_storage", current: 9, total: totalSteps)
         let externalStorage = try await collectExternalStorage()
         
-        print("[\(timestamp())]   [10/10] Collecting serial/COM ports...")
+        ConsoleFormatter.writeQueryProgress(queryName: "serial_ports", current: 10, total: totalSteps)
         let serialPorts = try await collectSerialPorts()
         
         let duration = Date().timeIntervalSince(startTime)

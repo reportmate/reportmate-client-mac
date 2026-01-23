@@ -12,23 +12,29 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
     }
     
     public override func collectData() async throws -> ModuleData {
-        // Collect management data in parallel
-        async let mdmStatus = collectMDMEnrollmentStatus()
-        async let mdmCertificateDetails = collectMDMCertificateDetails()
-        async let adeConfig = collectADEConfiguration()
-        async let deviceIds = collectDeviceIdentifiers()
-        async let remoteManagement = collectRemoteManagement()
-        async let installedProfiles = collectInstalledProfiles()
-
-        // Await all results
-        let mdm = try await mdmStatus
-        let mdmCert = try await mdmCertificateDetails
-        let ade = try await adeConfig
-        let ids = try await deviceIds
-        let remote = try await remoteManagement
-        let profiles = try await installedProfiles
+        // Total collection steps for progress tracking
+        let totalSteps = 7
         
-        // Collect managed policies separately (osquery managed_policies table)
+        // Collect management data sequentially with progress tracking
+        ConsoleFormatter.writeQueryProgress(queryName: "mdm_status", current: 1, total: totalSteps)
+        let mdm = try await collectMDMEnrollmentStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "mdm_certificate", current: 2, total: totalSteps)
+        let mdmCert = try await collectMDMCertificateDetails()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "ade_config", current: 3, total: totalSteps)
+        let ade = try await collectADEConfiguration()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "device_ids", current: 4, total: totalSteps)
+        let ids = try await collectDeviceIdentifiers()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "remote_mgmt", current: 5, total: totalSteps)
+        let remote = try await collectRemoteManagement()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "profiles", current: 6, total: totalSteps)
+        let profiles = try await collectInstalledProfiles()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "managed_policies", current: 7, total: totalSteps)
         let policies = try await collectManagedPolicies()
 
         // Use snake_case for top-level keys to match osquery conventions
