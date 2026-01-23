@@ -12,51 +12,72 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     }
     
     public override func collectData() async throws -> ModuleData {
-        // Collect security data using parallel async calls
-        async let sipStatus = collectSIPStatus()
-        async let gatekeeperStatus = collectGatekeeperStatus()
-        async let firewallStatus = collectFirewallStatus()
-        async let fileVaultStatus = collectFileVaultStatus()
-        async let xprotectStatus = collectXProtectStatus()
-        async let sshStatus = collectSSHStatus()
-        async let secureBootStatus = collectSecureBootStatus()
-        async let firmwarePasswordStatus = collectFirmwarePasswordStatus()
-        async let rootUserStatus = collectRootUserStatus()
-        async let mrtStatus = collectMRTStatus()
-        async let secureEnclaveStatus = collectSecureEnclaveStatus()
-        async let activationLockStatus = collectActivationLockStatus()
-        async let platformSSOStatus = collectPlatformSSOStatus()
-        async let fileVaultUsers = collectFileVaultUsers()
-        async let secureTokenStatus = collectSecureTokenStatus()
-        async let bootstrapTokenStatus = collectBootstrapTokenStatus()
-        async let authdbData = collectAuthDB()
-        async let sofaUnpatchedCVEs = collectSofaUnpatchedCVEs()
-        async let sofaSecurityRelease = collectSofaSecurityReleaseInfo()
-        async let remoteManagement = collectRemoteManagement()
-        async let certificatesData = collectCertificates()
+        // Total collection steps for progress tracking
+        let totalSteps = 21
         
-        // Await all results
-        let sip = try await sipStatus
-        let gatekeeper = try await gatekeeperStatus
-        let firewall = try await firewallStatus
-        let fileVault = try await fileVaultStatus
-        let xprotect = try await xprotectStatus
-        let ssh = try await sshStatus
-        let secureBoot = try await secureBootStatus
-        let firmwarePassword = try await firmwarePasswordStatus
-        let rootUser = try await rootUserStatus
-        let mrt = try await mrtStatus
-        let secureEnclave = try await secureEnclaveStatus
-        let activationLock = try await activationLockStatus
-        let platformSSO = try await platformSSOStatus
-        let fvUsers = try await fileVaultUsers
-        let secureToken = try await secureTokenStatus
-        let bootstrapToken = try await bootstrapTokenStatus
-        let authdb = try await authdbData
-        let unpatchedCVEs = try await sofaUnpatchedCVEs
-        let securityRelease = try await sofaSecurityRelease
-        let remoteMgmt = try await remoteManagement
-        let certificates = try await certificatesData
+        // Collect security data sequentially with progress tracking
+        ConsoleFormatter.writeQueryProgress(queryName: "sip_status", current: 1, total: totalSteps)
+        let sip = try await collectSIPStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "gatekeeper", current: 2, total: totalSteps)
+        let gatekeeper = try await collectGatekeeperStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "firewall", current: 3, total: totalSteps)
+        let firewall = try await collectFirewallStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "filevault", current: 4, total: totalSteps)
+        let fileVault = try await collectFileVaultStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "xprotect", current: 5, total: totalSteps)
+        let xprotect = try await collectXProtectStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "ssh_status", current: 6, total: totalSteps)
+        let ssh = try await collectSSHStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "secure_boot", current: 7, total: totalSteps)
+        let secureBoot = try await collectSecureBootStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "firmware_password", current: 8, total: totalSteps)
+        let firmwarePassword = try await collectFirmwarePasswordStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "root_user", current: 9, total: totalSteps)
+        let rootUser = try await collectRootUserStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "mrt_status", current: 10, total: totalSteps)
+        let mrt = try await collectMRTStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "secure_enclave", current: 11, total: totalSteps)
+        let secureEnclave = try await collectSecureEnclaveStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "activation_lock", current: 12, total: totalSteps)
+        let activationLock = try await collectActivationLockStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "platform_sso", current: 13, total: totalSteps)
+        let platformSSO = try await collectPlatformSSOStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "filevault_users", current: 14, total: totalSteps)
+        let fvUsers = try await collectFileVaultUsers()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "secure_token", current: 15, total: totalSteps)
+        let secureToken = try await collectSecureTokenStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "bootstrap_token", current: 16, total: totalSteps)
+        let bootstrapToken = try await collectBootstrapTokenStatus()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "authdb", current: 17, total: totalSteps)
+        let authdb = try await collectAuthDB()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "unpatched_cves", current: 18, total: totalSteps)
+        let unpatchedCVEs = try await collectSofaUnpatchedCVEs()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "security_release", current: 19, total: totalSteps)
+        let securityRelease = try await collectSofaSecurityReleaseInfo()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "remote_management", current: 20, total: totalSteps)
+        let remoteMgmt = try await collectRemoteManagement()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "certificates", current: 21, total: totalSteps)
+        let certificates = try await collectCertificates()
         
         // Build security data dictionary
         let securityData: [String: Any] = [
@@ -1731,7 +1752,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let thirtyDaysFromNow = Calendar.current.date(byAdding: .day, value: 30, to: now)!
         
         if let items = result["items"] as? [[String: Any]] {
-            print("[DEBUG] Certificate collection: found \(items.count) raw certificates from osquery")
+            ConsoleFormatter.writeDebug("Certificate collection: found \(items.count) raw certificates from osquery")
             
             for item in items {
                 var cert: [String: Any] = [:]
@@ -1807,9 +1828,9 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             let expiredCount = certificates.filter { ($0["status"] as? String) == "Expired" }.count
             let expiringCount = certificates.filter { ($0["status"] as? String) == "ExpiringSoon" }.count
             let unknownCount = certificates.filter { ($0["status"] as? String) == "Unknown" }.count
-            print("[DEBUG] Certificate processing complete: \(certificates.count) total - Valid: \(validCount), Expired: \(expiredCount), ExpiringSoon: \(expiringCount), Unknown: \(unknownCount)")
+            ConsoleFormatter.writeDebug("Certificate processing complete: \(certificates.count) total - Valid: \(validCount), Expired: \(expiredCount), ExpiringSoon: \(expiringCount), Unknown: \(unknownCount)")
         } else {
-            print("[DEBUG] Certificate collection: no 'items' key in result, keys: \(result.keys)")
+            ConsoleFormatter.writeDebug("Certificate collection: no 'items' key in result, keys: \(result.keys)")
         }
         
         return certificates

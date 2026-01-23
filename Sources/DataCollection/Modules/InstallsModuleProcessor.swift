@@ -13,21 +13,33 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     }
     
     public override func collectData() async throws -> ModuleData {
-        // Collect install data in parallel
-        async let installHistory = collectInstallHistory()
-        async let homebrewPackages = collectHomebrewPackages()
-        async let munkiInfo = collectMunkiInfo()
-        async let munkiInstalls = collectMunkiManagedInstalls()
-        async let pendingUpdates = collectPendingUpdates()
-        async let munkiRunLog = collectMunkiRunLog()
+        // Total collection steps for progress tracking
+        let totalSteps = 7
         
-        // Await all results
-        let history = try await installHistory
-        let homebrew = try await homebrewPackages
-        let info = try await munkiInfo
-        let installs = try await munkiInstalls
-        let pending = try await pendingUpdates
-        let runLog = try await munkiRunLog
+        // Collect install data sequentially with progress tracking
+        ConsoleFormatter.writeQueryProgress(queryName: "install_history", current: 1, total: totalSteps)
+        let history = try await collectInstallHistory()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "homebrew_packages", current: 2, total: totalSteps)
+        let homebrew = try await collectHomebrewPackages()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "munki_info", current: 3, total: totalSteps)
+        let info = try await collectMunkiInfo()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "munki_installs", current: 4, total: totalSteps)
+        var installs = try await collectMunkiManagedInstalls()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "pending_updates", current: 5, total: totalSteps)
+        let pending = try await collectPendingUpdates()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "munki_log", current: 6, total: totalSteps)
+        let runLog = try await collectMunkiRunLog()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "catalog_metadata", current: 7, total: totalSteps)
+        let catalogData = try await collectCatalogMetadata()
+        
+        // Enrich installs with category/developer from catalog
+        installs = enrichInstallsWithCatalogData(installs: installs, catalogData: catalogData)
         
         // Build MunkiInfo object if Munki is detected
         var munkiInfoObject: MunkiInfo? = nil
@@ -105,7 +117,9 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                             "endTime": item.endTime,
                             "lastError": item.lastError,
                             "lastWarning": item.lastWarning,
-                            "pendingReason": item.pendingReason
+                            "pendingReason": item.pendingReason,
+                            "category": item.category,
+                            "developer": item.developer
                         ]
                     }
                 ]
@@ -721,5 +735,108 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         // Generic pending
         return "Installation pending"
+    }
+    
+    // MARK: - Catalog Metadata Collection
+    
+    /// Collects category and developer metadata from Munki catalogs
+    /// Catalog files contain full pkgsinfo data including category field
+    private func collectCatalogMetadata() async throws -> [String: (category: String, developer: String)] {
+        let catalogsPath = "/Library/Managed Installs/catalogs"
+        var metadata: [String: (category: String, developer: String)] = [:]
+        
+        // Get list of catalog files
+        guard FileManager.default.fileExists(atPath: catalogsPath),
+              let catalogFiles = try? FileManager.default.contentsOfDirectory(atPath: catalogsPath) else {
+            return metadata
+        }
+        
+        // Parse each catalog file to extract category/developer for each package
+        for catalogFile in catalogFiles {
+            // Skip hidden files
+            if catalogFile.hasPrefix(".") { continue }
+            
+            let catalogPath = "\(catalogsPath)/\(catalogFile)"
+            
+            // Use PlistBuddy to count items and extract metadata
+            let bashScript = """
+                plistbuddy="/usr/libexec/PlistBuddy"
+                catalog="\(catalogPath)"
+                
+                if [ ! -f "$catalog" ]; then
+                    echo '[]'
+                    exit 0
+                fi
+                
+                # Get count of items in catalog (it's an array at root level)
+                count=$($plistbuddy -c "Print" "$catalog" 2>/dev/null | grep -c "^    Dict" || echo "0")
+                
+                if [ "$count" -eq 0 ]; then
+                    echo '[]'
+                    exit 0
+                fi
+                
+                echo "["
+                first=true
+                
+                i=0
+                while [ $i -lt $count ]; do
+                    name=$($plistbuddy -c "Print :$i:name" "$catalog" 2>/dev/null || echo "")
+                    category=$($plistbuddy -c "Print :$i:category" "$catalog" 2>/dev/null || echo "")
+                    developer=$($plistbuddy -c "Print :$i:developer" "$catalog" 2>/dev/null || echo "")
+                    
+                    if [ -n "$name" ]; then
+                        # Escape quotes for JSON
+                        name_esc=$(echo "$name" | sed 's/"/\\\\"/g')
+                        category_esc=$(echo "$category" | sed 's/"/\\\\"/g')
+                        developer_esc=$(echo "$developer" | sed 's/"/\\\\"/g')
+                        
+                        if [ "$first" = "true" ]; then
+                            first=false
+                        else
+                            echo ","
+                        fi
+                        
+                        printf '{"name": "%s", "category": "%s", "developer": "%s"}' "$name_esc" "$category_esc" "$developer_esc"
+                    fi
+                    
+                    i=$((i + 1))
+                done
+                
+                echo "]"
+                """
+            
+            let result = try await executeWithFallback(osquery: nil, bash: bashScript)
+            
+            if let items = result["items"] as? [[String: Any]] {
+                for item in items {
+                    if let name = item["name"] as? String, !name.isEmpty {
+                        let category = item["category"] as? String ?? ""
+                        let developer = item["developer"] as? String ?? ""
+                        // Only store if we have category or developer data
+                        if !category.isEmpty || !developer.isEmpty {
+                            metadata[name] = (category: category, developer: developer)
+                        }
+                    }
+                }
+            }
+        }
+        
+        return metadata
+    }
+    
+    /// Enriches MunkiItem array with category/developer from catalog metadata
+    private func enrichInstallsWithCatalogData(
+        installs: [MunkiItem],
+        catalogData: [String: (category: String, developer: String)]
+    ) -> [MunkiItem] {
+        return installs.map { item in
+            var enriched = item
+            if let metadata = catalogData[item.name] {
+                enriched.category = metadata.category
+                enriched.developer = metadata.developer
+            }
+            return enriched
+        }
     }
 }

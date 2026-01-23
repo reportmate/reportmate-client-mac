@@ -26,24 +26,30 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     }
     
     public override func collectData() async throws -> ModuleData {
-        // Collect standard network info
+        // Total collection steps for progress tracking
+        let totalSteps = 7
+        
+        // Collect network data sequentially with progress tracking
+        ConsoleFormatter.writeQueryProgress(queryName: "network_interfaces", current: 1, total: totalSteps)
         let networkInfo = try await collectNetworkInfo()
         
-        // Collect hostname information
+        ConsoleFormatter.writeQueryProgress(queryName: "hostname_info", current: 2, total: totalSteps)
         let hostnameInfo = try await collectHostnameInfo()
         
-        // Collect extension-based data in parallel
-        async let networkQualityData = collectNetworkQuality()
-        async let wifiNetworkData = collectWiFiNetwork()
-        async let vpnData = collectVPNConnections()
-        async let savedWifiData = collectSavedWiFiNetworks()
-        async let dnsData = collectDNSConfiguration()
+        ConsoleFormatter.writeQueryProgress(queryName: "network_quality", current: 3, total: totalSteps)
+        let networkQuality = try await collectNetworkQuality()
         
-        let networkQuality = try await networkQualityData
-        let wifiNetwork = try await wifiNetworkData
-        let vpnConnections = try await vpnData
-        let savedWifi = try await savedWifiData
-        let dnsConfig = try await dnsData
+        ConsoleFormatter.writeQueryProgress(queryName: "wifi_network", current: 4, total: totalSteps)
+        let wifiNetwork = try await collectWiFiNetwork()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "vpn_connections", current: 5, total: totalSteps)
+        let vpnConnections = try await collectVPNConnections()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "saved_wifi", current: 6, total: totalSteps)
+        let savedWifi = try await collectSavedWiFiNetworks()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "dns_config", current: 7, total: totalSteps)
+        let dnsConfig = try await collectDNSConfiguration()
         
         // Convert NetworkInfo to [String: Any]
         let jsonData = try JSONEncoder().encode(networkInfo)
@@ -964,16 +970,16 @@ system_profiler SPAirPortDataType -json 2>/dev/null
     
     /// Get SSID using CoreWLAN framework (doesn't require location services permission)
     private func getCoreWLANSSID() -> String? {
-        print("[DEBUG] Attempting to get SSID via CoreWLAN...")
+        ConsoleFormatter.writeDebug("Attempting to get SSID via CoreWLAN...")
         let client = CWWiFiClient.shared()
-        print("[DEBUG] CoreWLAN client: \(client)")
+        ConsoleFormatter.writeDebug("CoreWLAN client: \(client)")
         guard let interface = client.interface() else { 
-            print("[DEBUG] No CoreWLAN interface available")
+            ConsoleFormatter.writeDebug("No CoreWLAN interface available")
             return nil 
         }
-        print("[DEBUG] CoreWLAN interface: \(interface.interfaceName ?? "unknown")")
+        ConsoleFormatter.writeDebug("CoreWLAN interface: \(interface.interfaceName ?? "unknown")")
         let ssid = interface.ssid()
-        print("[DEBUG] CoreWLAN SSID: '\(ssid ?? "nil")'")
+        ConsoleFormatter.writeDebug("CoreWLAN SSID: '\(ssid ?? "nil")'")
         return ssid
     }
     
