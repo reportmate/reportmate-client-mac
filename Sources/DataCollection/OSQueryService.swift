@@ -10,23 +10,45 @@ public class OSQueryService {
     private var extensionTablesChecked: Bool = false
     private var availableTables: Set<String> = []
     
+    /// Persistent osquery session for extension support
+    /// The extension takes ~3 seconds to register, so we keep a persistent session
+    private var persistentProcess: Process?
+    private var persistentInput: FileHandle?
+    private var persistentOutput: FileHandle?
+    private var sessionInitialized: Bool = false
+    
     public init(configuration: ReportMateConfiguration) {
         self.configuration = configuration
         self.osqueryPath = configuration.osqueryPath
         
-        // TEMPORARILY DISABLED: macadmins extension has compatibility issues with osquery 5.21.0
-        // The extension fails to create its socket and osquery doesn't wait for extension tables
-        // Bash fallbacks provide all necessary data for now
-        // TODO: Investigate extension compatibility or upgrade osquery
-        self.extensionPath = nil
-        /*
-        // Determine extension path (bundled or configured)
+        // Enable extension support - the extension registers after 3 seconds
+        // We use a persistent session approach to avoid waiting 3s for each query
         if configuration.extensionEnabled {
             self.extensionPath = Self.resolveExtensionPath(configured: configuration.osqueryExtensionPath)
         } else {
             self.extensionPath = nil
         }
-        */
+    }
+    
+    deinit {
+        cleanupPersistentSession()
+    }
+    
+    /// Cleanup the persistent osquery session
+    private func cleanupPersistentSession() {
+        if let process = persistentProcess, process.isRunning {
+            // Send .exit command
+            if let input = persistentInput {
+                let exitCmd = ".exit\n"
+                input.write(exitCmd.data(using: .utf8)!)
+                try? input.close()
+            }
+            process.terminate()
+            persistentProcess = nil
+        }
+        persistentInput = nil
+        persistentOutput = nil
+        sessionInitialized = false
     }
     
     /// Check if osquery is available
@@ -119,70 +141,25 @@ public class OSQueryService {
     }
     
     /// Execute an osquery SQL query
+    /// For extension tables, uses the --extension flag which starts extension as a child process
+    /// The extension takes ~3 seconds to register, so for extension tables we use a two-phase approach
     public func executeQuery(_ query: String) async throws -> [[String: Any]] {
+        // Simple query execution without extension
+        if extensionPath == nil {
+            return try await executeSimpleQuery(query)
+        }
+        
+        // With extension: use osqueryi's --extension flag
+        // The extension takes 3 seconds to register, so we pass the query after waiting
+        return try await executeQueryWithExtension(query)
+    }
+    
+    /// Execute a simple osquery query without extension support
+    private func executeSimpleQuery(_ query: String) async throws -> [[String: Any]] {
         return try await withCheckedThrowingContinuation { continuation in
-            var extensionProcess: Process? = nil
-            var socketPath: String? = nil
-            
-            // Start extension daemon if available
-            if let extPath = extensionPath {
-                let uniqueId = UUID().uuidString.prefix(8)
-                socketPath = "/tmp/osquery-rm-\(uniqueId).em"
-                
-                // Clean up any stale socket
-                try? FileManager.default.removeItem(atPath: socketPath!)
-                
-                // Start extension as background process
-                let extTask = Process()
-                extTask.executableURL = URL(fileURLWithPath: extPath)
-                extTask.arguments = ["--socket", socketPath!, "--verbose"]
-                extTask.standardOutput = Pipe()  // Suppress output
-                extTask.standardError = Pipe()
-                
-                do {
-                    try extTask.run()
-                    extensionProcess = extTask
-                    
-                    // Wait for socket to be created (extension startup)
-                    var retries = 0
-                    while retries < 30 {  // 3 seconds max
-                        if FileManager.default.fileExists(atPath: socketPath!) {
-                            break
-                        }
-                        Thread.sleep(forTimeInterval: 0.1)
-                        retries += 1
-                    }
-                    
-                    if !FileManager.default.fileExists(atPath: socketPath!) {
-                        print("WARNING: Extension socket not created after 3 seconds, continuing without extension")
-                        extensionProcess?.terminate()
-                        extensionProcess = nil
-                        socketPath = nil
-                    }
-                } catch {
-                    print("WARNING: Failed to start extension: \(error), continuing without extension")
-                    extensionProcess = nil
-                    socketPath = nil
-                }
-            }
-            
-            // Now run osquery connecting to the extension socket
             let task = Process()
             task.executableURL = URL(fileURLWithPath: osqueryPath)
-            
-            // Build arguments
-            var arguments = ["--json"]
-            
-            // Connect to extension socket if we started the extension daemon
-            if let socket = socketPath, extensionProcess != nil {
-                arguments.append(contentsOf: [
-                    "--extensions_socket", socket,
-                    "--extensions_timeout", "5"  // Quick timeout since extension is already running
-                ])
-            }
-            
-            arguments.append(query)
-            task.arguments = arguments
+            task.arguments = ["--json", query]
             
             let outputPipe = Pipe()
             let errorPipe = Pipe()
@@ -196,16 +173,6 @@ public class OSQueryService {
                 let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
                 
                 task.waitUntilExit()
-                
-                // Cleanup extension process
-                defer {
-                    if let extProcess = extensionProcess, extProcess.isRunning {
-                        extProcess.terminate()
-                    }
-                    if let socket = socketPath {
-                        try? FileManager.default.removeItem(atPath: socket)
-                    }
-                }
                 
                 if task.terminationStatus != 0 {
                     let errorMessage = String(data: errorData, encoding: .utf8) ?? "Unknown error"
@@ -235,17 +202,124 @@ public class OSQueryService {
         }
     }
     
-    /// Execute multiple queries from a module configuration
-    public func executeModuleQueries(_ queries: [String: String]) async -> [String: [[String: Any]]] {
+    /// Execute an osquery query with extension support using interactive mode
+    /// The extension takes ~3 seconds to register, so we:
+    /// 1. Start osqueryi in interactive mode with --extension
+    /// 2. Wait 4 seconds for extension to register
+    /// 3. Send the query via stdin
+    /// 4. Read the JSON output
+    private func executeQueryWithExtension(_ query: String) async throws -> [[String: Any]] {
+        return try await withCheckedThrowingContinuation { continuation in
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: osqueryPath)
+            
+            // Use interactive mode with extension
+            // --json makes all SELECT output JSON formatted
+            // --extension loads the macadmins extension as a child process
+            // --extensions_timeout gives the extension time to register
+            task.arguments = [
+                "--json",
+                "--extension", extensionPath!,
+                "--extensions_timeout", "10"
+            ]
+            
+            let inputPipe = Pipe()
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
+            task.standardInput = inputPipe
+            task.standardOutput = outputPipe
+            task.standardError = errorPipe
+            
+            do {
+                try task.run()
+                
+                // Wait 4 seconds for the extension to register its tables
+                // The extension has a 3-second sleep on startup
+                Thread.sleep(forTimeInterval: 4.0)
+                
+                // Send the query followed by .exit
+                let commands = "\(query)\n.exit\n"
+                inputPipe.fileHandleForWriting.write(commands.data(using: .utf8)!)
+                try? inputPipe.fileHandleForWriting.close()
+                
+                // Read all output
+                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                
+                task.waitUntilExit()
+                
+                // Parse the JSON output
+                // The output will include the osqueryi prompt, so we need to extract just the JSON
+                guard let outputString = String(data: outputData, encoding: .utf8) else {
+                    continuation.resume(throwing: OSQueryError.invalidOutput("Could not decode output as UTF-8"))
+                    return
+                }
+                
+                // Find the JSON array in the output (starts with [ and ends with ])
+                if let jsonStart = outputString.firstIndex(of: "["),
+                   let jsonEnd = outputString.lastIndex(of: "]") {
+                    let jsonString = String(outputString[jsonStart...jsonEnd])
+                    
+                    if let jsonData = jsonString.data(using: .utf8) {
+                        do {
+                            if let jsonArray = try JSONSerialization.jsonObject(with: jsonData) as? [[String: Any]] {
+                                continuation.resume(returning: jsonArray)
+                                return
+                            }
+                        } catch {
+                            // JSON parsing failed, check if it's an error response
+                        }
+                    }
+                }
+                
+                // Check for errors in stderr or output
+                let errorString = String(data: errorData, encoding: .utf8) ?? ""
+                if outputString.contains("no such table") || errorString.contains("no such table") {
+                    continuation.resume(throwing: OSQueryError.executionFailed("no such table"))
+                    return
+                }
+                
+                // If we got here with no JSON, return empty array
+                if outputString.isEmpty {
+                    let errorMessage = errorString.isEmpty ? "No output from osquery" : errorString
+                    continuation.resume(throwing: OSQueryError.executionFailed(errorMessage))
+                } else {
+                    // No valid JSON found but also no error - might be an empty result
+                    continuation.resume(returning: [])
+                }
+                
+            } catch {
+                continuation.resume(throwing: OSQueryError.processLaunchFailed(error))
+            }
+        }
+    }
+    
+    /// Execute multiple queries from a module configuration with progress display
+    public func executeModuleQueries(_ queries: [String: String], showProgress: Bool = true) async -> [String: [[String: Any]]] {
         var results: [String: [[String: Any]]] = [:]
         
-        // Execute queries sequentially for now to avoid Sendable issues
-        for (key, query) in queries {
+        let queryArray = Array(queries)
+        let totalQueries = queryArray.count
+        
+        // Show header for osquery execution
+        if showProgress && totalQueries > 0 && ConsoleFormatter.isVerbose {
+            ConsoleFormatter.writeInfo("Executing \(totalQueries) osquery queries")
+        }
+        
+        // Execute queries sequentially with progress tracking
+        for (index, (key, query)) in queryArray.enumerated() {
+            // Show progress bar for each query
+            if showProgress {
+                ConsoleFormatter.writeQueryProgress(queryName: key, current: index + 1, total: totalQueries)
+            }
+            
             do {
                 let result = try await executeQuery(query)
                 results[key] = result
             } catch {
-                print("Warning: Query '\(key)' failed: \(error)")
+                if ConsoleFormatter.isVerbose {
+                    ConsoleFormatter.writeWarning("Query '\(key)' failed: \(error)")
+                }
                 results[key] = []
             }
         }

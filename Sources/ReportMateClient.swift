@@ -64,6 +64,10 @@ struct ReportMateClient: AsyncParsableCommand {
         // Convert verbose level and validate
         let verboseLevel = VerboseLevel(rawValue: max(0, min(3, verbose))) ?? .error
         
+        // Enable ConsoleFormatter with verbose level (matches Windows client)
+        // -vv (level 2) enables progress bars, -vvv (level 3) enables debug output
+        ConsoleFormatter.setVerboseLevel(verbose)
+        
         // Configure logging
         LoggingSystem.bootstrap { label in
             var handler = StreamLogHandler.standardOutput(label: label)
@@ -246,22 +250,30 @@ struct ReportMateClient: AsyncParsableCommand {
             // Displays and Printers are now part of the unified Peripherals module
             return PeripheralsModuleProcessor(configuration: config)
         case "installs": return InstallsModuleProcessor(configuration: config)
+        case "identity": return IdentityModuleProcessor(configuration: config)
         default: return nil
         }
     }
     
-    private func executeModule(module: String, config: ReportMateConfiguration, logger: Logger) async throws -> (String, Any)? {
+    private func executeModule(module: String, config: ReportMateConfiguration, logger: Logger, current: Int = 1, total: Int = 1) async throws -> (String, Any)? {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "HH:mm:ss"
         let timestamp = dateFormatter.string(from: Date())
         
         guard let processor = createProcessor(for: module, config: config) else {
             logger.warning("Unknown module: \(module)")
+            ConsoleFormatter.writeWarning("Unknown module: \(module)")
             return nil
         }
         
         logger.info("Starting collection for module: \(module)")
-        print("[\(timestamp)] INFO  Executing module: \(module)...")
+        
+        // Don't show module-level progress - modules show their own query-level progress
+        
+        // Also print standard log format for non-verbose mode
+        if !ConsoleFormatter.isVerbose {
+            print("[\(timestamp)] INFO  Executing module: \(module)...")
+        }
         
         do {
             let startTime = Date()
@@ -285,7 +297,10 @@ struct ReportMateClient: AsyncParsableCommand {
             
         } catch {
             logger.error("Module \(module) failed: \(error.localizedDescription)")
-            print("[\(timestamp)] ERROR Module \(module) failed: \(error.localizedDescription)")
+            ConsoleFormatter.writeError("Module \(module) failed: \(error.localizedDescription)")
+            if !ConsoleFormatter.isVerbose {
+                print("[\(timestamp)] ERROR Module \(module) failed: \(error.localizedDescription)")
+            }
             return nil
         }
     }
@@ -329,14 +344,20 @@ struct ReportMateClient: AsyncParsableCommand {
         print("[\(timestamp)] INFO      Collecting data for modules: \(modulesToRun.joined(separator: ", "))")
         logger.info("Starting data collection for \(modulesToRun.count) modules")
         
+        // Show header in verbose mode
+        if ConsoleFormatter.isVerbose {
+            ConsoleFormatter.writeSection("Data Collection", subtitle: "Collecting \(modulesToRun.count) modules")
+        }
+        
         var collectedData: [String: Any] = [:]
         
         // Always run inventory first to get device identity if we are doing a full run or if it's requested
         // But for now, we just run what's requested. 
         // Ideally, we should ensure 'inventory' is run if we plan to transmit, to build the DeviceInfo.
         
-        for module in modulesToRun {
-            if let (moduleName, data) = try await executeModule(module: module, config: config, logger: logger) {
+        let totalModules = modulesToRun.count
+        for (index, module) in modulesToRun.enumerated() {
+            if let (moduleName, data) = try await executeModule(module: module, config: config, logger: logger, current: index + 1, total: totalModules) {
                 collectedData[moduleName] = data
             }
         }

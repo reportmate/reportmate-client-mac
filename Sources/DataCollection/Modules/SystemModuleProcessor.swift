@@ -12,41 +12,54 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     }
     
     public override func collectData() async throws -> ModuleData {
-        // Collect all system data in parallel for efficiency
-        async let osInfoData = collectOSInfo()
-        async let systemDetailsData = collectSystemDetails()
-        async let uptimeData = collectUptimeInfo()
-        async let kernelData = collectKernelInfo()
-        async let launchItemsData = collectLaunchItems()
-        async let launchdServicesData = collectLaunchdServices()
-        async let softwareUpdatesData = collectSoftwareUpdates()
-        async let pendingAppleUpdatesData = collectPendingAppleUpdates()
-        async let installHistoryData = collectInstallHistory()
-        async let systemConfigData = collectSystemConfiguration()
-        async let environmentData = collectEnvironment()
-        // Mac-specific components (moved from Profiles module)
-        async let loginItemsData = collectLoginItems()
-        async let systemExtensionsData = collectSystemExtensions()
-        async let kernelExtensionsData = collectKernelExtensions()
-        async let privilegedHelpersData = collectPrivilegedHelperTools()
+        // Total collection steps for progress tracking
+        let totalSteps = 15
         
-        // Await all results
-        let osInfo = try await osInfoData
-        let systemDetails = try await systemDetailsData
-        let uptimeInfo = try await uptimeData
-        let kernelInfo = try await kernelData
-        let launchItems = try await launchItemsData
-        let launchdServices = try await launchdServicesData
-        _ = try await softwareUpdatesData  // Collected but not used; pendingAppleUpdates provides this data
-        let pendingUpdates = try await pendingAppleUpdatesData
-        let installHistory = try await installHistoryData
-        let systemConfig = try await systemConfigData
-        let environment = try await environmentData
-        // Mac-specific
-        let loginItems = try await loginItemsData
-        let systemExtensions = try await systemExtensionsData
-        let kernelExtensions = try await kernelExtensionsData
-        let privilegedHelpers = try await privilegedHelpersData
+        // Collect all system data sequentially with progress tracking
+        ConsoleFormatter.writeQueryProgress(queryName: "os_info", current: 1, total: totalSteps)
+        let osInfo = try await collectOSInfo()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "system_details", current: 2, total: totalSteps)
+        let systemDetails = try await collectSystemDetails()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "uptime", current: 3, total: totalSteps)
+        let uptimeInfo = try await collectUptimeInfo()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "kernel_info", current: 4, total: totalSteps)
+        let kernelInfo = try await collectKernelInfo()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "launch_items", current: 5, total: totalSteps)
+        let launchItems = try await collectLaunchItems()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "launchd_services", current: 6, total: totalSteps)
+        let launchdServices = try await collectLaunchdServices()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "software_updates", current: 7, total: totalSteps)
+        _ = try await collectSoftwareUpdates()  // Collected but not used; pendingAppleUpdates provides this data
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "pending_updates", current: 8, total: totalSteps)
+        let pendingUpdates = try await collectPendingAppleUpdates()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "install_history", current: 9, total: totalSteps)
+        let installHistory = try await collectInstallHistory()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "system_config", current: 10, total: totalSteps)
+        let systemConfig = try await collectSystemConfiguration()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "environment", current: 11, total: totalSteps)
+        let environment = try await collectEnvironment()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "login_items", current: 12, total: totalSteps)
+        let loginItems = try await collectLoginItems()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "system_extensions", current: 13, total: totalSteps)
+        let systemExtensions = try await collectSystemExtensions()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "kernel_extensions", current: 14, total: totalSteps)
+        let kernelExtensions = try await collectKernelExtensions()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "privileged_helpers", current: 15, total: totalSteps)
+        let privilegedHelpers = try await collectPrivilegedHelperTools()
         
         // Build the combined system data dictionary
         let systemData: [String: Any] = [
@@ -866,7 +879,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             }
         } catch {
             // If hosts file can't be read, just skip it
-            print("[DEBUG] Could not read hosts file: \(error)")
+            ConsoleFormatter.writeDebug("Could not read hosts file: \(error)")
         }
         
         return env
