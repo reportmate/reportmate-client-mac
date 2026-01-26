@@ -36,6 +36,7 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         ConsoleFormatter.writeQueryProgress(queryName: "hostname_info", current: 2, total: totalSteps)
         let hostnameInfo = try await collectHostnameInfo()
         
+        // Network quality test - always runs (20-30 seconds to measure actual throughput)
         ConsoleFormatter.writeQueryProgress(queryName: "network_quality", current: 3, total: totalSteps)
         let networkQuality = try await collectNetworkQuality()
         
@@ -846,9 +847,10 @@ print(json.dumps(get_network_info()))
     // MARK: - Extension Tables
     
     private func collectNetworkQuality() async throws -> [String: Any] {
+        // macadmins extension network_quality columns:
+        // dl_throughput_kbps, ul_throughput_kbps, dl_throughput_mbps, ul_throughput_mbps
         let osqueryScript = """
-            SELECT dl_throughput, ul_throughput, dl_responsiveness, 
-                   ul_responsiveness, rating
+            SELECT dl_throughput_mbps, ul_throughput_mbps, dl_throughput_kbps, ul_throughput_kbps
             FROM network_quality LIMIT 1;
         """
         
@@ -932,16 +934,59 @@ networkQuality -s 2>&1
     }
     
     private func collectWiFiNetwork() async throws -> [String: Any] {
+        // macadmins extension wifi_network columns:
+        // ssid, interface, rssi, noise, channel, channel_width, channel_band, transmit_rate, security_type, mode
         let osqueryScript = """
-            SELECT ssid, bssid, network_name, rssi, noise, channel,
+            SELECT ssid, interface, rssi, noise, channel,
                    channel_width, channel_band, transmit_rate, security_type, mode
             FROM wifi_network LIMIT 1;
         """
         
-        // Use system_profiler for WiFi info (simplest cross-version approach)
-        // Note: SSID may show "[Location Services Required]" if location services disabled
+        // Use wdutil info (fast, ~0.1s) instead of system_profiler (slow, ~6s)
+        // Note: wdutil redacts SSID/BSSID, so we get those from CoreWLAN
         let bashScript = #"""
-system_profiler SPAirPortDataType -json 2>/dev/null
+wdutil info 2>/dev/null | awk '
+BEGIN { in_wifi=0 }
+/^WIFI$/ { in_wifi=1; next }
+/^[A-Z]/ && in_wifi && !/^————/ { in_wifi=0 }
+in_wifi {
+    if (/Interface Name/) { sub(/.*: /, ""); iface=$0 }
+    if (/Power/) { sub(/.*: /, ""); power=$0 }
+    if (/^    RSSI/) { sub(/.*: /, ""); sub(/ dBm/, ""); rssi=$0 }
+    if (/^    Noise/) { sub(/.*: /, ""); sub(/ dBm/, ""); noise=$0 }
+    if (/Tx Rate/) { sub(/.*: /, ""); sub(/ Mbps/, ""); txrate=$0 }
+    if (/^    Security/) { sub(/.*: /, ""); security=$0 }
+    if (/^    PHY Mode/) { sub(/.*: /, ""); phymode=$0 }
+    if (/^    Channel / && !/Supported/ && !/Sequence/) { sub(/.*: /, ""); channel=$0 }
+}
+END {
+    if (channel != "") {
+        split(channel, parts, "/")
+        width = parts[2]
+        ch = parts[1]
+        if (match(ch, /^2g/)) { band="2.4GHz"; sub(/^2g/, "", ch) }
+        else if (match(ch, /^5g/)) { band="5GHz"; sub(/^5g/, "", ch) }
+        else if (match(ch, /^6g/)) { band="6GHz"; sub(/^6g/, "", ch) }
+        else { band="Unknown" }
+    }
+    
+    if (phymode ~ /11be/) wifiVer="WiFi 7"
+    else if (phymode ~ /11ax/) wifiVer="WiFi 6"
+    else if (phymode ~ /11ac/) wifiVer="WiFi 5"
+    else if (phymode ~ /11n/) wifiVer="WiFi 4"
+    else wifiVer=""
+    
+    if (rssi == "") rssi = "null"
+    if (noise == "") noise = "null"
+    if (txrate == "") txrate = "null"
+    if (ch == "") ch = "null"
+    
+    printf "{\"interface\":\"%s\",\"power\":\"%s\",\"rssi\":%s,\"noise\":%s,", iface, power, rssi, noise
+    printf "\"txRate\":%s,\"security\":\"%s\",\"phyMode\":\"%s\",", txrate, security, phymode
+    if (ch == "null") printf "\"channel\":null"
+    else printf "\"channel\":%s", ch
+    printf ",\"channelWidth\":\"%s\",\"channelBand\":\"%s\",\"wifiVersion\":\"%s\"}\n", width, band, wifiVer
+}'
 """#
         
         let result = try await executeWithFallback(osquery: osqueryScript, bash: bashScript)
@@ -956,13 +1001,15 @@ system_profiler SPAirPortDataType -json 2>/dev/null
             return ["error": error]
         }
         
-        // Parse system_profiler output and enhance with CoreWLAN SSID if available
-        var parsed = parseSystemProfilerWiFiData(result)
+        // wdutil returns simple JSON - just add SSID from CoreWLAN
+        var parsed = result
         
-        // Try to get real SSID from CoreWLAN (doesn't require location services)
+        // wdutil redacts SSID, so get it from CoreWLAN
         if let actualSSID = getCoreWLANSSID(), !actualSSID.isEmpty {
             parsed["ssid"] = actualSSID
-            parsed.removeValue(forKey: "note") // Remove location services warning
+        } else {
+            parsed["ssid"] = "[Location Services Required]"
+            parsed["note"] = "SSID requires Location Services permission"
         }
         
         return parsed
