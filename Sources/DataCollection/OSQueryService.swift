@@ -10,45 +10,49 @@ public class OSQueryService {
     private var extensionTablesChecked: Bool = false
     private var availableTables: Set<String> = []
     
-    /// Persistent osquery session for extension support
-    /// The extension takes ~3 seconds to register, so we keep a persistent session
-    private var persistentProcess: Process?
-    private var persistentInput: FileHandle?
-    private var persistentOutput: FileHandle?
-    private var sessionInitialized: Bool = false
+    /// Known extension tables from macadmins osquery extension
+    /// These tables require the extension to be loaded, which takes 3-4 seconds
+    /// For performance, queries to these tables should use bash fallbacks
+    private static let extensionTables: Set<String> = [
+        "network_quality", "wifi_network", "mdm", "macos_profiles",
+        "filevault_users", "pending_apple_updates", "munki_info", 
+        "munki_installs", "sofa_security_release_info", "sofa_unpatched_cves",
+        "authdb", "alt_system_info", "macadmins_unified_log", "macos_rsr",
+        "crowdstrike_falcon", "puppet_info", "puppet_logs", "puppet_state",
+        "puppet_facts", "google_chrome_profiles", "file_lines"
+    ]
     
     public init(configuration: ReportMateConfiguration) {
         self.configuration = configuration
         self.osqueryPath = configuration.osqueryPath
         
-        // Enable extension support - the extension registers after 3 seconds
-        // We use a persistent session approach to avoid waiting 3s for each query
+        // Extension support - load macadmins extension for additional tables
         if configuration.extensionEnabled {
             self.extensionPath = Self.resolveExtensionPath(configured: configuration.osqueryExtensionPath)
+            if let path = self.extensionPath {
+                ConsoleFormatter.writeDebug("OSQuery extension enabled: \(path)")
+            } else {
+                ConsoleFormatter.writeDebug("OSQuery extension enabled but not found")
+            }
         } else {
             self.extensionPath = nil
+            ConsoleFormatter.writeDebug("OSQuery extension disabled")
         }
     }
     
-    deinit {
-        cleanupPersistentSession()
-    }
-    
-    /// Cleanup the persistent osquery session
-    private func cleanupPersistentSession() {
-        if let process = persistentProcess, process.isRunning {
-            // Send .exit command
-            if let input = persistentInput {
-                let exitCmd = ".exit\n"
-                input.write(exitCmd.data(using: .utf8)!)
-                try? input.close()
+    /// Check if a query uses extension tables
+    /// Extension tables require 3-4 second startup overhead
+    public static func queryUsesExtensionTables(_ query: String) -> Bool {
+        let queryLower = query.lowercased()
+        for table in extensionTables {
+            // Check for "FROM table" or "JOIN table" patterns
+            if queryLower.contains("from \(table)") || 
+               queryLower.contains("join \(table)") ||
+               queryLower.contains("from \(table);") {
+                return true
             }
-            process.terminate()
-            persistentProcess = nil
         }
-        persistentInput = nil
-        persistentOutput = nil
-        sessionInitialized = false
+        return false
     }
     
     /// Check if osquery is available
@@ -93,12 +97,20 @@ public class OSQueryService {
     
     /// Resolve extension path from configuration or bundled location
     private static func resolveExtensionPath(configured: String?) -> String? {
-        // 1. Try configured path
+        // 1. Try configured path (highest priority - user override)
         if let configured = configured, FileManager.default.fileExists(atPath: configured) {
             return configured
         }
         
-        // 2. Try bundled in Resources/extensions/ (SPM executable bundle)
+        // 2. Try standard installation location FIRST (installed by .pkg)
+        // This has proper root ownership which osquery requires for security
+        let installedPath = "/usr/local/reportmate/macadmins_extension.ext"
+        if FileManager.default.fileExists(atPath: installedPath) {
+            return installedPath
+        }
+        
+        // 3. Try bundled in Resources/extensions/ (SPM executable bundle)
+        // Fallback for development - may have permission warnings
         // For SPM, the bundle is at .build/release/<Target>_<Target>.bundle/Resources/
         if let bundlePath = Bundle.main.resourcePath {
             let bundledExt = "\(bundlePath)/extensions/macadmins_extension.ext"
@@ -107,18 +119,12 @@ public class OSQueryService {
             }
         }
         
-        // 3. Try relative to executable (for development builds)
+        // 4. Try relative to executable (for development builds)
         let executablePath = Bundle.main.executablePath ?? ""
         let executableDir = (executablePath as NSString).deletingLastPathComponent
         let relativeToExec = "\(executableDir)/ReportMate_ReportMate.bundle/Resources/extensions/macadmins_extension.ext"
         if FileManager.default.fileExists(atPath: relativeToExec) {
             return relativeToExec
-        }
-        
-        // 4. Try standard installation location (installed by .pkg)
-        let installedPath = "/usr/local/reportmate/macadmins_extension.ext"
-        if FileManager.default.fileExists(atPath: installedPath) {
-            return installedPath
         }
 
         // 5. Try development source paths (for local builds)
@@ -202,58 +208,62 @@ public class OSQueryService {
         }
     }
     
-    /// Execute an osquery query with extension support using interactive mode
-    /// The extension takes ~3 seconds to register, so we:
-    /// 1. Start osqueryi in interactive mode with --extension
-    /// 2. Wait 4 seconds for extension to register
-    /// 3. Send the query via stdin
-    /// 4. Read the JSON output
+    /// Execute an osquery query with extension support
+    /// Uses delayed stdin approach to ensure extension has time to register before query runs
+    /// The extension takes ~6 seconds to fully register its tables
     private func executeQueryWithExtension(_ query: String) async throws -> [[String: Any]] {
         return try await withCheckedThrowingContinuation { continuation in
+            // WORKAROUND: osquery extension loading is asynchronous.
+            // When using --extension flag, the extension process starts but tables
+            // aren't immediately available. If we send the query too soon, it fails
+            // with "no such table" error.
+            //
+            // Solution: Use bash to delay query input until extension has registered.
+            // We pipe the query via a subshell that sleeps first.
+            
             let task = Process()
-            task.executableURL = URL(fileURLWithPath: osqueryPath)
+            task.executableURL = URL(fileURLWithPath: "/bin/bash")
             
-            // Use interactive mode with extension
-            // --json makes all SELECT output JSON formatted
-            // --extension loads the macadmins extension as a child process
-            // --extensions_timeout gives the extension time to register
-            task.arguments = [
-                "--json",
-                "--extension", extensionPath!,
-                "--extensions_timeout", "10"
-            ]
+            // Escape the query for shell
+            let escapedQuery = query.replacingOccurrences(of: "'", with: "'\"'\"'")
             
-            let inputPipe = Pipe()
+            // Use bash -c with a subshell that:
+            // 1. Sleeps 7 seconds to let extension register
+            // 2. Sends the query
+            // 3. Sends .exit to close osqueryi
+            // The pipe to osqueryi waits for input, giving extension time to load
+            let script = """
+            (sleep 7 && echo '\(escapedQuery)' && echo '.exit') | "\(osqueryPath)" --json --extension "\(extensionPath!)" --extensions_timeout 15
+            """
+            
+            task.arguments = ["-c", script]
+            
             let outputPipe = Pipe()
             let errorPipe = Pipe()
-            task.standardInput = inputPipe
             task.standardOutput = outputPipe
             task.standardError = errorPipe
             
             do {
                 try task.run()
                 
-                // Wait 4 seconds for the extension to register its tables
-                // The extension has a 3-second sleep on startup
-                Thread.sleep(forTimeInterval: 4.0)
-                
-                // Send the query followed by .exit
-                let commands = "\(query)\n.exit\n"
-                inputPipe.fileHandleForWriting.write(commands.data(using: .utf8)!)
-                try? inputPipe.fileHandleForWriting.close()
-                
-                // Read all output
                 let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
                 let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
                 
                 task.waitUntilExit()
                 
-                // Parse the JSON output
-                // The output will include the osqueryi prompt, so we need to extract just the JSON
                 guard let outputString = String(data: outputData, encoding: .utf8) else {
                     continuation.resume(throwing: OSQueryError.invalidOutput("Could not decode output as UTF-8"))
                     return
                 }
+                
+                // Debug: log output for extension debugging (only when verbose)
+                let errorString = String(data: errorData, encoding: .utf8) ?? ""
+                if ConsoleFormatter.verboseLevel >= 3 {
+                    if !errorString.isEmpty && (errorString.contains("error") || errorString.contains("Error")) {
+                        ConsoleFormatter.writeDebug("OSQuery stderr: \(errorString.prefix(200))...")
+                    }
+                }
+                ConsoleFormatter.writeDebug("OSQuery output length: \(outputString.count) chars")
                 
                 // Find the JSON array in the output (starts with [ and ends with ])
                 if let jsonStart = outputString.firstIndex(of: "["),
@@ -273,9 +283,15 @@ public class OSQueryService {
                 }
                 
                 // Check for errors in stderr or output
-                let errorString = String(data: errorData, encoding: .utf8) ?? ""
                 if outputString.contains("no such table") || errorString.contains("no such table") {
                     continuation.resume(throwing: OSQueryError.executionFailed("no such table"))
+                    return
+                }
+                
+                // If task failed with non-zero exit code
+                if task.terminationStatus != 0 {
+                    let errorMessage = errorString.isEmpty ? "osquery exited with code \(task.terminationStatus)" : errorString
+                    continuation.resume(throwing: OSQueryError.executionFailed(errorMessage))
                     return
                 }
                 
