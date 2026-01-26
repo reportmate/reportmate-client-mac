@@ -34,38 +34,43 @@ open class BaseModuleProcessor: ModuleProcessor, @unchecked Sendable {
     
     /// Execute osquery with fallback to bash
     /// 
-    /// Two-tier fallback strategy:
-    /// 1. Try osquery (with macadmins extension if available - provides mdm, macos_profiles, alt_system_info, etc.)
-    /// 2. Try bash command fallback
-    ///
-    /// The extension is automatically loaded by OSQueryService when available.
-    /// Extension tables: mdm, macos_profiles, filevault_users, alt_system_info, unified_log, pending_apple_updates, etc.
+    /// Strategy:
+    /// 1. Try osquery first (including extension tables when extension is enabled)
+    /// 2. Fall back to bash if osquery fails or returns empty results
+    /// 3. Extension tables require the macadmins extension to be loaded
     public func executeWithFallback(
         osquery: String? = nil,
         bash: String? = nil
     ) async throws -> [String: Any] {
+        var osqueryEmpty = false
         
-        // Try osquery first (extension loaded automatically if available)
+        // Try osquery first
         if let osqueryCmd = osquery {
             do {
                 let osqueryService = OSQueryService(configuration: configuration)
                 if await osqueryService.isAvailable() {
                     ConsoleFormatter.writeDebug("Trying osquery for module \(moduleId)...")
                     let results = try await osqueryService.executeQuery(osqueryCmd)
-                    // Unwrap single result, or return as items
-                    if results.count == 1, let first = results.first {
+                    
+                    // Check if results are empty - this often happens with extension tables
+                    // when the extension hasn't registered yet
+                    if results.isEmpty {
+                        osqueryEmpty = true
+                        ConsoleFormatter.writeDebug("OSQuery returned empty results, trying bash fallback...")
+                    } else if results.count == 1, let first = results.first {
                         ConsoleFormatter.writeDebug("OSQuery succeeded for module \(moduleId)")
                         return first
+                    } else {
+                        ConsoleFormatter.writeDebug("OSQuery succeeded for module \(moduleId) with \(results.count) results")
+                        return ["items": results]
                     }
-                    ConsoleFormatter.writeDebug("OSQuery succeeded for module \(moduleId) with \(results.count) results")
-                    return ["items": results]
                 }
             } catch {
-                ConsoleFormatter.writeDebug("OSQuery table not available, using bash fallback: \(error)")
+                ConsoleFormatter.writeDebug("OSQuery failed, using bash fallback: \(error)")
             }
         }
         
-        // Try bash fallback
+        // Try bash fallback (if osquery failed, not available, or returned empty)
         if let bashCmd = bash {
             do {
                 ConsoleFormatter.writeDebug("Trying bash fallback for module \(moduleId)...")
@@ -92,6 +97,11 @@ open class BaseModuleProcessor: ModuleProcessor, @unchecked Sendable {
         }
         
         // All fallbacks exhausted - return empty data instead of crashing
+        // If osquery returned empty but bash wasn't provided, return the empty result
+        if osqueryEmpty {
+            return ["items": []]
+        }
+        
         ConsoleFormatter.writeWarning("All data sources exhausted for module \(moduleId), returning empty data")
         return [:]
     }
