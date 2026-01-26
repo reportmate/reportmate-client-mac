@@ -526,14 +526,12 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     // MARK: - FileVault Users (macadmins extension: filevault_users)
     
     private func collectFileVaultUsers() async throws -> [[String: Any]] {
-        // macadmins extension: filevault_users table provides detailed user information
+        // macadmins extension: filevault_users table
+        // Columns: username, uuid
         let osqueryScript = """
             SELECT 
                 username,
-                uid,
-                user_guid,
-                user_uuid,
-                passphrase_required
+                uuid
             FROM filevault_users;
         """
         
@@ -1456,16 +1454,16 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     private func collectSofaUnpatchedCVEs() async throws -> [[String: Any]] {
         // macadmins extension: sofa_unpatched_cves table
-        // Provides CVE information for unpatched vulnerabilities
+        // Columns: os_version, cve, patched_version, actively_exploited, url
         let osqueryScript = """
             SELECT 
                 os_version,
                 cve,
-                product_name,
+                patched_version,
                 actively_exploited,
-                release_date
+                url
             FROM sofa_unpatched_cves
-            ORDER BY actively_exploited DESC, release_date DESC
+            ORDER BY actively_exploited DESC
             LIMIT 50;
         """
         
@@ -1521,16 +1519,17 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     private func collectSofaSecurityReleaseInfo() async throws -> [String: Any] {
         // macadmins extension: sofa_security_release_info table
-        // Provides information about security releases for the current OS
+        // Columns: update_name, product_version, release_date, security_info, unique_cves_count, days_since_previous_release, os_version, url
         let osqueryScript = """
             SELECT 
+                update_name,
+                product_version,
                 os_version,
                 release_date,
-                security_release,
-                days_since_release,
-                actively_exploited_count,
-                total_cve_count,
-                update_available
+                security_info,
+                unique_cves_count,
+                days_since_previous_release,
+                url
             FROM sofa_security_release_info
             LIMIT 1;
         """
