@@ -221,6 +221,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Change to script directory to ensure relative paths work
+cd "$SCRIPT_DIR"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # VERSION
 # ═══════════════════════════════════════════════════════════════════════════
@@ -468,7 +471,7 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 
 if [ "$SKIP_PKG" = false ]; then
-    log_step "Creating PKG installer with .app bundle (Outset-style)..."
+    log_step "Creating PKG installer with .app bundle..."
     
     # ═══════════════════════════════════════════════════════════════════════════
     # CREATE APP BUNDLE STRUCTURE (like macadmins/outset)
