@@ -5,6 +5,7 @@ import Foundation
 /// Reference: https://github.com/munkireport/security
 /// No Python - uses osquery for: sip_config, gatekeeper, alf, disk_encryption, xprotect_entries
 /// Bash fallback for: SecureEnclave, ActivationLock, SecureBoot, MRT status
+/// EDR detection: Microsoft Defender (mdatp), CrowdStrike, SentinelOne, Carbon Black
 public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     public init(configuration: ReportMateConfiguration) {
@@ -13,7 +14,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     public override func collectData() async throws -> ModuleData {
         // Total collection steps for progress tracking
-        let totalSteps = 21
+        let totalSteps = 23
         
         // Collect security data sequentially with progress tracking
         ConsoleFormatter.writeQueryProgress(queryName: "sip_status", current: 1, total: totalSteps)
@@ -79,6 +80,12 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         ConsoleFormatter.writeQueryProgress(queryName: "certificates", current: 21, total: totalSteps)
         let certificates = try await collectCertificates()
         
+        ConsoleFormatter.writeQueryProgress(queryName: "endpoint_security", current: 22, total: totalSteps)
+        let endpointSecurity = try await collectEndpointSecurityExtensions()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "edr_products", current: 23, total: totalSteps)
+        let edrProducts = try await collectEDRProducts()
+        
         // Build security data dictionary
         let securityData: [String: Any] = [
             "systemIntegrityProtection": sip,
@@ -101,7 +108,9 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "unpatchedCVEs": unpatchedCVEs,
             "securityReleaseInfo": securityRelease,
             "remoteManagement": remoteMgmt,
-            "certificates": certificates
+            "certificates": certificates,
+            "endpointSecurity": endpointSecurity,
+            "edrProducts": edrProducts
         ]
         
         return BaseModuleData(moduleId: moduleId, data: securityData)
@@ -1833,5 +1842,380 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         }
         
         return certificates
+    }
+    
+    // MARK: - EDR Products (Microsoft Defender, CrowdStrike, SentinelOne, Carbon Black)
+    
+    /// Collect EDR/AV product details for security analyst reporting
+    /// Detects installed EDR products and collects health/status information
+    private func collectEDRProducts() async throws -> [String: Any] {
+        var products: [[String: Any]] = []
+        
+        // Microsoft Defender for Endpoint (mdatp)
+        let defender = try await collectMicrosoftDefender()
+        if !defender.isEmpty {
+            products.append(defender)
+        }
+        
+        // CrowdStrike Falcon Sensor
+        let crowdstrike = try await collectCrowdStrike()
+        if !crowdstrike.isEmpty {
+            products.append(crowdstrike)
+        }
+        
+        // SentinelOne
+        let sentinelone = try await collectSentinelOne()
+        if !sentinelone.isEmpty {
+            products.append(sentinelone)
+        }
+        
+        ConsoleFormatter.writeDebug("EDR products: found \(products.count) installed products")
+        
+        return [
+            "products": products,
+            "count": products.count,
+            "hasEDR": !products.isEmpty
+        ]
+    }
+    
+    /// Simple bash command execution helper for EDR collection
+    private func executeBashScript(_ script: String) async throws -> String {
+        let process = Process()
+        let pipe = Pipe()
+        
+        process.standardOutput = pipe
+        process.standardError = pipe
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", script]
+        
+        try process.run()
+        process.waitUntilExit()
+        
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+    
+    /// Collect Microsoft Defender for Endpoint status via mdatp CLI
+    private func collectMicrosoftDefender() async throws -> [String: Any] {
+        // Check if mdatp is installed
+        let checkOutput = try await executeBashScript("[ -x /usr/local/bin/mdatp ] && echo 'installed' || echo 'not_installed'")
+        guard checkOutput.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) == "installed" else {
+            ConsoleFormatter.writeDebug("Microsoft Defender: mdatp CLI not installed")
+            return [:]
+        }
+        
+        ConsoleFormatter.writeDebug("Microsoft Defender: mdatp CLI found, collecting health data")
+        
+        do {
+            // Get health status
+            let healthOutput = try await executeBashScript("/usr/local/bin/mdatp health --output json 2>/dev/null || echo '{}'")
+            
+            guard let healthData = healthOutput.data(using: .utf8),
+                  let healthJson = try? JSONSerialization.jsonObject(with: healthData) as? [String: Any] else {
+                ConsoleFormatter.writeDebug("Microsoft Defender: failed to parse health JSON")
+                return [:]
+            }
+            
+            // Get scan list - use jq to extract just last scan and threat count to reduce output size
+            let scanSummaryScript = """
+            /usr/local/bin/mdatp scan list --output json 2>/dev/null | python3 -c '
+import json,sys
+try:
+    scans = json.load(sys.stdin)
+    last = scans[-1] if scans else {}
+    threats = sum(len(s.get("threats",[]) or []) for s in scans)
+    print(json.dumps({"lastScan": last, "totalThreats": threats}))
+except: print("{}")
+' || echo '{}'
+"""
+            let scanSummaryOutput = try await executeBashScript(scanSummaryScript)
+            
+            var lastScan: [String: Any]? = nil
+            var totalThreatsDetected = 0
+            
+            if let summaryData = scanSummaryOutput.data(using: .utf8),
+               let summaryJson = try? JSONSerialization.jsonObject(with: summaryData) as? [String: Any] {
+                lastScan = summaryJson["lastScan"] as? [String: Any]
+                totalThreatsDetected = summaryJson["totalThreats"] as? Int ?? 0
+            }
+            
+            // Parse health data for key fields
+            let realTimeEnabled = parseDefenderBool(healthJson["realTimeProtectionEnabled"])
+            let cloudEnabled = parseDefenderBool(healthJson["cloudEnabled"])
+            let tamperProtection = parseDefenderValue(healthJson["tamperProtection"])
+            let behaviorMonitoring = parseDefenderBool(healthJson["behaviorMonitoring"])
+            
+            // Parse definitions update time (milliseconds since epoch)
+            var definitionsUpdated: String? = nil
+            if let defUpdatedMs = healthJson["definitionsUpdated"] as? String,
+               let ms = Int64(defUpdatedMs) {
+                let date = Date(timeIntervalSince1970: Double(ms) / 1000.0)
+                let formatter = ISO8601DateFormatter()
+                definitionsUpdated = formatter.string(from: date)
+            }
+            
+            // Parse last scan time
+            var lastScanTime: String? = nil
+            var lastScanType: String? = nil
+            var lastScanFilesScanned: Int? = nil
+            if let scan = lastScan {
+                if let startMs = scan["startTime"] as? Int64 {
+                    let date = Date(timeIntervalSince1970: Double(startMs) / 1000.0)
+                    let formatter = ISO8601DateFormatter()
+                    lastScanTime = formatter.string(from: date)
+                } else if let startStr = scan["startTime"] as? String, let startMs = Int64(startStr) {
+                    let date = Date(timeIntervalSince1970: Double(startMs) / 1000.0)
+                    let formatter = ISO8601DateFormatter()
+                    lastScanTime = formatter.string(from: date)
+                }
+                lastScanType = scan["type"] as? String
+                if let files = scan["filesScanned"] as? Int {
+                    lastScanFilesScanned = files
+                } else if let filesStr = scan["filesScanned"] as? String, let files = Int(filesStr) {
+                    lastScanFilesScanned = files
+                }
+            }
+            
+            // Health issues
+            let healthIssues = healthJson["healthIssues"] as? [String] ?? []
+            let isHealthy = healthJson["healthy"] as? Bool ?? false
+            
+            ConsoleFormatter.writeDebug("Microsoft Defender: healthy=\(isHealthy), realTime=\(realTimeEnabled), threats=\(totalThreatsDetected)")
+            
+            return [
+                "name": "Microsoft Defender for Endpoint",
+                "vendor": "Microsoft",
+                "identifier": "com.microsoft.wdav",
+                "installed": true,
+                "version": healthJson["appVersion"] as? String ?? "",
+                "engineVersion": healthJson["engineVersion"] as? String ?? "",
+                "definitionsVersion": healthJson["definitionsVersion"] as? String ?? "",
+                "definitionsUpdated": definitionsUpdated ?? "",
+                "realTimeProtection": realTimeEnabled,
+                "cloudProtection": cloudEnabled,
+                "tamperProtection": tamperProtection == "block",
+                "behaviorMonitoring": behaviorMonitoring,
+                "healthy": isHealthy,
+                "healthIssues": healthIssues,
+                "licensed": healthJson["licensed"] as? Bool ?? false,
+                "orgId": healthJson["orgId"] as? String ?? "",
+                "machineId": healthJson["edrMachineId"] as? String ?? "",
+                "releaseRing": healthJson["releaseRing"] as? String ?? "",
+                "lastScanTime": lastScanTime ?? "",
+                "lastScanType": lastScanType ?? "",
+                "lastScanFilesScanned": lastScanFilesScanned ?? 0,
+                "totalThreatsDetected": totalThreatsDetected,
+                "networkProtection": parseDefenderValue(healthJson["networkProtectionEnforcementLevel"]),
+                "deviceControl": healthJson["deviceControlEnforcementLevel"] as? String ?? "",
+                "fullDiskAccess": healthJson["fullDiskAccessEnabled"] as? Bool ?? false
+            ]
+        } catch {
+            ConsoleFormatter.writeDebug("Failed to collect Microsoft Defender status: \(error.localizedDescription)")
+            return [:]
+        }
+    }
+    
+    /// Parse Defender boolean values (handles nested managed value structure)
+    private func parseDefenderBool(_ value: Any?) -> Bool {
+        if let dict = value as? [String: Any] {
+            if let v = dict["value"] as? Bool { return v }
+            if let v = dict["value"] as? String { return v == "enabled" || v == "true" }
+        }
+        if let b = value as? Bool { return b }
+        if let s = value as? String { return s == "enabled" || s == "true" }
+        return false
+    }
+    
+    /// Parse Defender string values (handles nested managed value structure)
+    private func parseDefenderValue(_ value: Any?) -> String {
+        if let dict = value as? [String: Any] {
+            if let v = dict["value"] as? String { return v }
+            if let v = dict["value"] as? Bool { return v ? "enabled" : "disabled" }
+        }
+        if let s = value as? String { return s }
+        if let b = value as? Bool { return b ? "enabled" : "disabled" }
+        return ""
+    }
+    
+    /// Collect CrowdStrike Falcon sensor status
+    private func collectCrowdStrike() async throws -> [String: Any] {
+        // Check if CrowdStrike is installed
+        let checkOutput = try await executeBashScript("[ -x /Applications/Falcon.app/Contents/Resources/falconctl ] && echo 'installed' || echo 'not_installed'")
+        guard checkOutput.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) == "installed" else {
+            return [:]
+        }
+        
+        do {
+            // Get Falcon sensor stats (note: requires sudo in most cases)
+            let statsOutput = try await executeBashScript("/Applications/Falcon.app/Contents/Resources/falconctl stats 2>/dev/null || echo ''")
+            
+            // Parse version
+            var version = ""
+            var agentId = ""
+            var customerId = ""
+            var state = "unknown"
+            
+            for line in statsOutput.components(separatedBy: "\n") {
+                let trimmed = line.trimmingCharacters(in: CharacterSet.whitespaces)
+                if trimmed.hasPrefix("version:") {
+                    version = trimmed.replacingOccurrences(of: "version:", with: "").trimmingCharacters(in: CharacterSet.whitespaces)
+                } else if trimmed.hasPrefix("agentID:") {
+                    agentId = trimmed.replacingOccurrences(of: "agentID:", with: "").trimmingCharacters(in: CharacterSet.whitespaces)
+                } else if trimmed.hasPrefix("customerID:") {
+                    customerId = trimmed.replacingOccurrences(of: "customerID:", with: "").trimmingCharacters(in: CharacterSet.whitespaces)
+                } else if trimmed.hasPrefix("State:") {
+                    state = trimmed.replacingOccurrences(of: "State:", with: "").trimmingCharacters(in: CharacterSet.whitespaces).lowercased()
+                }
+            }
+            
+            return [
+                "name": "CrowdStrike Falcon",
+                "vendor": "CrowdStrike",
+                "identifier": "com.crowdstrike.falcon",
+                "installed": true,
+                "version": version,
+                "agentId": agentId,
+                "customerId": customerId,
+                "state": state,
+                "running": state == "connected" || state == "running"
+            ]
+        } catch {
+            ConsoleFormatter.writeDebug("Failed to collect CrowdStrike status: \(error.localizedDescription)")
+            return [:]
+        }
+    }
+    
+    /// Collect SentinelOne agent status
+    private func collectSentinelOne() async throws -> [String: Any] {
+        // Check if SentinelOne is installed
+        let checkOutput = try await executeBashScript("[ -d '/Library/Sentinel/sentinel-agent.bundle' ] && echo 'installed' || echo 'not_installed'")
+        guard checkOutput.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) == "installed" else {
+            return [:]
+        }
+        
+        do {
+            // Get SentinelOne agent version from bundle
+            let versionOutput = try await executeBashScript("defaults read '/Library/Sentinel/sentinel-agent.bundle/Contents/Info.plist' CFBundleShortVersionString 2>/dev/null || echo ''")
+            
+            // Check if agent is running
+            let runningOutput = try await executeBashScript("pgrep -x 'sentineld' >/dev/null && echo 'running' || echo 'stopped'")
+            
+            let version = versionOutput.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            let isRunning = runningOutput.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) == "running"
+            
+            return [
+                "name": "SentinelOne",
+                "vendor": "SentinelOne",
+                "identifier": "com.sentinelone.sentinel-agent",
+                "installed": true,
+                "version": version,
+                "running": isRunning,
+                "state": isRunning ? "connected" : "stopped"
+            ]
+        } catch {
+            ConsoleFormatter.writeDebug("Failed to collect SentinelOne status: \(error.localizedDescription)")
+            return [:]
+        }
+    }
+    
+    // MARK: - Endpoint Security Extensions (systemextensionsctl list)
+    
+    /// Collect endpoint security extensions using systemextensionsctl
+    /// This detects EDR/security products like CrowdStrike, SentinelOne, Carbon Black
+    private func collectEndpointSecurityExtensions() async throws -> [String: Any] {
+        // Parse systemextensionsctl output for endpoint security extensions
+        // The output format has category headers like "--- com.apple.system_extension.endpoint_security"
+        // followed by extension lines
+        let bashScript = """
+#!/bin/bash
+# Parse systemextensionsctl list output for endpoint security extensions
+
+output=$(systemextensionsctl list 2>&1)
+
+echo "{"
+echo "  \\"items\\": ["
+
+first=true
+current_category=""
+
+while IFS= read -r line; do
+    # Detect category headers
+    if [[ "$line" =~ ^---\\ com\\.apple\\.system_extension\\.([a-z_]+) ]]; then
+        current_category="${BASH_REMATCH[1]}"
+        continue
+    fi
+    
+    # Skip headers and empty lines
+    [[ -z "$line" ]] && continue
+    [[ "$line" =~ ^enabled ]] && continue
+    [[ "$line" =~ ^[0-9]+\\ extension ]] && continue
+    
+    # Parse extension lines with bundleId
+    bundleId=$(echo "$line" | grep -oE 'com\\.[a-zA-Z0-9._-]+' | head -1)
+    [[ -z "$bundleId" ]] && continue
+    
+    # Extract version from parentheses
+    version=$(echo "$line" | grep -oE '\\([0-9.]+[^)]*\\)' | head -1 | tr -d '()')
+    
+    # Extract state from brackets at end
+    state=$(echo "$line" | grep -oE '\\[[^]]+\\]$' | tr -d '[]')
+    
+    # Extract teamId (10 char alphanumeric)
+    teamId=$(echo "$line" | grep -oE '[A-Z0-9]{10}' | head -1)
+    
+    # Check enabled/active markers
+    enabled="false"
+    active="false"
+    [[ "$line" =~ ^\\*[[:space:]] ]] && enabled="true"
+    [[ "$line" =~ ^\\*[[:space:]]\\*[[:space:]] ]] && active="true"
+    
+    # Extract name - text between version parens and state bracket
+    name=$(echo "$line" | sed -E 's/.*\\([^)]+\\)[[:space:]]*//' | sed -E 's/[[:space:]]*\\[.*$//')
+    
+    if [[ "$first" == "true" ]]; then
+        first=false
+    else
+        echo ","
+    fi
+    
+    echo "    { \\"identifier\\": \\"$bundleId\\", \\"teamId\\": \\"$teamId\\", \\"name\\": \\"$name\\", \\"version\\": \\"$version\\", \\"category\\": \\"$current_category\\", \\"enabled\\": $enabled, \\"active\\": $active, \\"state\\": \\"$state\\" }"
+    
+done <<< "$output"
+
+echo "  ]"
+echo "}"
+"""
+        
+        do {
+            let result = try await executeWithFallback(osquery: nil, bash: bashScript)
+            
+            // Extract extensions array from result
+            var extensions: [[String: Any]] = []
+            if let items = result["items"] as? [[String: Any]] {
+                extensions = items
+            }
+            
+            // Filter to only endpoint_security and network_extension categories (common for EDR)
+            let endpointSecurityExtensions = extensions.filter { ext in
+                let cat = ext["category"] as? String ?? ""
+                return cat == "endpoint_security" || cat == "network_extension"
+            }
+            
+            ConsoleFormatter.writeDebug("Endpoint security extensions: found \(endpointSecurityExtensions.count) relevant extensions out of \(extensions.count) total")
+            
+            return [
+                "extensions": endpointSecurityExtensions,
+                "allExtensions": extensions,
+                "count": endpointSecurityExtensions.count,
+                "error": ""
+            ]
+        } catch {
+            ConsoleFormatter.writeDebug("Failed to collect endpoint security extensions: \(error.localizedDescription)")
+            return [
+                "extensions": [] as [[String: Any]],
+                "count": 0,
+                "error": error.localizedDescription
+            ]
+        }
     }
 }
