@@ -53,8 +53,8 @@ on:
 
 env:
   PRODUCT_NAME: managedreportsrunner
-  BUNDLE_ID: com.github.reportmate.managedreportsrunner
-  PKG_IDENTIFIER: ca.ecuad.reportmate.client
+  BUNDLE_ID: com.github.reportmate
+  PKG_IDENTIFIER: com.github.reportmate
   OSQUERY_VERSION: "5.21.0"
 
 jobs:
@@ -338,6 +338,8 @@ jobs:
               <string>/Library/Managed Reports/logs/reportmate-${schedule}.log</string>
               <key>StandardErrorPath</key>
               <string>/Library/Managed Reports/logs/reportmate-${schedule}.error.log</string>
+              <key>AssociatedBundleIdentifiers</key>
+              <string>com.github.reportmate</string>
           </dict>
           </plist>
           DAEMON
