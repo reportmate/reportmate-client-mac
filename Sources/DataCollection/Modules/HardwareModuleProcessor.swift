@@ -199,8 +199,10 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             // Get friendly model name (e.g., "Mac mini" or "Mac mini (2024)")
             let modelName = systemDict["model_name"] as? String ?? ""
             
-            // Check if model_name already includes a year (e.g., "Mac mini (2024)")
-            let hasYearPattern = modelName.range(of: "\\(\\d{4}\\)", options: .regularExpression) != nil
+            // Check if model_name already includes a year (e.g., "Mac mini (2024)" or "iMac (24-inch, M1, 2021)")
+            // Match any 4-digit year in parentheses
+            let yearPattern = "\\((?:[^)]*,\\s*)?\\d{4}\\)"
+            let hasYearPattern = modelName.range(of: yearPattern, options: .regularExpression) != nil
             
             // Set model
             if !modelName.isEmpty && modelName != "Mac" {
@@ -257,7 +259,8 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             
             // Parse performance/efficiency cores from system_profiler (format: "proc 14:10:4")
             // This is only available on Apple Silicon
-            if let numberProcs = procDict["number_processors"] as? String {
+            var parsedCores = false
+            if let numberProcs = procDict["number_processors"] as? String, !numberProcs.isEmpty {
                 // Format: "proc total:performance:efficiency"
                 let pattern = "proc (\\d+):(\\d+):(\\d+)"
                 if let regex = try? NSRegularExpression(pattern: pattern),
@@ -268,7 +271,18 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                         windowsProcessor["cores"] = Int(numberProcs[totalRange])
                         windowsProcessor["performance_cores"] = Int(numberProcs[perfRange])
                         windowsProcessor["efficiency_cores"] = Int(numberProcs[effRange])
+                        parsedCores = true
                     }
+                }
+            }
+            
+            // Fallback: try hw.perflevel values from bash script if system_profiler didn't work
+            if !parsedCores {
+                if let perfStr = procDict["performance_cores"] as? String, !perfStr.isEmpty, let perf = Int(perfStr) {
+                    windowsProcessor["performance_cores"] = perf
+                }
+                if let effStr = procDict["efficiency_cores"] as? String, !effStr.isEmpty, let eff = Int(effStr) {
+                    windowsProcessor["efficiency_cores"] = eff
                 }
             }
             
@@ -328,6 +342,10 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         }
         
         // 7. displays - Array of connected displays
+        // Get model identifier for fallback built-in display lookup
+        let systemDict = systemInfo
+        let modelId = systemDict["hardware_model"] as? String ?? ""
+        
         if let gpuArray = graphicsInfo["SPDisplaysDataType"] as? [[String: Any]] {
             var displaysArray: [[String: Any]] = []
             
@@ -390,12 +408,56 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                             displayInfo["connection_type"] = connType.replacingOccurrences(of: "spdisplays_", with: "")
                         }
                         
-                        // Display type (internal/external) - Studio Display is external, built-in is internal
+                        // Display type (internal/external) - detect based on name and connection
+                        // "Built-in" = internal, "Color LCD" on laptops = internal, others = external
                         let displayName = displayInfo["name"] as? String ?? ""
-                        displayInfo["type"] = displayName.contains("Built-in") ? "internal" : "external"
+                        if displayName.contains("Built-in") || displayName == "Color LCD" {
+                            displayInfo["type"] = "internal"
+                        } else {
+                            displayInfo["type"] = "external"
+                        }
                         
                         displaysArray.append(displayInfo)
                     }
+                }
+            }
+            
+            // Fallback: If no displays found OR display has generic/unhelpful name, use model-based lookup
+            // This handles Apple Silicon iMacs and some laptops where system_profiler doesn't enumerate properly
+            let needsModelLookup = displaysArray.isEmpty || 
+                                   (displaysArray.count == 1 && 
+                                    (displaysArray[0]["name"] as? String == "iMac" || 
+                                     displaysArray[0]["name"] as? String == "MacBook Pro" ||
+                                     displaysArray[0]["name"] as? String == "MacBook Air"))
+            
+            if needsModelLookup {
+                if var builtInDisplay = getBuiltInDisplayInfo(from: modelId) {
+                    // Add is_main_display flag for built-in displays
+                    builtInDisplay["is_main_display"] = true
+                    builtInDisplay["online"] = true
+                    builtInDisplay["data_source"] = "model_lookup"  // Indicate this came from our database
+                    displaysArray = [builtInDisplay]  // Replace generic data with accurate model data
+                    print("[\(timestamp())] Using model-based display info for \(modelId)")
+                }
+            }
+            
+            // For laptops (MacBook Air/Pro): ALWAYS add built-in display even if lid is closed
+            // This ensures we show the built-in display specs even when using external displays only
+            let isLaptop = modelId.hasPrefix("MacBookAir") || modelId.hasPrefix("MacBookPro") || modelId.hasPrefix("Mac14,") || modelId.hasPrefix("Mac15,")
+            if isLaptop && !displaysArray.isEmpty {
+                // Check if we already have the built-in display (from model lookup or system_profiler)
+                let hasBuiltIn = displaysArray.contains { display in
+                    (display["type"] as? String == "internal") || 
+                    (display["data_source"] as? String == "model_lookup")
+                }
+                
+                // If no built-in display found, add it from model database (lid is closed)
+                if !hasBuiltIn, var builtInDisplay = getBuiltInDisplayInfo(from: modelId) {
+                    builtInDisplay["is_main_display"] = false  // External display is main when lid closed
+                    builtInDisplay["online"] = false  // Lid is closed, display is inactive
+                    builtInDisplay["data_source"] = "model_lookup"
+                    displaysArray.append(builtInDisplay)  // Add alongside external displays
+                    print("[\(timestamp())] Added closed built-in display for \(modelId)")
                 }
             }
             
@@ -418,11 +480,21 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 windowsMemory["physical_memory"] = Int64(memBytes)
             }
             
-            // Memory type (e.g., "LPDDR5")
-            if let memType = memDict["dimm_type"] as? String {
+            // Memory type (e.g., "LPDDR5", "LPDDR4", "DDR4")
+            // Priority: dimm_type (from system_profiler) > memory_type (from bash)
+            if let memType = memDict["dimm_type"] as? String, !memType.isEmpty {
+                windowsMemory["type"] = memType
+            } else if let memType = memDict["memory_type"] as? String, !memType.isEmpty, memType != "Unknown" {
                 windowsMemory["type"] = memType
             } else {
-                windowsMemory["type"] = memDict["memory_type"] as? String ?? "Unknown"
+                windowsMemory["type"] = "Unknown"
+            }
+            
+            // Add unified_memory flag for Apple Silicon (separate from type)
+            let procDict = processorInfo
+            if let cpuBrand = procDict["cpu_brand"] as? String,
+               (cpuBrand.contains("M1") || cpuBrand.contains("M2") || cpuBrand.contains("M3") || cpuBrand.contains("M4")) {
+                windowsMemory["unified_memory"] = true
             }
             
             // Memory manufacturer (e.g., "Hynix", "Samsung")
@@ -833,6 +905,442 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         return modelYearMap[modelIdentifier] ?? ""
     }
     
+    // MARK: - Built-in Display Info
+    
+    /// Get built-in display specifications for known Mac models
+    /// This is used as a fallback when system_profiler doesn't enumerate the display
+    /// (common on Apple Silicon iMacs and some laptops)
+    private func getBuiltInDisplayInfo(from modelIdentifier: String) -> [String: Any]? {
+        // Database of known built-in displays for Mac models
+        // Source: https://support.apple.com/specs
+        let displayInfoMap: [String: [String: Any]] = [
+            // iMac 24-inch (M1, 2021)
+            "iMac21,1": [
+                "name": "Retina 4.5K Display",
+                "resolution": "4480 x 2520",
+                "diagonal_inches": 24,
+                "ppi": 218,
+                "display_type": "Retina LCD",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 500,
+                "true_tone": true,
+                "type": "internal"
+            ],
+            "iMac21,2": [
+                "name": "Retina 4.5K Display",
+                "resolution": "4480 x 2520",
+                "diagonal_inches": 24,
+                "ppi": 218,
+                "display_type": "Retina LCD",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 500,
+                "true_tone": true,
+                "type": "internal"
+            ],
+            // iMac 24-inch (M3, 2023)
+            "Mac15,4": [
+                "name": "Retina 4.5K Display",
+                "resolution": "4480 x 2520",
+                "diagonal_inches": 24,
+                "ppi": 218,
+                "display_type": "Retina LCD",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 500,
+                "true_tone": true,
+                "type": "internal"
+            ],
+            "Mac15,5": [
+                "name": "Retina 4.5K Display",
+                "resolution": "4480 x 2520",
+                "diagonal_inches": 24,
+                "ppi": 218,
+                "display_type": "Retina LCD",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 500,
+                "true_tone": true,
+                "type": "internal"
+            ],
+            // iMac 24-inch (M4, 2024)
+            "Mac16,3": [
+                "name": "Retina 4.5K Display",
+                "resolution": "4480 x 2520",
+                "diagonal_inches": 24,
+                "ppi": 218,
+                "display_type": "Retina LCD",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 500,
+                "true_tone": true,
+                "nanotexture_option": true,
+                "type": "internal"
+            ],
+            // MacBook Air 13-inch (M1, 2020)
+            "MacBookAir10,1": [
+                "name": "Retina Display",
+                "resolution": "2560 x 1600",
+                "diagonal_inches": 13.3,
+                "ppi": 227,
+                "display_type": "Retina LCD",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 400,
+                "true_tone": true,
+                "type": "internal"
+            ],
+            // MacBook Air 13-inch (M2, 2022)
+            "Mac14,2": [
+                "name": "Liquid Retina Display",
+                "resolution": "2560 x 1664",
+                "diagonal_inches": 13.6,
+                "ppi": 224,
+                "display_type": "Liquid Retina",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 500,
+                "true_tone": true,
+                "type": "internal"
+            ],
+            // MacBook Air 15-inch (M2, 2023)
+            "Mac14,15": [
+                "name": "Liquid Retina Display",
+                "resolution": "2880 x 1864",
+                "diagonal_inches": 15.3,
+                "ppi": 224,
+                "display_type": "Liquid Retina",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 500,
+                "true_tone": true,
+                "type": "internal"
+            ],
+            // MacBook Air 13-inch (M3, 2024)
+            "Mac15,12": [
+                "name": "Liquid Retina Display",
+                "resolution": "2560 x 1664",
+                "diagonal_inches": 13.6,
+                "ppi": 224,
+                "display_type": "Liquid Retina",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 500,
+                "true_tone": true,
+                "type": "internal"
+            ],
+            // MacBook Air 15-inch (M3, 2024)
+            "Mac15,13": [
+                "name": "Liquid Retina Display",
+                "resolution": "2880 x 1864",
+                "diagonal_inches": 15.3,
+                "ppi": 224,
+                "display_type": "Liquid Retina",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 500,
+                "true_tone": true,
+                "type": "internal"
+            ],
+            // MacBook Pro 13-inch (M2, 2022)
+            "Mac14,7": [
+                "name": "Retina Display",
+                "resolution": "2560 x 1600",
+                "diagonal_inches": 13.3,
+                "ppi": 227,
+                "display_type": "Retina LCD",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 500,
+                "true_tone": true,
+                "type": "internal"
+            ],
+            // MacBook Pro 14-inch (M2 Pro/Max, 2023)
+            "Mac14,5": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3024 x 1964",
+                "diagonal_inches": 14.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            "Mac14,9": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3024 x 1964",
+                "diagonal_inches": 14.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            // MacBook Pro 16-inch (M2 Pro/Max, 2023)
+            "Mac14,6": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3456 x 2234",
+                "diagonal_inches": 16.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            "Mac14,10": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3456 x 2234",
+                "diagonal_inches": 16.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            // MacBook Pro 14-inch (M3, 2023)
+            "Mac15,3": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3024 x 1964",
+                "diagonal_inches": 14.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            // MacBook Pro 14-inch (M3 Pro/Max, 2023)
+            "Mac15,6": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3024 x 1964",
+                "diagonal_inches": 14.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            "Mac15,7": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3024 x 1964",
+                "diagonal_inches": 14.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            // MacBook Pro 16-inch (M3 Pro/Max, 2023)
+            "Mac15,8": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3456 x 2234",
+                "diagonal_inches": 16.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            "Mac15,9": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3456 x 2234",
+                "diagonal_inches": 16.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            "Mac15,10": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3456 x 2234",
+                "diagonal_inches": 16.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            "Mac15,11": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3456 x 2234",
+                "diagonal_inches": 16.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            // MacBook Pro 14-inch (M4, 2024)
+            "Mac16,1": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3024 x 1964",
+                "diagonal_inches": 14.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            // MacBook Pro 14-inch (M4 Pro/Max, 2024)
+            "Mac16,2": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3024 x 1964",
+                "diagonal_inches": 14.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "nanotexture_option": true,
+                "type": "internal"
+            ],
+            // MacBook Pro 16-inch (M4 Pro/Max, 2024)
+            "Mac16,5": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3456 x 2234",
+                "diagonal_inches": 16.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "nanotexture_option": true,
+                "type": "internal"
+            ],
+            "Mac16,6": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3456 x 2234",
+                "diagonal_inches": 16.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "nanotexture_option": true,
+                "type": "internal"
+            ],
+            // MacBook Pro 13-inch (M1, 2020)
+            "MacBookPro17,1": [
+                "name": "Built-in Retina Display",
+                "resolution": "2560 x 1600",
+                "diagonal_inches": 13.3,
+                "ppi": 227,
+                "display_type": "Retina LCD",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 500,
+                "true_tone": true,
+                "type": "internal"
+            ],
+            // MacBook Pro 14-inch (M1 Pro/Max, 2021)
+            "MacBookPro18,3": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3024 x 1964",
+                "diagonal_inches": 14.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            "MacBookPro18,4": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3024 x 1964",
+                "diagonal_inches": 14.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            // MacBook Pro 16-inch (M1 Pro/Max, 2021)
+            "MacBookPro18,1": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3456 x 2234",
+                "diagonal_inches": 16.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ],
+            "MacBookPro18,2": [
+                "name": "Liquid Retina XDR Display",
+                "resolution": "3456 x 2234",
+                "diagonal_inches": 16.2,
+                "ppi": 254,
+                "display_type": "Liquid Retina XDR",
+                "color_gamut": "P3 Wide Color",
+                "brightness_nits": 1000,
+                "peak_brightness_hdr": 1600,
+                "true_tone": true,
+                "promotion": true,
+                "refresh_rate": "120Hz ProMotion",
+                "type": "internal"
+            ]
+        ]
+        
+        return displayInfoMap[modelIdentifier]
+    }
+    
     // MARK: - Processor Info (osquery: system_info + bash sysctl)
     
     private func collectProcessorInfo() async throws -> [String: Any] {
@@ -855,28 +1363,43 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             l1i=$(sysctl -n hw.l1icachesize 2>/dev/null || echo "0")
             l2=$(sysctl -n hw.l2cachesize 2>/dev/null || echo "0")
             l3=$(sysctl -n hw.l3cachesize 2>/dev/null || echo "0")
-            perflevel0=$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo "")
-            perflevel1=$(sysctl -n hw.perflevel1.physicalcpu 2>/dev/null || echo "")
+            perflevel0=$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo "0")
+            perflevel1=$(sysctl -n hw.perflevel1.physicalcpu 2>/dev/null || echo "0")
             
-            echo "{"
-            echo "  \\"cpu_brand\\": \\"$brand\\","
-            echo "  \\"cpu_physical_cores\\": $physical,"
-            echo "  \\"cpu_logical_cores\\": $logical,"
-            echo "  \\"packages\\": $packages,"
-            echo "  \\"frequency_max\\": $freq_max,"
-            echo "  \\"cache_size_l1d\\": $l1d,"
-            echo "  \\"cache_size_l1i\\": $l1i,"
-            echo "  \\"cache_size_l2\\": $l2,"
-            echo "  \\"cache_size_l3\\": $l3,"
-            echo "  \\"performance_cores\\": \\"${perflevel0:-}\\","
-            echo "  \\"efficiency_cores\\": \\"${perflevel1:-}\\"" 
-            echo "}"
+            # Ensure freq_max and l3 have defaults if empty
+            [ -z "$freq_max" ] && freq_max="0"
+            [ -z "$l3" ] && l3="0"
+            
+            # Output JSON as single printf to avoid multi-line issues
+            printf '{"cpu_brand":"%s","cpu_physical_cores":%s,"cpu_logical_cores":%s,"packages":%s,"frequency_max":%s,"cache_size_l1d":%s,"cache_size_l1i":%s,"cache_size_l2":%s,"cache_size_l3":%s,"performance_cores":"%s","efficiency_cores":"%s"}' "$brand" "$physical" "$logical" "$packages" "$freq_max" "$l1d" "$l1i" "$l2" "$l3" "$perflevel0" "$perflevel1"
         """
         
+        // Get osquery result first
         var result = try await executeWithFallback(
             osquery: osqueryScript,
             bash: bashScript
         )
+        
+        // IMPORTANT: osquery doesn't provide performance/efficiency cores, so always run bash to get them
+        // This ensures we have hw.perflevel0.physicalcpu and hw.perflevel1.physicalcpu values
+        do {
+            let bashOutput = try await BashService.execute(bashScript)
+            if let data = bashOutput.data(using: .utf8),
+               let bashDict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                // Merge bash fields into result (bash wins for performance/efficiency cores)
+                for (key, value) in bashDict {
+                    if key == "performance_cores" || key == "efficiency_cores" {
+                        // Always use bash values for these fields
+                        result[key] = value
+                    } else if result[key] == nil {
+                        // For other fields, only use bash if osquery didn't provide
+                        result[key] = value
+                    }
+                }
+            }
+        } catch {
+            ConsoleFormatter.writeDebug("Could not get bash performance/efficiency core data: \(error)")
+        }
         
         // Enhance with system_profiler data for number_processors (proc total:perf:eff format)
         // This gives us the performance/efficiency core breakdown on Apple Silicon
@@ -963,14 +1486,18 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         )
         
         // Enhance with system_profiler SPMemoryDataType for type and manufacturer
+        // Use grep/awk instead of Python for compatibility
         let spMemoryScript = """
-            system_profiler SPMemoryDataType -json 2>/dev/null | python3 -c "import sys, json; data = json.load(sys.stdin).get('SPMemoryDataType', [{}])[0]; dimms = data.get('_items', []); d = dimms[0] if dimms else data; print(json.dumps({'dimm_type': d.get('dimm_type', ''), 'dimm_manufacturer': d.get('dimm_manufacturer', '')}))"
+            sp_mem=$(system_profiler SPMemoryDataType 2>/dev/null)
+            mem_type=$(echo "$sp_mem" | grep "Type:" | head -1 | awk -F': ' '{print $2}' | xargs)
+            mem_manufacturer=$(echo "$sp_mem" | grep "Manufacturer:" | head -1 | awk -F': ' '{print $2}' | xargs)
+            printf '{"dimm_type":"%s","dimm_manufacturer":"%s"}' "$mem_type" "$mem_manufacturer"
         """
         
         if let spJson = try? await BashService.execute(spMemoryScript),
            let spData = spJson.data(using: .utf8),
            let spDict = try? JSONSerialization.jsonObject(with: spData) as? [String: Any] {
-            // Add memory type (e.g., "LPDDR5")
+            // Add memory type (e.g., "LPDDR5", "LPDDR4")
             if let memType = spDict["dimm_type"] as? String, !memType.isEmpty {
                 result["dimm_type"] = memType
             }
@@ -1504,7 +2031,7 @@ private func collectBatteryInfo() async throws -> [String: Any] {
                 elif echo "$chip" | grep -q "M2"; then
                     npu_name="Apple Neural Engine (M2)"
                     cores=16
-                    tops="15.8"
+                    tops="16"
                 elif echo "$chip" | grep -q "M3"; then
                     npu_name="Apple Neural Engine (M3)"
                     cores=16
@@ -1520,10 +2047,12 @@ private func collectBatteryInfo() async throws -> [String: Any] {
                 fi
                 
                 echo "{"
-                echo "  \\"has_npu\\": true,"
+                echo "  \\"has_npu\\": 1,"
+                echo "  \\"isAvailable\\": 1,"
                 echo "  \\"name\\": \\"$npu_name\\","
                 echo "  \\"cores\\": $cores,"
                 echo "  \\"performance_tops\\": \\"$tops\\","
+                echo "  \\"performanceTops\\": \\"$tops\\","
                 echo "  \\"family\\": \\"Apple Neural Engine\\","
                 echo "  \\"chip\\": \\"$chip\\""
                 echo "}"
