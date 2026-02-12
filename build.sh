@@ -20,8 +20,8 @@ fi
 
 PROJECT_NAME="ReportMate"
 PRODUCT_NAME="managedreportsrunner"
-BUNDLE_ID="com.github.reportmate.managedreportsrunner"
-PKG_IDENTIFIER="ca.ecuad.reportmate.client"
+BUNDLE_ID="com.github.reportmate"
+PKG_IDENTIFIER="com.github.reportmate"
 
 # Signing configuration - must be provided via .env or flags
 # No defaults to avoid exposing personal/org info in public repo
@@ -602,7 +602,7 @@ EOF
     <key>AbandonProcessGroup</key>
     <true/>
     <key>AssociatedBundleIdentifiers</key>
-    <string>com.github.reportmate.managedreportsrunner</string>
+    <string>com.github.reportmate</string>
 </dict>
 </plist>
 EOF
@@ -641,7 +641,7 @@ EOF
     <key>AbandonProcessGroup</key>
     <true/>
     <key>AssociatedBundleIdentifiers</key>
-    <string>com.github.reportmate.managedreportsrunner</string>
+    <string>com.github.reportmate</string>
 </dict>
 </plist>
 EOF
@@ -680,7 +680,7 @@ EOF
     <key>AbandonProcessGroup</key>
     <true/>
     <key>AssociatedBundleIdentifiers</key>
-    <string>com.github.reportmate.managedreportsrunner</string>
+    <string>com.github.reportmate</string>
 </dict>
 </plist>
 EOF
@@ -724,7 +724,7 @@ EOF
     <key>AbandonProcessGroup</key>
     <true/>
     <key>AssociatedBundleIdentifiers</key>
-    <string>com.github.reportmate.managedreportsrunner</string>
+    <string>com.github.reportmate</string>
 </dict>
 </plist>
 EOF
