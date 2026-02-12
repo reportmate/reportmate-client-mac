@@ -14,7 +14,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     public override func collectData() async throws -> ModuleData {
         // Total collection steps for progress tracking
-        let totalSteps = 7
+        let totalSteps = 8
         
         // Collect install data sequentially with progress tracking
         ConsoleFormatter.writeQueryProgress(queryName: "install_history", current: 1, total: totalSteps)
@@ -38,6 +38,9 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         ConsoleFormatter.writeQueryProgress(queryName: "catalog_metadata", current: 7, total: totalSteps)
         let catalogData = try await collectCatalogMetadata()
         
+        ConsoleFormatter.writeQueryProgress(queryName: "manifest_catalogs", current: 8, total: totalSteps)
+        let manifestCatalogs = try await collectManifestCatalogs(manifestName: info["manifestName"] as? String)
+        
         // Enrich installs with category/developer from catalog
         installs = enrichInstallsWithCatalogData(installs: installs, catalogData: catalogData)
         
@@ -57,6 +60,9 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             munki.errors = info["errors"] as? String
             munki.warnings = info["warnings"] as? String
             munki.problemInstalls = info["problemInstalls"] as? String
+            
+            // Set catalogs from manifest
+            munki.catalogs = manifestCatalogs
             
             // Parse endTime to lastRun date
             if let endTimeStr = info["endTime"] as? String, !endTimeStr.isEmpty {
@@ -133,6 +139,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 if let warnings = munki.warnings { dict["warnings"] = warnings }
                 if let problems = munki.problemInstalls { dict["problemInstalls"] = problems }
                 if let lastRun = munki.lastRun { dict["lastRun"] = ISO8601DateFormatter().string(from: lastRun) }
+                if !munki.catalogs.isEmpty { dict["catalogs"] = munki.catalogs }
                 return dict
             } ?? [:]
         ]
@@ -838,5 +845,79 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             }
             return enriched
         }
+    }
+    
+    // MARK: - Manifest Catalogs Collection
+    
+    /// Collects the catalogs array from the device's Munki manifest
+    /// The manifest contains a catalogs array that determines which software catalogs the device subscribes to
+    /// (e.g., ["production", "testing"])
+    private func collectManifestCatalogs(manifestName: String?) async throws -> [String] {
+        guard let manifestName = manifestName, !manifestName.isEmpty else {
+            return []
+        }
+        
+        // Munki manifests are stored as plist files
+        let manifestPath = "/Library/Managed Installs/manifests/\(manifestName)"
+        
+        let bashScript = """
+            plistbuddy="/usr/libexec/PlistBuddy"
+            manifest="\(manifestPath)"
+            
+            # Check if manifest exists
+            if [ ! -f "$manifest" ]; then
+                echo '[]'
+                exit 0
+            fi
+            
+            # Get count of catalogs array
+            count=$($plistbuddy -c "Print :catalogs" "$manifest" 2>/dev/null | grep -c "^    " || echo "0")
+            
+            if [ "$count" -eq 0 ]; then
+                echo '[]'
+                exit 0
+            fi
+            
+            echo "["
+            first=true
+            
+            i=0
+            while [ $i -lt $count ]; do
+                catalog=$($plistbuddy -c "Print :catalogs:$i" "$manifest" 2>/dev/null || echo "")
+                
+                if [ -n "$catalog" ]; then
+                    # Escape quotes for JSON
+                    catalog_esc=$(echo "$catalog" | sed 's/"/\\\\"/g')
+                    
+                    if [ "$first" = "true" ]; then
+                        first=false
+                    else
+                        echo ","
+                    fi
+                    
+                    printf '"%s"' "$catalog_esc"
+                fi
+                
+                i=$((i + 1))
+            done
+            
+            echo "]"
+            """
+        
+        let result = try await executeWithFallback(osquery: nil, bash: bashScript)
+        
+        // Parse the result - it should be an array of strings
+        if let items = result["items"] as? [String] {
+            return items
+        }
+        
+        // Fallback: try to parse from the raw result if items is in a different format
+        if let itemsArray = result["items"] as? [[String: Any]] {
+            // If we get dictionaries, this format isn't what we expected
+            // but we can try to handle it
+            return []
+        }
+        
+        return []
     }
 }

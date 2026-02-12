@@ -63,6 +63,10 @@ public struct MunkiInfo: Codable, Sendable {
     public var warnings: String?
     public var problemInstalls: String?
     
+    /// Catalogs the device subscribes to from manifest (e.g., ["production", "testing"])
+    /// Parsed from the manifest file's catalogs array
+    public var catalogs: [String] = []
+    
     // Managed items (from munki_installs table)
     public var items: [MunkiItem] = []
     
