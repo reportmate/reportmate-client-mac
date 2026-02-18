@@ -144,6 +144,12 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             } ?? [:]
         ]
         
+        // Inject newly installed count - items actually installed during this run (from ItemsInstalled plist key)
+        if var munkiDict = installsData["munki"] as? [String: Any] {
+            munkiDict["newlyInstalledCount"] = info["newlyInstalledCount"] as? Int ?? 0
+            installsData["munki"] = munkiDict
+        }
+        
         // Add runLog at top level (same key as Cimian for API compatibility)
         if !runLog.isEmpty {
             installsData["runLog"] = runLog
@@ -323,6 +329,10 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     problems=$(echo "$problems" | sed 's/"/\\\\"/g')
                     printf ', "problemInstalls": "%s"' "$problems"
                 fi
+                
+                # ItemsInstalled (array) - items actually installed during this Munki run
+                itemsInstalledCount=$($plistbuddy -c "Print :ItemsInstalled" "$report" 2>/dev/null | grep -c "^    Dict {" || echo "0")
+                printf ', "newlyInstalledCount": %s' "$itemsInstalledCount"
             fi
             
             printf '}'
@@ -354,6 +364,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         info["problemInstalls"] = result["problem_installs"] as? String ?? result["problemInstalls"] as? String
         info["softwareRepoURL"] = result["softwareRepoURL"] as? String
         info["clientIdentifier"] = result["clientIdentifier"] as? String
+        info["newlyInstalledCount"] = result["newlyInstalledCount"] as? Int ?? 0
         
         return info
     }
