@@ -1083,10 +1083,18 @@ if [ -d "$MUNKI_DIR" ]; then
     
     # Backup existing postflight if it exists and isn't our wrapper
     if [ -f "$POSTFLIGHT" ]; then
-        if ! grep -q "postflight.d wrapper" "$POSTFLIGHT" 2>/dev/null; then
-            log_message "Backing up existing postflight to postflight.d/00-original.sh"
-            mv "$POSTFLIGHT" "${POSTFLIGHT_D}/00-original.sh"
-            chmod 755 "${POSTFLIGHT_D}/00-original.sh"
+        if ! grep -q "Deployed by: ReportMate macOS Client" "$POSTFLIGHT" 2>/dev/null; then
+            # Identify what owns the existing postflight for an informative backup name
+            if grep -qi "munkireport" "$POSTFLIGHT" 2>/dev/null; then
+                BACKUP_NAME="10-munkireport.sh"
+            elif grep -qi "sal-submit\|/sal/" "$POSTFLIGHT" 2>/dev/null; then
+                BACKUP_NAME="10-sal.sh"
+            else
+                BACKUP_NAME="10-original.sh"
+            fi
+            log_message "Backing up existing postflight to postflight.d/${BACKUP_NAME}"
+            mv "$POSTFLIGHT" "${POSTFLIGHT_D}/${BACKUP_NAME}"
+            chmod 755 "${POSTFLIGHT_D}/${BACKUP_NAME}"
         fi
     fi
     
