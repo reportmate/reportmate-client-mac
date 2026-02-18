@@ -567,7 +567,7 @@ struct ReportMateClient: AsyncParsableCommand {
         
         // Get item counts for context
         let items = munkiData["items"] as? [[String: Any]] ?? []
-        let installedCount = items.filter { ($0["status"] as? String) == "Installed" }.count
+        let newlyInstalledCount = munkiData["newlyInstalledCount"] as? Int ?? 0
         let pendingCount = items.filter { ($0["status"] as? String) == "Pending" }.count
         let failedItems = items.filter { !($0["lastError"] as? String ?? "").isEmpty }
         let warningItems = items.filter { !($0["lastWarning"] as? String ?? "").isEmpty }
@@ -576,7 +576,7 @@ struct ReportMateClient: AsyncParsableCommand {
         var details: [String: EventDetailValue] = [
             "module_id": .string("installs"),
             "total_managed_items": .int(items.count),
-            "installed_count": .int(installedCount),
+            "installed_count": .int(newlyInstalledCount),
             "pending_count": .int(pendingCount)
         ]
         
@@ -604,9 +604,9 @@ struct ReportMateClient: AsyncParsableCommand {
                 messageParts.append("\(warnCount) warning\(warnCount == 1 ? "" : "s")")
             }
             
-            // Add installed count if any actual activity
-            if installedCount > 0 {
-                messageParts.append("\(installedCount) installed")
+            // Add newly installed count if any actual activity this run
+            if newlyInstalledCount > 0 {
+                messageParts.append("\(newlyInstalledCount) installed")
             }
             
             // Include error details in payload for expansion
@@ -656,9 +656,9 @@ struct ReportMateClient: AsyncParsableCommand {
                 messageParts.append("\(warnCount) Munki warning\(warnCount == 1 ? "" : "s")")
             }
             
-            // Add installed count if any
-            if installedCount > 0 {
-                messageParts.append("\(installedCount) installed")
+            // Add newly installed count if any
+            if newlyInstalledCount > 0 {
+                messageParts.append("\(newlyInstalledCount) installed")
             }
             
             details["warning_count"] = .int(warningMessages.count)
@@ -686,13 +686,11 @@ struct ReportMateClient: AsyncParsableCommand {
                 details: details
             ))
         }
-        // PRIORITY 3: SUCCESS (items installed, no errors or warnings)
-        else if installedCount > 0 || pendingCount > 0 {
+        // PRIORITY 3: SUCCESS (items actually installed this run, no errors or warnings)
+        else if newlyInstalledCount > 0 {
             var messageParts: [String] = []
             
-            if installedCount > 0 {
-                messageParts.append("\(installedCount) package\(installedCount == 1 ? "" : "s") installed")
-            }
+            messageParts.append("\(newlyInstalledCount) package\(newlyInstalledCount == 1 ? "" : "s") installed")
             
             if pendingCount > 0 {
                 messageParts.append("\(pendingCount) pending")
