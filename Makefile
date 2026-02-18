@@ -1,7 +1,7 @@
 # ReportMate macOS Client Makefile
 # Provides convenient build targets
 
-.PHONY: build clean test install release help
+.PHONY: all build clean test install release notarize help
 
 # Configuration
 PROJECT_NAME = ReportMate
@@ -9,6 +9,8 @@ BINARY_NAME = managedreportsrunner
 VERSION ?= $(shell date +%Y.%m.%d.%H%M)
 
 # Default target
+all: notarize
+
 help:
 	@echo "ReportMate macOS Client Build System"
 	@echo ""
@@ -20,6 +22,7 @@ help:
 	@echo "  install   - Install locally for testing"
 	@echo "  package   - Create distribution packages"
 	@echo "  sign      - Build and code sign"
+	@echo "  notarize  - Build, sign, and notarize for distribution"
 	@echo "  help      - Show this help message"
 	@echo ""
 	@echo "Variables:"
@@ -47,6 +50,10 @@ package:
 sign:
 	@echo "Building and signing..."
 	./build.sh --version $(VERSION) --sign
+
+notarize:
+	@echo "Building, signing, and notarizing..."
+	./build.sh --version $(VERSION) --sign --notarize
 
 # Development targets
 clean:
