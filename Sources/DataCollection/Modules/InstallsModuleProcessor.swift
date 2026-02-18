@@ -230,141 +230,95 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         return ""
     }
     
-    // MARK: - Munki Info (osquery: munki_info table via macadmins extension)
+    // MARK: - Munki Info (native Swift plist reading — no osquery extension delay)
     
+    /// Reads Munki metadata directly from ManagedInstallReport.plist and ManagedInstalls.plist
+    /// using native PropertyListSerialization — zero shell spawning, instant.
     private func collectMunkiInfo() async throws -> [String: Any] {
-        // osquery munki_info table from macadmins extension
-        // Reference: https://fleetdm.com/tables/munki_info
-        let osqueryScript = """
-            SELECT 
-                version,
-                manifest_name,
-                console_user,
-                start_time,
-                end_time,
-                success,
-                errors,
-                warnings,
-                problem_installs
-            FROM munki_info;
-            """
-        
-        // Robust bash fallback using PlistBuddy to read ManagedInstallReport.plist
-        // This is the same plist the macadmins osquery extension reads
-        let bashScript = """
-            plistbuddy="/usr/libexec/PlistBuddy"
-            report="/Library/Managed Installs/ManagedInstallReport.plist"
-            prefs="/Library/Preferences/ManagedInstalls.plist"
-            
-            # Check if Munki is installed
-            if [ ! -d "/Library/Managed Installs" ]; then
-                echo '{"isInstalled": false}'
-                exit 0
-            fi
-            
-            # Start JSON output
-            printf '{'
-            printf '"isInstalled": true'
-            
-            # Get version from managedsoftwareupdate
-            if [ -f "/usr/local/munki/managedsoftwareupdate" ]; then
-                version=$(/usr/local/munki/managedsoftwareupdate --version 2>/dev/null | head -1 || echo "")
-                printf ', "version": "%s"' "$version"
-            fi
-            
-            # Get config from ManagedInstalls.plist preference file
-            if [ -f "$prefs" ]; then
-                softwareRepoURL=$($plistbuddy -c "Print :SoftwareRepoURL" "$prefs" 2>/dev/null || echo "")
-                clientIdentifier=$($plistbuddy -c "Print :ClientIdentifier" "$prefs" 2>/dev/null || echo "")
-                printf ', "softwareRepoURL": "%s"' "$softwareRepoURL"
-                printf ', "clientIdentifier": "%s"' "$clientIdentifier"
-            fi
-            
-            # Get last run info from ManagedInstallReport.plist
-            if [ -f "$report" ]; then
-                # ManifestName - the resolved manifest path
-                manifestName=$($plistbuddy -c "Print :ManifestName" "$report" 2>/dev/null || echo "")
-                printf ', "manifestName": "%s"' "$manifestName"
-                
-                # ManagedInstallVersion - version stored in report
-                munkiVersion=$($plistbuddy -c "Print :ManagedInstallVersion" "$report" 2>/dev/null || echo "")
-                if [ -n "$munkiVersion" ]; then
-                    printf ', "version": "%s"' "$munkiVersion"
-                fi
-                
-                # ConsoleUser at time of run
-                consoleUser=$($plistbuddy -c "Print :ConsoleUser" "$report" 2>/dev/null || echo "")
-                printf ', "consoleUser": "%s"' "$consoleUser"
-                
-                # StartTime and EndTime
-                startTime=$($plistbuddy -c "Print :StartTime" "$report" 2>/dev/null || echo "")
-                endTime=$($plistbuddy -c "Print :EndTime" "$report" 2>/dev/null || echo "")
-                printf ', "startTime": "%s"' "$startTime"
-                printf ', "endTime": "%s"' "$endTime"
-                
-                # Errors (array - check if empty)
-                errorCount=$($plistbuddy -c "Print :Errors" "$report" 2>/dev/null | grep -c "^    " || echo "0")
-                if [ "$errorCount" -gt 0 ]; then
-                    errors=$($plistbuddy -c "Print :Errors" "$report" 2>/dev/null | grep "^    " | tr '\\n' ';' | sed 's/^[[:space:]]*//' || echo "")
-                    # Escape quotes
-                    errors=$(echo "$errors" | sed 's/"/\\\\"/g')
-                    printf ', "errors": "%s"' "$errors"
-                    printf ', "success": "false"'
-                else
-                    printf ', "success": "true"'
-                fi
-                
-                # Warnings (array)
-                warningCount=$($plistbuddy -c "Print :Warnings" "$report" 2>/dev/null | grep -c "^    " || echo "0")
-                if [ "$warningCount" -gt 0 ]; then
-                    warnings=$($plistbuddy -c "Print :Warnings" "$report" 2>/dev/null | grep "^    " | tr '\\n' ';' | sed 's/^[[:space:]]*//' || echo "")
-                    warnings=$(echo "$warnings" | sed 's/"/\\\\"/g')
-                    printf ', "warnings": "%s"' "$warnings"
-                fi
-                
-                # ProblemInstalls (array)
-                problemCount=$($plistbuddy -c "Print :ProblemInstalls" "$report" 2>/dev/null | grep -c "^    " || echo "0")
-                if [ "$problemCount" -gt 0 ]; then
-                    problems=$($plistbuddy -c "Print :ProblemInstalls" "$report" 2>/dev/null | grep "^    " | tr '\\n' ';' | sed 's/^[[:space:]]*//' || echo "")
-                    problems=$(echo "$problems" | sed 's/"/\\\\"/g')
-                    printf ', "problemInstalls": "%s"' "$problems"
-                fi
-                
-                # ItemsInstalled (array) - items actually installed during this Munki run
-                itemsInstalledCount=$($plistbuddy -c "Print :ItemsInstalled" "$report" 2>/dev/null | grep -c "^    Dict {" || echo "0")
-                printf ', "newlyInstalledCount": %s' "$itemsInstalledCount"
-            fi
-            
-            printf '}'
-            """
-        
-        let result = try await executeWithFallback(
-            osquery: osqueryScript,
-            bash: bashScript
-        )
-        
         var info: [String: Any] = [:]
         
-        // Check if Munki is installed (either via osquery result or bash fallback)
-        let hasData = result["version"] != nil || result["isInstalled"] as? Bool == true
-        info["isInstalled"] = hasData
-        
-        if let version = result["version"] as? String, !version.isEmpty {
-            info["version"] = version
+        let munkiDir = "/Library/Managed Installs"
+        guard FileManager.default.fileExists(atPath: munkiDir) else {
+            info["isInstalled"] = false
+            return info
         }
         
-        // Map osquery column names to our model names
-        info["manifestName"] = result["manifest_name"] as? String ?? result["manifestName"] as? String
-        info["consoleUser"] = result["console_user"] as? String ?? result["consoleUser"] as? String
-        info["startTime"] = result["start_time"] as? String ?? result["startTime"] as? String
-        info["endTime"] = result["end_time"] as? String ?? result["endTime"] as? String
-        info["success"] = result["success"] as? String
-        info["errors"] = result["errors"] as? String
-        info["warnings"] = result["warnings"] as? String
-        info["problemInstalls"] = result["problem_installs"] as? String ?? result["problemInstalls"] as? String
-        info["softwareRepoURL"] = result["softwareRepoURL"] as? String
-        info["clientIdentifier"] = result["clientIdentifier"] as? String
-        info["newlyInstalledCount"] = result["newlyInstalledCount"] as? Int ?? 0
+        info["isInstalled"] = true
+        
+        // Get Munki version from the binary
+        if FileManager.default.fileExists(atPath: "/usr/local/munki/managedsoftwareupdate") {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/local/munki/managedsoftwareupdate")
+            process.arguments = ["--version"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            try? process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let version = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !version.isEmpty {
+                info["version"] = version
+            }
+        }
+        
+        // Read preferences plist for config
+        let prefsPath = "/Library/Preferences/ManagedInstalls.plist"
+        if let prefsData = try? Data(contentsOf: URL(fileURLWithPath: prefsPath)),
+           let prefsPlist = try? PropertyListSerialization.propertyList(from: prefsData, options: [], format: nil) as? [String: Any] {
+            info["softwareRepoURL"] = prefsPlist["SoftwareRepoURL"] as? String
+            info["clientIdentifier"] = prefsPlist["ClientIdentifier"] as? String
+        }
+        
+        // Read ManagedInstallReport.plist for last run info
+        let reportPath = "\(munkiDir)/ManagedInstallReport.plist"
+        guard let reportData = try? Data(contentsOf: URL(fileURLWithPath: reportPath)),
+              let report = try? PropertyListSerialization.propertyList(from: reportData, options: [], format: nil) as? [String: Any] else {
+            return info
+        }
+        
+        info["manifestName"] = report["ManifestName"] as? String
+        info["consoleUser"] = report["ConsoleUser"] as? String
+        
+        // Version from report (overrides binary version if present)
+        if let munkiVersion = report["ManagedInstallVersion"] as? String, !munkiVersion.isEmpty {
+            info["version"] = munkiVersion
+        }
+        
+        // Timestamps — convert Date to ISO8601 string
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        
+        if let startTime = report["StartTime"] as? Date {
+            info["startTime"] = isoFormatter.string(from: startTime)
+        }
+        if let endTime = report["EndTime"] as? Date {
+            info["endTime"] = isoFormatter.string(from: endTime)
+        }
+        
+        // Errors array
+        if let errors = report["Errors"] as? [String], !errors.isEmpty {
+            info["errors"] = errors.joined(separator: "; ")
+            info["success"] = "false"
+        } else {
+            info["success"] = "true"
+        }
+        
+        // Warnings array
+        if let warnings = report["Warnings"] as? [String], !warnings.isEmpty {
+            info["warnings"] = warnings.joined(separator: "; ")
+        }
+        
+        // Problem installs
+        if let problems = report["ProblemInstalls"] as? [String], !problems.isEmpty {
+            info["problemInstalls"] = problems.joined(separator: "; ")
+        }
+        
+        // ItemsInstalled count (items newly installed during this run)
+        if let itemsInstalled = report["ItemsInstalled"] as? [[String: Any]] {
+            info["newlyInstalledCount"] = itemsInstalled.count
+        } else {
+            info["newlyInstalledCount"] = 0
+        }
         
         return info
     }
@@ -515,217 +469,91 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         }
     }
     
-    // MARK: - Munki Managed Installs (osquery: munki_installs table via macadmins extension)
+    // MARK: - Munki Managed Installs (native Swift plist reading — no osquery extension delay)
     
+    /// Reads the ManagedInstalls array from ManagedInstallReport.plist using
+    /// native PropertyListSerialization — zero shell spawning, instant.
     private func collectMunkiManagedInstalls() async throws -> [MunkiItem] {
-        // osquery munki_installs table from macadmins extension
-        // Reference: https://fleetdm.com/tables/munki_installs
-        // Columns: name, display_name, installed, installed_version, end_time
-        let osqueryScript = """
-            SELECT 
-                name,
-                display_name,
-                installed,
-                installed_version,
-                end_time
-            FROM munki_installs;
-            """
+        let reportPath = "/Library/Managed Installs/ManagedInstallReport.plist"
         
-        // Robust bash fallback using PlistBuddy to read ManagedInstallReport.plist
-        // This is the same plist the macadmins osquery extension reads
-        let bashScript = """
-            report="/Library/Managed Installs/ManagedInstallReport.plist"
-            plistbuddy="/usr/libexec/PlistBuddy"
-            
-            if [ ! -f "$report" ]; then
-                echo '[]'
-                exit 0
-            fi
-            
-            # Get the count of ManagedInstalls
-            count=$($plistbuddy -c "Print :ManagedInstalls" "$report" 2>/dev/null | grep -c "^    Dict" || echo "0")
-            
-            if [ "$count" -eq 0 ]; then
-                echo '[]'
-                exit 0
-            fi
-            
-            # Get end_time from the report (same for all items in this run)
-            end_time=$($plistbuddy -c "Print :EndTime" "$report" 2>/dev/null || echo "")
-            
-            echo "["
-            first=true
-            
-            i=0
-            while [ $i -lt $count ]; do
-                name=$($plistbuddy -c "Print :ManagedInstalls:$i:name" "$report" 2>/dev/null || echo "")
-                display_name=$($plistbuddy -c "Print :ManagedInstalls:$i:display_name" "$report" 2>/dev/null || echo "$name")
-                installed=$($plistbuddy -c "Print :ManagedInstalls:$i:installed" "$report" 2>/dev/null || echo "false")
-                installed_version=$($plistbuddy -c "Print :ManagedInstalls:$i:installed_version" "$report" 2>/dev/null || echo "")
-                installed_size=$($plistbuddy -c "Print :ManagedInstalls:$i:installed_size" "$report" 2>/dev/null || echo "0")
-                
-                # Escape any quotes in strings for JSON
-                name=$(echo "$name" | sed 's/"/\\\\"/g')
-                display_name=$(echo "$display_name" | sed 's/"/\\\\"/g')
-                
-                if [ -n "$name" ]; then
-                    if [ "$first" = "true" ]; then
-                        first=false
-                    else
-                        echo ","
-                    fi
-                    
-                    # Output JSON object
-                    printf '{"name": "%s", "display_name": "%s", "installed": "%s", "installed_version": "%s", "installed_size": %s, "end_time": "%s"}' \\
-                        "$name" "$display_name" "$installed" "$installed_version" "${installed_size:-0}" "$end_time"
-                fi
-                
-                i=$((i + 1))
-            done
-            
-            echo "]"
-            """
+        guard let reportData = try? Data(contentsOf: URL(fileURLWithPath: reportPath)),
+              let report = try? PropertyListSerialization.propertyList(from: reportData, options: [], format: nil) as? [String: Any],
+              let managedInstalls = report["ManagedInstalls"] as? [[String: Any]] else {
+            return []
+        }
         
-        let result = try await executeWithFallback(
-            osquery: osqueryScript,
-            bash: bashScript
-        )
+        // Get the end time from the report (same for all items in this run)
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var endTimeStr = ""
+        if let endTime = report["EndTime"] as? Date {
+            endTimeStr = isoFormatter.string(from: endTime)
+        }
         
         var items: [MunkiItem] = []
         
-        if let resultItems = result["items"] as? [[String: Any]] {
-            for itemData in resultItems {
-                var item = MunkiItem()
-                
-                let name = itemData["name"] as? String ?? ""
-                item.name = name
-                // Use display_name from osquery/bash if available, otherwise fall back to name
-                item.displayName = itemData["display_name"] as? String ?? itemData["displayName"] as? String ?? name
-                item.id = name.lowercased().replacingOccurrences(of: " ", with: "-")
-                item.version = itemData["version"] as? String ?? ""
-                item.installedVersion = itemData["installed_version"] as? String ?? itemData["installedVersion"] as? String ?? ""
-                
-                // Handle installed_size - could be Int or String
-                if let sizeInt = itemData["installed_size"] as? Int {
-                    item.installedSize = sizeInt
-                } else if let sizeStr = itemData["installed_size"] as? String, let sizeInt = Int(sizeStr) {
-                    item.installedSize = sizeInt
-                } else if let sizeInt = itemData["installedSize"] as? Int {
-                    item.installedSize = sizeInt
-                }
-                
-                item.endTime = itemData["end_time"] as? String ?? itemData["endTime"] as? String ?? ""
-                item.type = "munki"
-                
-                // Map 'installed' column to status
-                let installedStr = itemData["installed"] as? String ?? ""
-                let statusStr = itemData["status"] as? String ?? ""
-                
-                if statusStr == "pending_removal" {
-                    item.status = "Removed"
-                } else if installedStr.lowercased() == "true" || installedStr == "1" {
-                    item.status = "Installed"
-                } else {
-                    item.status = "Pending"
-                }
-                
-                // Derive pendingReason for pending items
-                if item.status == "Pending" {
-                    item.pendingReason = derivePendingReason(item: item)
-                }
-                
-                items.append(item)
+        for itemData in managedInstalls {
+            var item = MunkiItem()
+            
+            let name = itemData["name"] as? String ?? ""
+            item.name = name
+            item.displayName = itemData["display_name"] as? String ?? name
+            item.id = name.lowercased().replacingOccurrences(of: " ", with: "-")
+            item.version = ""
+            item.installedVersion = itemData["installed_version"] as? String ?? ""
+            item.endTime = endTimeStr
+            item.type = "munki"
+            
+            // Handle installed_size
+            if let sizeInt = itemData["installed_size"] as? Int {
+                item.installedSize = sizeInt
             }
+            
+            // Map 'installed' to status
+            let installed = itemData["installed"] as? Bool ?? false
+            if installed {
+                item.status = "Installed"
+            } else {
+                item.status = "Pending"
+                item.pendingReason = derivePendingReason(item: item)
+            }
+            
+            items.append(item)
         }
         
         return items
     }
     
-    // MARK: - Pending Updates - NO Python
+    // MARK: - Pending Updates (local plist only — no network calls)
     
+    /// Reads cached Apple software update recommendations from the local plist.
+    /// NEVER calls `softwareupdate -l` which contacts Apple's servers (20-30s).
+    /// Munki pending installs are already captured in munki_installs (step 4).
     private func collectPendingUpdates() async throws -> [[String: Any]] {
-        // Check for pending software updates using pure bash + awk
-        let bashScript = """
-            (
-            echo "["
-            first=true
-            
-            # Check Software Update and output as JSON
-            softwareupdate -l 2>&1 | grep -E "^[[:space:]]+\\*" | while read -r line; do
-                name=$(echo "$line" | sed 's/^[[:space:]]*\\*[[:space:]]*//' | sed 's/,.*//')
-                version=$(echo "$line" | grep -oE 'Version: [0-9.]+' | sed 's/Version: //')
-                size=$(echo "$line" | grep -oE 'Size: [0-9]+' | sed 's/Size: //')
-                
-                # Escape for JSON
-                name_esc=$(echo "$name" | sed 's/"/\\\\"/g')
-                
-                if [ "$first" = "true" ]; then
-                    first=false
-                else
-                    echo ","
-                fi
-                
-                echo "{\\"name\\": \\"$name_esc\\", \\"version\\": \\"$version\\", \\"size\\": \\"$size\\", \\"source\\": \\"softwareupdate\\"}"
-            done
-            
-            # Check Munki pending installs using awk (NO Python)
-            munki_report="/Library/Managed Installs/ManagedInstallReport.plist"
-            if [ -f "$munki_report" ]; then
-                plutil -convert json -o - "$munki_report" 2>/dev/null | awk '
-                BEGIN { RS="},"; in_items=0 }
-                /"ItemsToInstall"/ { in_items=1 }
-                {
-                    if (in_items) {
-                        name=""; version=""
-                        if (match($0, /"display_name"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
-                            n = substr($0, RSTART, RLENGTH)
-                            gsub(/.*"display_name"[[:space:]]*:[[:space:]]*"/, "", n)
-                            gsub(/".*/, "", n)
-                            name = n
-                        }
-                        if (name == "" && match($0, /"name"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
-                            n = substr($0, RSTART, RLENGTH)
-                            gsub(/.*"name"[[:space:]]*:[[:space:]]*"/, "", n)
-                            gsub(/".*/, "", n)
-                            name = n
-                        }
-                        if (match($0, /"version_to_install"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
-                            v = substr($0, RSTART, RLENGTH)
-                            gsub(/.*"version_to_install"[[:space:]]*:[[:space:]]*"/, "", v)
-                            gsub(/".*/, "", v)
-                            version = v
-                        }
-                        if (name != "") {
-                            printf ",{\\"name\\": \\"%s\\", \\"version\\": \\"%s\\", \\"source\\": \\"munki\\"}", name, version
-                        }
-                    }
-                }
-                ' 2>/dev/null
-            fi
-            
-            echo "]"
-            ) 2>/dev/null | tr -d '\\n' | sed 's/\\[,/[/' | sed 's/,,/,/g'
-            """
-        
-        let result = try await executeWithFallback(
-            osquery: nil,
-            bash: bashScript
-        )
-        
         var updates: [[String: Any]] = []
         
-        if let items = result["items"] as? [[String: Any]] {
-            updates = items
+        // Read cached macOS software update recommendations (instant, no network)
+        let suPlistPath = "/Library/Preferences/com.apple.SoftwareUpdate.plist"
+        let url = URL(fileURLWithPath: suPlistPath)
+        
+        guard FileManager.default.fileExists(atPath: suPlistPath),
+              let data = try? Data(contentsOf: url),
+              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+              let dict = plist as? [String: Any],
+              let recommended = dict["RecommendedUpdates"] as? [[String: Any]] else {
+            return updates
         }
         
-        return updates.map { update in
-            [
-                "name": update["name"] as? String ?? "",
-                "version": update["version"] as? String ?? "",
-                "size": update["size"] as? String ?? "",
-                "source": update["source"] as? String ?? "unknown"
-            ]
+        for update in recommended {
+            updates.append([
+                "name": update["Display Name"] as? String ?? "",
+                "version": update["Display Version"] as? String ?? "",
+                "size": "",
+                "source": "softwareupdate"
+            ])
         }
+        
+        return updates
     }
     
     // MARK: - Derive Pending Reason
@@ -757,85 +585,37 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     // MARK: - Catalog Metadata Collection
     
-    /// Collects category and developer metadata from Munki catalogs
-    /// Catalog files contain full pkgsinfo data including category field
+    /// Collects category and developer metadata from Munki catalogs using Swift
+    /// native plist reading — no shell spawning, works with binary and XML plists.
+    /// Munki catalogs are root-level arrays of pkgsinfo dicts and can be 10-50 MB;
+    /// shell-based approaches (PlistBuddy loops, plutil | JSON pipe) are too slow.
     private func collectCatalogMetadata() async throws -> [String: (category: String, developer: String)] {
         let catalogsPath = "/Library/Managed Installs/catalogs"
         var metadata: [String: (category: String, developer: String)] = [:]
         
-        // Get list of catalog files
         guard FileManager.default.fileExists(atPath: catalogsPath),
               let catalogFiles = try? FileManager.default.contentsOfDirectory(atPath: catalogsPath) else {
             return metadata
         }
         
-        // Parse each catalog file to extract category/developer for each package
         for catalogFile in catalogFiles {
-            // Skip hidden files
             if catalogFile.hasPrefix(".") { continue }
             
             let catalogPath = "\(catalogsPath)/\(catalogFile)"
+            let url = URL(fileURLWithPath: catalogPath)
             
-            // Use PlistBuddy to count items and extract metadata
-            let bashScript = """
-                plistbuddy="/usr/libexec/PlistBuddy"
-                catalog="\(catalogPath)"
-                
-                if [ ! -f "$catalog" ]; then
-                    echo '[]'
-                    exit 0
-                fi
-                
-                # Get count of items in catalog (it's an array at root level)
-                count=$($plistbuddy -c "Print" "$catalog" 2>/dev/null | grep -c "^    Dict" || echo "0")
-                
-                if [ "$count" -eq 0 ]; then
-                    echo '[]'
-                    exit 0
-                fi
-                
-                echo "["
-                first=true
-                
-                i=0
-                while [ $i -lt $count ]; do
-                    name=$($plistbuddy -c "Print :$i:name" "$catalog" 2>/dev/null || echo "")
-                    category=$($plistbuddy -c "Print :$i:category" "$catalog" 2>/dev/null || echo "")
-                    developer=$($plistbuddy -c "Print :$i:developer" "$catalog" 2>/dev/null || echo "")
-                    
-                    if [ -n "$name" ]; then
-                        # Escape quotes for JSON
-                        name_esc=$(echo "$name" | sed 's/"/\\\\"/g')
-                        category_esc=$(echo "$category" | sed 's/"/\\\\"/g')
-                        developer_esc=$(echo "$developer" | sed 's/"/\\\\"/g')
-                        
-                        if [ "$first" = "true" ]; then
-                            first=false
-                        else
-                            echo ","
-                        fi
-                        
-                        printf '{"name": "%s", "category": "%s", "developer": "%s"}' "$name_esc" "$category_esc" "$developer_esc"
-                    fi
-                    
-                    i=$((i + 1))
-                done
-                
-                echo "]"
-                """
+            guard let data = try? Data(contentsOf: url),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+                  let items = plist as? [[String: Any]] else {
+                continue
+            }
             
-            let result = try await executeWithFallback(osquery: nil, bash: bashScript)
-            
-            if let items = result["items"] as? [[String: Any]] {
-                for item in items {
-                    if let name = item["name"] as? String, !name.isEmpty {
-                        let category = item["category"] as? String ?? ""
-                        let developer = item["developer"] as? String ?? ""
-                        // Only store if we have category or developer data
-                        if !category.isEmpty || !developer.isEmpty {
-                            metadata[name] = (category: category, developer: developer)
-                        }
-                    }
+            for item in items {
+                guard let name = item["name"] as? String, !name.isEmpty else { continue }
+                let category = item["category"] as? String ?? ""
+                let developer = item["developer"] as? String ?? ""
+                if !category.isEmpty || !developer.isEmpty {
+                    metadata[name] = (category: category, developer: developer)
                 }
             }
         }
@@ -920,13 +700,6 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         // Parse the result - it should be an array of strings
         if let items = result["items"] as? [String] {
             return items
-        }
-        
-        // Fallback: try to parse from the raw result if items is in a different format
-        if let itemsArray = result["items"] as? [[String: Any]] {
-            // If we get dictionaries, this format isn't what we expected
-            // but we can try to handle it
-            return []
         }
         
         return []

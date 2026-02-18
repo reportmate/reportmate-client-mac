@@ -149,14 +149,14 @@ public class OSQueryService {
     /// Execute an osquery SQL query
     /// For extension tables, uses the --extension flag which starts extension as a child process
     /// The extension takes ~3 seconds to register, so for extension tables we use a two-phase approach
+    /// Built-in table queries always use the fast path (no extension loading)
     public func executeQuery(_ query: String) async throws -> [[String: Any]] {
-        // Simple query execution without extension
-        if extensionPath == nil {
+        // Route built-in table queries to the fast path — no extension overhead
+        if extensionPath == nil || !Self.queryUsesExtensionTables(query) {
             return try await executeSimpleQuery(query)
         }
         
-        // With extension: use osqueryi's --extension flag
-        // The extension takes 3 seconds to register, so we pass the query after waiting
+        // Extension tables: use osqueryi's --extension flag with sleep delay
         return try await executeQueryWithExtension(query)
     }
     
