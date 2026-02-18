@@ -640,68 +640,15 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     // MARK: - Manifest Catalogs Collection
     
-    /// Collects the catalogs array from the device's Munki manifest
-    /// The manifest contains a catalogs array that determines which software catalogs the device subscribes to
-    /// (e.g., ["production", "testing"])
+    /// Returns the catalog names that Munki has cached locally.
+    /// The filenames in /Library/Managed Installs/catalogs/ are exactly the catalog names in use.
     private func collectManifestCatalogs(manifestName: String?) async throws -> [String] {
-        guard let manifestName = manifestName, !manifestName.isEmpty else {
+        let catalogsDir = "/Library/Managed Installs/catalogs"
+        
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: catalogsDir) else {
             return []
         }
         
-        // Munki manifests are stored as plist files
-        let manifestPath = "/Library/Managed Installs/manifests/\(manifestName)"
-        
-        let bashScript = """
-            plistbuddy="/usr/libexec/PlistBuddy"
-            manifest="\(manifestPath)"
-            
-            # Check if manifest exists
-            if [ ! -f "$manifest" ]; then
-                echo '[]'
-                exit 0
-            fi
-            
-            # Get count of catalogs array
-            count=$($plistbuddy -c "Print :catalogs" "$manifest" 2>/dev/null | grep -c "^    " || echo "0")
-            
-            if [ "$count" -eq 0 ]; then
-                echo '[]'
-                exit 0
-            fi
-            
-            echo "["
-            first=true
-            
-            i=0
-            while [ $i -lt $count ]; do
-                catalog=$($plistbuddy -c "Print :catalogs:$i" "$manifest" 2>/dev/null || echo "")
-                
-                if [ -n "$catalog" ]; then
-                    # Escape quotes for JSON
-                    catalog_esc=$(echo "$catalog" | sed 's/"/\\\\"/g')
-                    
-                    if [ "$first" = "true" ]; then
-                        first=false
-                    else
-                        echo ","
-                    fi
-                    
-                    printf '"%s"' "$catalog_esc"
-                fi
-                
-                i=$((i + 1))
-            done
-            
-            echo "]"
-            """
-        
-        let result = try await executeWithFallback(osquery: nil, bash: bashScript)
-        
-        // Parse the result - it should be an array of strings
-        if let items = result["items"] as? [String] {
-            return items
-        }
-        
-        return []
+        return entries.filter { !$0.hasPrefix(".") }.sorted()
     }
 }
