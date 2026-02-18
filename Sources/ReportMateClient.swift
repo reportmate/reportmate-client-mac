@@ -457,7 +457,8 @@ struct ReportMateClient: AsyncParsableCommand {
         do {
             // Use unified payload for API transmission
             let jsonData = try encoder.encode(unifiedPayload)
-            if let jsonString = String(data: jsonData, encoding: .utf8) {
+            // Only dump full JSON at -vvv (debug level)
+            if ConsoleFormatter.isDebug, let jsonString = String(data: jsonData, encoding: .utf8) {
                 print("\n=== COLLECTED DATA PAYLOAD ===")
                 print(jsonString)
                 print("=== END PAYLOAD ===")
@@ -707,9 +708,16 @@ struct ReportMateClient: AsyncParsableCommand {
                 details: details
             ))
         }
-        // NO ITEMS: Only generate event if Munki was run but nothing to report
+        // NO CHANGES: Munki is running normally, nothing to report
         else {
-            // Don't generate events for empty managed state - it's normal
+            details["module_status"] = .string("ok")
+            events.append(ReportMateEvent(
+                moduleId: "installs",
+                eventType: "info",
+                message: "\(items.count) managed package\(items.count == 1 ? "" : "s"), all up to date",
+                timestamp: Date(),
+                details: details
+            ))
         }
         
         return events
