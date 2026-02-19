@@ -517,6 +517,25 @@ WRAPPER
         cp "$EXTENSION_SOURCE" "$PACKAGE_ROOT/usr/local/reportmate/"
         chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/macadmins_extension.ext"
         log_success "Extension bundled: macadmins_extension.ext"
+
+        # Re-sign the extension with hardened runtime so notarization passes.
+        # The upstream macadmins binary lacks --options runtime (flags=0x0).
+        if [ "$SIGN" = true ]; then
+            EXT_CODESIGN_ARGS=(
+                --force
+                --sign "$SIGNING_IDENTITY_APP"
+                --options runtime
+            )
+            if [ "$SIGNING_TIMESTAMP" = "true" ]; then
+                EXT_CODESIGN_ARGS+=(--timestamp)
+            fi
+            if [ -n "$SIGNING_KEYCHAIN" ]; then
+                EXT_CODESIGN_ARGS+=(--keychain "$SIGNING_KEYCHAIN")
+            fi
+            codesign "${EXT_CODESIGN_ARGS[@]}" \
+                "$PACKAGE_ROOT/usr/local/reportmate/macadmins_extension.ext"
+            log_success "Extension re-signed with hardened runtime"
+        fi
     else
         log_warn "macadmins extension not found at: $EXTENSION_SOURCE"
         log_info "Download from: https://github.com/macadmins/osquery-extension/releases"
