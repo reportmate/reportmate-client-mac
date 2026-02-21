@@ -610,8 +610,15 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             ORDER BY domain, name;
         """
         
-        // Execute osquery and get raw results
-        let result = try await executeOsqueryRaw(osqueryScript)
+        // Execute osquery with a hard timeout — the managed_policies table can hang
+        // indefinitely on devices with sparse MDM coverage (cfprefsd never fires its callback).
+        let result: [[String: Any]]
+        do {
+            result = try await executeOsqueryRaw(osqueryScript, timeout: 20)
+        } catch {
+            ConsoleFormatter.writeWarning("managed_policies query did not complete, skipping: \(error.localizedDescription)")
+            return []
+        }
         
         // Group policies by domain for better organization
         var policiesByDomain: [String: [[String: Any]]] = [:]
@@ -644,26 +651,58 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         return policies
     }
     
-    /// Execute osquery and return raw array of dictionaries
-    private func executeOsqueryRaw(_ query: String) async throws -> [[String: Any]] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/local/bin/osqueryi")
-        process.arguments = ["--json", query]
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        
-        try process.run()
-        process.waitUntilExit()
-        
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        
-        guard let result = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            return []
+    /// Execute osquery and return raw array of dictionaries.
+    /// - Parameters:
+    ///   - query: The SQL query to execute.
+    ///   - timeout: Seconds before the osqueryi child process is killed; 0 = no timeout.
+    private func executeOsqueryRaw(_ query: String, timeout: TimeInterval = 0) async throws -> [[String: Any]] {
+        return try await withCheckedThrowingContinuation { continuation in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/local/bin/osqueryi")
+            process.arguments = ["--json", query]
+
+            let outputPipe = Pipe()
+            process.standardOutput = outputPipe
+            process.standardError = Pipe()
+
+            // Watchdog: terminate process after `timeout` seconds so a hanging
+            // osquery table (e.g. managed_policies on lightly-managed devices)
+            // never blocks the runner indefinitely.
+            var watchdog: DispatchWorkItem?
+            if timeout > 0 {
+                let item = DispatchWorkItem {
+                    guard process.isRunning else { return }
+                    process.terminate()
+                }
+                watchdog = item
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: item)
+            }
+
+            process.terminationHandler = { p in
+                // The watchdog already guards against double-terminate via process.isRunning,
+                // so no explicit cancel is needed here.
+                // If the watchdog fired, the process was killed via SIGTERM.
+                if timeout > 0 && p.terminationReason == .uncaughtSignal {
+                    continuation.resume(throwing: OSQueryError.executionFailed(
+                        "Query timed out after \(Int(timeout))s"
+                    ))
+                    return
+                }
+                let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                if let result = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                    continuation.resume(returning: result)
+                } else {
+                    continuation.resume(returning: [])
+                }
+            }
+
+            do {
+                try process.run()
+            } catch {
+                watchdog?.cancel()
+                continuation.resume(throwing: OSQueryError.processLaunchFailed(error))
+            }
         }
-        
-        return result
     }
     
     // MARK: - Helper to execute bash commands
