@@ -1,12 +1,10 @@
 import Foundation
 
 /// Configuration manager for ReportMate macOS client
-/// Handles configuration hierarchy: CLI args > Environment > UserDefaults (com.github.reportmate) > Defaults
+/// Handles configuration hierarchy: CLI args > Environment > plist file > Defaults
 /// Configuration can be set via:
-/// - Configuration Profiles (MDM)
-/// - /Library/Preferences/com.github.reportmate.plist (system-wide)
-/// - ~/Library/Preferences/com.github.reportmate.plist (user-specific)
-/// - `defaults write com.github.reportmate <key> <value>`
+/// - Configuration Profiles (MDM) → /Library/Managed Preferences/com.github.reportmate.plist
+/// - System plist (written as root) → /Library/Preferences/com.github.reportmate.plist
 /// - Environment variables (REPORTMATE_*)
 public class ConfigurationManager {
     public private(set) var configuration: ReportMateConfiguration
@@ -27,36 +25,32 @@ public class ConfigurationManager {
         }
     }
     
-    /// Save system-wide configuration to standard macOS preferences
-    /// Uses /Library/Preferences/com.github.reportmate.plist via UserDefaults
+    /// Save system-wide configuration to /Library/Preferences/com.github.reportmate.plist
+    /// Writes directly via NSDictionary to avoid the UserDefaults(suiteName: bundleId) restriction.
     public func setSystemConfiguration(
         apiUrl: String,
         passphrase: String? = nil,
         deviceId: String? = nil
     ) throws {
-        // Use standard macOS preferences location via UserDefaults
-        // This writes to /Library/Preferences/com.github.reportmate.plist when run as root
-        guard let defaults = UserDefaults(suiteName: "com.github.reportmate") else {
-            throw ConfigurationError.failedToAccessPreferences
-        }
-        
-        defaults.set(apiUrl, forKey: "ApiUrl")
-        defaults.set(3600, forKey: "CollectionInterval")
-        defaults.set("info", forKey: "LogLevel")
-        defaults.set([
+        let plistPath = "/Library/Preferences/com.github.reportmate.plist"
+
+        // Load existing values so we don't clobber unrelated keys
+        var dict: [String: Any] = (NSDictionary(contentsOfFile: plistPath) as? [String: Any]) ?? [:]
+
+        dict["ApiUrl"] = apiUrl
+        dict["CollectionInterval"] = 3600
+        dict["LogLevel"] = "info"
+        dict["EnabledModules"] = [
             "hardware", "system", "network", "security",
             "applications", "management", "inventory"
-        ], forKey: "EnabledModules")
-        
-        if let passphrase = passphrase {
-            defaults.set(passphrase, forKey: "Passphrase")
+        ]
+        if let passphrase = passphrase { dict["Passphrase"] = passphrase }
+        if let deviceId = deviceId { dict["DeviceId"] = deviceId }
+
+        let nsd = NSDictionary(dictionary: dict)
+        guard nsd.write(toFile: plistPath, atomically: true) else {
+            throw ConfigurationError.failedToAccessPreferences
         }
-        
-        if let deviceId = deviceId {
-            defaults.set(deviceId, forKey: "DeviceId")
-        }
-        
-        defaults.synchronize()
     }
     
     public enum ConfigurationError: Error {
@@ -85,31 +79,23 @@ public class ConfigurationManager {
     }
     
     private static func loadConfigurationProfiles() -> [String: Any]? {
-        // Check for Configuration Profile managed preferences
-        let profileDefaults = UserDefaults(suiteName: "com.github.reportmate")
-        
-        guard let profileDefaults = profileDefaults else { return nil }
-        
-        var config: [String: Any] = [:]
-        
-        // Map Configuration Profile keys to internal configuration
-        // Passphrase is for device-to-api authentication
-        let keyMappings: [String: String] = [
-            "ApiUrl": "ApiUrl",
-            "DeviceId": "DeviceId", 
-            "Passphrase": "Passphrase",
-            "CollectionInterval": "CollectionInterval",
-            "LogLevel": "LogLevel",
-            "EnabledModules": "EnabledModules"
+        // Read directly from the plist file rather than via UserDefaults(suiteName:).
+        // Using the app's own bundle identifier as a suite name is explicitly rejected by
+        // macOS ("will not work"), so UserDefaults-based reading is unreliable here.
+        // Reading the file directly works regardless of which user context the runner executes under.
+        let plistPaths = [
+            "/Library/Managed Preferences/com.github.reportmate.plist", // MDM-pushed (highest priority)
+            "/Library/Preferences/com.github.reportmate.plist",          // system-wide (written as root)
         ]
-        
-        for (profileKey, configKey) in keyMappings {
-            if let value = profileDefaults.object(forKey: profileKey) {
-                config[configKey] = value
+
+        var merged: [String: Any] = [:]
+        for path in plistPaths {
+            if let dict = NSDictionary(contentsOfFile: path) as? [String: Any] {
+                merged.merge(dict) { _, new in new }
             }
         }
-        
-        return config.isEmpty ? nil : config
+
+        return merged.isEmpty ? nil : merged
     }
     
     private static func loadEnvironmentVariables() -> [String: Any] {
