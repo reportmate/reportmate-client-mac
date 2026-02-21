@@ -850,7 +850,7 @@ EOF
     # DEFAULT CONFIGURATION PLIST
     # ═══════════════════════════════════════════════════════════════════════════
     
-    cat > "$PACKAGE_ROOT/Library/Managed Reports/reportmate.plist" << EOF
+    cat > "$PACKAGE_ROOT/Library/Preferences/com.github.reportmate.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1105,11 +1105,11 @@ if [ -d "$MUNKI_DIR" ]; then
         if ! grep -q "Deployed by: ReportMate macOS Client" "$POSTFLIGHT" 2>/dev/null; then
             # Identify what owns the existing postflight for an informative backup name
             if grep -qi "munkireport" "$POSTFLIGHT" 2>/dev/null; then
-                BACKUP_NAME="10-munkireport.sh"
+                BACKUP_NAME="munkireport.sh"
             elif grep -qi "sal-submit\|/sal/" "$POSTFLIGHT" 2>/dev/null; then
-                BACKUP_NAME="10-sal.sh"
+                BACKUP_NAME="sal.sh"
             else
-                BACKUP_NAME="10-original.sh"
+                BACKUP_NAME="original.sh"
             fi
             log_message "Backing up existing postflight to postflight.d/${BACKUP_NAME}"
             mv "$POSTFLIGHT" "${POSTFLIGHT_D}/${BACKUP_NAME}"
