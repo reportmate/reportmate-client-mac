@@ -85,13 +85,14 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             // Add collected items
             munki.items = installs
             
-            // Consolidate warnings/errors into per-item messages (one message max per item)
-            // Parse semicolon-separated warning/error strings, match to items by name,
-            // and attach a single consolidated message to each matched item
+            // Attach per-item warnings/errors using precise regex extraction from raw arrays
+            // Each Munki warning/error message has a known pattern containing the exact item name
+            let warningArray = info["warningsArray"] as? [String] ?? []
+            let errorArray = info["errorsArray"] as? [String] ?? []
             munki.items = Self.attachMessagesToItems(
                 items: munki.items,
-                warnings: munki.warnings,
-                errors: munki.errors
+                warningMessages: warningArray,
+                errorMessages: errorArray
             )
             
             munkiInfoObject = munki
@@ -120,7 +121,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     "status": munki.status,
                     "lastRunSuccess": munki.lastRunSuccess,
                     "items": munki.items.map { item -> [String: Any] in
-                        var d: [String: Any] = [
+                        let d: [String: Any] = [
                             "id": item.id,
                             "name": item.name,
                             "displayName": item.displayName,
@@ -136,7 +137,6 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                             "category": item.category,
                             "developer": item.developer
                         ]
-                        if let msg = item.message { d["message"] = msg }
                         return d
                     }
                 ]
@@ -169,79 +169,111 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         return BaseModuleData(moduleId: moduleId, data: installsData)
     }
     
-    // MARK: - Per-item message consolidation
+    // MARK: - Per-item message consolidation (precise regex extraction)
     
-    /// Parse semicolon-separated warnings/errors, match each to an item by name,
-    /// and consolidate into a single `message` per item. Also updates item status
-    /// to "Warning" or "Error" accordingly. Messages that don't match any item are
-    /// left in the top-level munki.warnings/errors string (unchanged).
+    /// Known Munki warning/error message patterns with a capture group for the exact item name.
+    /// These patterns come from Munki's source code (installer.py, updatecheck.py, etc.)
+    private static let munkiItemPatterns: [NSRegularExpression] = {
+        let patterns = [
+            // "Could not process item ITEMNAME for install."
+            #"could not process item (.+?) for (?:install|removal)"#,
+            // "Could not resolve all dependencies for ITEMNAME,"
+            #"could not resolve all dependencies for (.+?),"#,
+            // "ITEMNAME is not available on this machine"
+            #"^(.+?) is not available on this machine"#,
+            // "Skipping ITEMNAME because it's not for this machine"
+            #"skipping (.+?) because"#,
+            // "Problem installing ITEMNAME"
+            #"problem installing (.+?)[\.\s]"#,
+            // "Install of ITEMNAME failed"
+            #"install of (.+?) failed"#,
+            // "Error installing ITEMNAME"
+            #"error installing (.+?)[\.\s:]"#,
+            // "Download of ITEMNAME failed"
+            #"download of (.+?) failed"#,
+            // "Could not install ITEMNAME"
+            #"could not install (.+?)[\.\s]"#,
+            // "Removal of ITEMNAME failed"
+            #"removal of (.+?) failed"#,
+            // "Package ITEMNAME requires a restart"
+            #"package (.+?) requires a restart"#,
+            // "WARNING about ITEMNAME:" (generic with colon)
+            #"(?:warning|error):?\s+(.+?):\s"#,
+        ]
+        return patterns.compactMap { try? NSRegularExpression(pattern: $0, options: .caseInsensitive) }
+    }()
+    
+    /// Extract the exact item name from a Munki warning/error message using known patterns.
+    /// Returns nil if no pattern matches (message is system-level, not per-item).
+    private static func extractItemName(from message: String) -> String? {
+        let nsMessage = message as NSString
+        let range = NSRange(location: 0, length: nsMessage.length)
+        
+        for regex in munkiItemPatterns {
+            if let match = regex.firstMatch(in: message, range: range),
+               match.numberOfRanges >= 2 {
+                let capturedRange = match.range(at: 1)
+                if capturedRange.location != NSNotFound {
+                    return nsMessage.substring(with: capturedRange)
+                }
+            }
+        }
+        return nil
+    }
+    
+    /// Attach warnings and errors to their respective items using precise name extraction.
+    /// Each raw message from Munki's Warnings[] / Errors[] plist arrays is matched to an item
+    /// by extracting the exact item name from the message using known Munki patterns.
+    /// Messages that don't match any item are left as system-level (in munki.warnings/errors).
     static func attachMessagesToItems(
         items: [MunkiItem],
-        warnings: String?,
-        errors: String?
+        warningMessages: [String],
+        errorMessages: [String]
     ) -> [MunkiItem] {
         var result = items
         
-        // Build a lookup: lowercased item name → index in result array
-        // Include both name and displayName for matching
-        var nameToIndex: [(String, Int)] = []
+        // Build a lookup of lowercased item names → index for exact matching
+        var nameToIndex: [String: Int] = [:]
         for (i, item) in result.enumerated() {
-            nameToIndex.append((item.name.lowercased(), i))
-            if item.displayName.lowercased() != item.name.lowercased() {
-                nameToIndex.append((item.displayName.lowercased(), i))
+            nameToIndex[item.name.lowercased()] = i
+            let displayLower = item.displayName.lowercased()
+            if displayLower != item.name.lowercased() {
+                nameToIndex[displayLower] = i
             }
         }
-        // Sort longest names first to avoid partial matches (e.g., "ReportMateConfig" before "ReportMate")
-        nameToIndex.sort { $0.0.count > $1.0.count }
         
-        /// Find which item index a message belongs to
-        func matchItem(for message: String) -> Int? {
-            let lower = message.lowercased()
-            for (name, idx) in nameToIndex {
-                if lower.contains(name) { return idx }
-            }
-            return nil
+        /// Find the item index for a message by extracting the item name via regex
+        func findItem(for message: String) -> Int? {
+            guard let extractedName = extractItemName(from: message) else { return nil }
+            return nameToIndex[extractedName.lowercased()]
         }
         
-        // Collect all messages per item index: (index, [messages])
-        var messagesPerItem: [Int: [String]] = [:]
-        var statusPerItem: [Int: String] = [:]  // Track highest severity per item
-        
-        // Process errors first (higher severity)
-        if let errorStr = errors, !errorStr.isEmpty {
-            let lines = errorStr.components(separatedBy: ";").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            for line in lines {
-                if let idx = matchItem(for: line) {
-                    messagesPerItem[idx, default: []].append(line)
-                    statusPerItem[idx] = "Error"
+        // Process errors (higher severity)
+        for rawMessage in errorMessages {
+            let message = rawMessage.hasPrefix("ERROR: ") ? String(rawMessage.dropFirst(7)) : rawMessage
+            guard !message.isEmpty else { continue }
+            if let idx = findItem(for: message) {
+                if result[idx].lastError.isEmpty {
+                    result[idx].lastError = message
                 }
+                result[idx].status = "Error"
             }
         }
         
         // Process warnings (lower severity — won't override Error)
-        if let warnStr = warnings, !warnStr.isEmpty {
-            let lines = warnStr.components(separatedBy: ";").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            for line in lines {
-                if let idx = matchItem(for: line) {
-                    messagesPerItem[idx, default: []].append(line)
-                    if statusPerItem[idx] == nil {
-                        statusPerItem[idx] = "Warning"
-                    }
+        for rawMessage in warningMessages {
+            let message = rawMessage.hasPrefix("WARNING: ") ? String(rawMessage.dropFirst(9)) : rawMessage
+            guard !message.isEmpty else { continue }
+            if let idx = findItem(for: message) {
+                if result[idx].lastWarning.isEmpty {
+                    result[idx].lastWarning = message
                 }
-            }
-        }
-        
-        // Apply consolidated messages to items (one message per item)
-        for (idx, messages) in messagesPerItem {
-            // Join multiple messages into a single consolidated message
-            result[idx].message = messages.joined(separator: " | ")
-            // Update status to highest severity found
-            if let newStatus = statusPerItem[idx] {
-                result[idx].status = newStatus
-            }
-            // If item was Pending and now has a warning about why, add pending reason
-            if result[idx].status == "Warning" && result[idx].pendingReason.isEmpty {
-                result[idx].pendingReason = messages.first ?? ""
+                if result[idx].status != "Error" {
+                    result[idx].status = "Warning"
+                }
+                if result[idx].pendingReason.isEmpty {
+                    result[idx].pendingReason = message
+                }
             }
         }
         
@@ -385,17 +417,19 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             info["endTime"] = isoFormatter.string(from: endTime)
         }
         
-        // Errors array
+        // Errors array — keep raw array AND joined string for API compatibility
         if let errors = report["Errors"] as? [String], !errors.isEmpty {
             info["errors"] = errors.joined(separator: "; ")
+            info["errorsArray"] = errors
             info["success"] = "false"
         } else {
             info["success"] = "true"
         }
         
-        // Warnings array
+        // Warnings array — keep raw array AND joined string for API compatibility
         if let warnings = report["Warnings"] as? [String], !warnings.isEmpty {
             info["warnings"] = warnings.joined(separator: "; ")
+            info["warningsArray"] = warnings
         }
         
         // Problem installs
