@@ -708,16 +708,10 @@ struct ReportMateClient: AsyncParsableCommand {
                 details: details
             ))
         }
-        // NO CHANGES: Munki is running normally, nothing to report
+        // NO CHANGES: Munki is running normally, nothing to report - no event needed
+        // Matches Windows behavior: don't generate events for steady-state "all managed" status
         else {
-            details["module_status"] = .string("ok")
-            events.append(ReportMateEvent(
-                moduleId: "installs",
-                eventType: "info",
-                message: "\(items.count) managed package\(items.count == 1 ? "" : "s"), all up to date",
-                timestamp: Date(),
-                details: details
-            ))
+            // No event generated - normal operation
         }
         
         return events
