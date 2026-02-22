@@ -155,9 +155,10 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             } ?? [:]
         ]
         
-        // Inject newly installed count - items actually installed during this run (from ItemsInstalled plist key)
+        // Inject newly installed items info for event message generation
         if var munkiDict = installsData["munki"] as? [String: Any] {
             munkiDict["newlyInstalledCount"] = info["newlyInstalledCount"] as? Int ?? 0
+            munkiDict["newlyInstalledItems"] = info["newlyInstalledItems"] as? [[String: String]] ?? []
             installsData["munki"] = munkiDict
         }
         
@@ -437,11 +438,18 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             info["problemInstalls"] = problems.joined(separator: "; ")
         }
         
-        // ItemsInstalled count (items newly installed during this run)
+        // ItemsInstalled - items newly installed during this run (name + version for event messages)
         if let itemsInstalled = report["ItemsInstalled"] as? [[String: Any]] {
             info["newlyInstalledCount"] = itemsInstalled.count
+            let installedDetails = itemsInstalled.map { item -> [String: String] in
+                let name = item["display_name"] as? String ?? item["name"] as? String ?? "Unknown"
+                let version = item["version_to_install"] as? String ?? item["installed_version"] as? String ?? ""
+                return ["name": name, "version": version]
+            }
+            info["newlyInstalledItems"] = installedDetails
         } else {
             info["newlyInstalledCount"] = 0
+            info["newlyInstalledItems"] = [] as [[String: String]]
         }
         
         return info
