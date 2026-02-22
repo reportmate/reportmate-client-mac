@@ -599,7 +599,6 @@ EOF
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
-        <string>run</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -1121,6 +1120,12 @@ plist_set_if_missing ExtensionEnabled -bool true
 plist_set_if_missing ValidateSSL -bool true
 plist_set_if_missing Timeout -integer 300
 plist_set_if_missing EnabledModules -array hardware system network security applications management inventory profiles displays
+
+# Run initial collection immediately so the device appears in ReportMate right away
+log_message "Running initial inventory and system collection..."
+nohup /usr/local/reportmate/managedreportsrunner --run-modules inventory,system \
+    >> "$LOG_DIR/reportmate-firstrun.log" 2>&1 &
+disown
 
 log_message "ReportMate postinstall complete."
 POSTINSTALL_SCRIPT

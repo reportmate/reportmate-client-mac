@@ -328,7 +328,7 @@ jobs:
               <key>ProgramArguments</key>
               <array>
                   <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
-                  ${MODULES:-<string>run</string>}
+                  ${MODULES}
               </array>
               <key>RunAtLoad</key>
               ${RUN_AT_LOAD}
@@ -466,6 +466,12 @@ jobs:
           ln -sf "${APP_PATH}/Contents/MacOS/managedreportsrunner" /usr/local/bin/managedreportsrunner
 
           echo "/usr/local/reportmate" > /etc/paths.d/reportmate 2>/dev/null
+
+          # Run initial collection immediately so the device appears in ReportMate right away
+          log_message "Running initial inventory and system collection..."
+          nohup /usr/local/reportmate/managedreportsrunner --run-modules inventory,system \
+              >> "$LOG_DIR/reportmate-firstrun.log" 2>&1 &
+          disown
 
           log_message "ReportMate postinstall complete."
           exit 0
