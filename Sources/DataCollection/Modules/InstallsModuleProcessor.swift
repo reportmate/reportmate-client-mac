@@ -137,7 +137,6 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                             "developer": item.developer
                         ]
                         if let msg = item.message { d["message"] = msg }
-                        if let reason = item.pendingReason { d["pendingReason"] = reason }
                         return d
                     }
                 ]
@@ -241,8 +240,8 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 result[idx].status = newStatus
             }
             // If item was Pending and now has a warning about why, add pending reason
-            if result[idx].status == "Warning" && result[idx].pendingReason == nil {
-                result[idx].pendingReason = messages.first
+            if result[idx].status == "Warning" && result[idx].pendingReason.isEmpty {
+                result[idx].pendingReason = messages.first ?? ""
             }
         }
         
