@@ -846,47 +846,10 @@ EOF
         log_warn "Icon not found at ${ICON_SOURCE}"
     fi
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # DEFAULT CONFIGURATION PLIST
-    # ═══════════════════════════════════════════════════════════════════════════
-    
-    mkdir -p "$PACKAGE_ROOT/Library/Preferences"
-    cat > "$PACKAGE_ROOT/Library/Preferences/com.github.reportmate.plist" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CollectionInterval</key>
-    <integer>3600</integer>
-    <key>LogLevel</key>
-    <string>info</string>
-    <key>EnabledModules</key>
-    <array>
-        <string>hardware</string>
-        <string>system</string>
-        <string>network</string>
-        <string>security</string>
-        <string>applications</string>
-        <string>management</string>
-        <string>inventory</string>
-        <string>profiles</string>
-        <string>displays</string>
-    </array>
-    <key>OsqueryPath</key>
-    <string>/usr/local/bin/osqueryi</string>
-    <key>OsqueryExtensionPath</key>
-    <string>/usr/local/reportmate/macadmins_extension.ext</string>
-    <key>ExtensionEnabled</key>
-    <true/>
-    <key>ValidateSSL</key>
-    <true/>
-    <key>Timeout</key>
-    <integer>300</integer>
-$([ -n "$API_URL" ] && echo "    <key>ApiUrl</key>
-    <string>$API_URL</string>")
-</dict>
-</plist>
-EOF
+    # NOTE: The preference plist is NOT included in the package payload.
+    # Writing it here would cause pkg payload extraction to overwrite any
+    # existing plist on disk (including ApiUrl set by a config package or MDM).
+    # Instead, postinstall initialises defaults non-destructively (see below).
 
     # ═══════════════════════════════════════════════════════════════════════════
     # SIGN THE APP BUNDLE (if signing enabled)
@@ -1139,9 +1102,36 @@ else
     log_message "Munki not detected, skipping postflight integration"
 fi
 
+# ═══════════════════════════════════════════════════════════════════════════
+# INITIALIZE PREFERENCE DEFAULTS
+# Only writes keys that do not already exist, so any ApiUrl (or other value)
+# set by an MDM profile or a config package is never overwritten on upgrade.
+# ═══════════════════════════════════════════════════════════════════════════
+PLIST_DOMAIN="/Library/Preferences/com.github.reportmate"
+plist_set_if_missing() {
+    local key="$1"; shift
+    /usr/bin/defaults read "$PLIST_DOMAIN" "$key" &>/dev/null 2>&1 || \
+        /usr/bin/defaults write "$PLIST_DOMAIN" "$key" "$@"
+}
+plist_set_if_missing CollectionInterval -integer 3600
+plist_set_if_missing LogLevel -string info
+plist_set_if_missing OsqueryPath -string /usr/local/bin/osqueryi
+plist_set_if_missing OsqueryExtensionPath -string /usr/local/reportmate/macadmins_extension.ext
+plist_set_if_missing ExtensionEnabled -bool true
+plist_set_if_missing ValidateSSL -bool true
+plist_set_if_missing Timeout -integer 300
+plist_set_if_missing EnabledModules -array hardware system network security applications management inventory profiles displays
+
 log_message "ReportMate postinstall complete."
-exit 0
 POSTINSTALL_SCRIPT
+
+        # If --api-url was given at build time, append it as a non-destructive
+        # defaults write so it only lands on a fresh install (no plist yet).
+        if [ -n "$API_URL" ]; then
+            printf 'plist_set_if_missing ApiUrl -string "%s"\n' "${API_URL}" >> "$SCRIPTS_DIR/postinstall"
+        fi
+        echo 'exit 0' >> "$SCRIPTS_DIR/postinstall"
+
         chmod +x "$SCRIPTS_DIR/postinstall"
         
         # Create preinstall
