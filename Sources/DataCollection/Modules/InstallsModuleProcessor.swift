@@ -85,6 +85,15 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             // Add collected items
             munki.items = installs
             
+            // Consolidate warnings/errors into per-item messages (one message max per item)
+            // Parse semicolon-separated warning/error strings, match to items by name,
+            // and attach a single consolidated message to each matched item
+            munki.items = Self.attachMessagesToItems(
+                items: munki.items,
+                warnings: munki.warnings,
+                errors: munki.errors
+            )
+            
             munkiInfoObject = munki
         }
         
@@ -111,7 +120,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     "status": munki.status,
                     "lastRunSuccess": munki.lastRunSuccess,
                     "items": munki.items.map { item -> [String: Any] in
-                        [
+                        var d: [String: Any] = [
                             "id": item.id,
                             "name": item.name,
                             "displayName": item.displayName,
@@ -127,6 +136,9 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                             "category": item.category,
                             "developer": item.developer
                         ]
+                        if let msg = item.message { d["message"] = msg }
+                        if let reason = item.pendingReason { d["pendingReason"] = reason }
+                        return d
                     }
                 ]
                 if let clientId = munki.clientIdentifier { dict["clientIdentifier"] = clientId }
@@ -156,6 +168,85 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         }
         
         return BaseModuleData(moduleId: moduleId, data: installsData)
+    }
+    
+    // MARK: - Per-item message consolidation
+    
+    /// Parse semicolon-separated warnings/errors, match each to an item by name,
+    /// and consolidate into a single `message` per item. Also updates item status
+    /// to "Warning" or "Error" accordingly. Messages that don't match any item are
+    /// left in the top-level munki.warnings/errors string (unchanged).
+    static func attachMessagesToItems(
+        items: [MunkiItem],
+        warnings: String?,
+        errors: String?
+    ) -> [MunkiItem] {
+        var result = items
+        
+        // Build a lookup: lowercased item name → index in result array
+        // Include both name and displayName for matching
+        var nameToIndex: [(String, Int)] = []
+        for (i, item) in result.enumerated() {
+            nameToIndex.append((item.name.lowercased(), i))
+            if item.displayName.lowercased() != item.name.lowercased() {
+                nameToIndex.append((item.displayName.lowercased(), i))
+            }
+        }
+        // Sort longest names first to avoid partial matches (e.g., "ReportMateConfig" before "ReportMate")
+        nameToIndex.sort { $0.0.count > $1.0.count }
+        
+        /// Find which item index a message belongs to
+        func matchItem(for message: String) -> Int? {
+            let lower = message.lowercased()
+            for (name, idx) in nameToIndex {
+                if lower.contains(name) { return idx }
+            }
+            return nil
+        }
+        
+        // Collect all messages per item index: (index, [messages])
+        var messagesPerItem: [Int: [String]] = [:]
+        var statusPerItem: [Int: String] = [:]  // Track highest severity per item
+        
+        // Process errors first (higher severity)
+        if let errorStr = errors, !errorStr.isEmpty {
+            let lines = errorStr.components(separatedBy: ";").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            for line in lines {
+                if let idx = matchItem(for: line) {
+                    messagesPerItem[idx, default: []].append(line)
+                    statusPerItem[idx] = "Error"
+                }
+            }
+        }
+        
+        // Process warnings (lower severity — won't override Error)
+        if let warnStr = warnings, !warnStr.isEmpty {
+            let lines = warnStr.components(separatedBy: ";").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            for line in lines {
+                if let idx = matchItem(for: line) {
+                    messagesPerItem[idx, default: []].append(line)
+                    if statusPerItem[idx] == nil {
+                        statusPerItem[idx] = "Warning"
+                    }
+                }
+            }
+        }
+        
+        // Apply consolidated messages to items (one message per item)
+        for (idx, messages) in messagesPerItem {
+            // Join multiple messages into a single consolidated message
+            result[idx].message = messages.joined(separator: " | ")
+            // Update status to highest severity found
+            if let newStatus = statusPerItem[idx] {
+                result[idx].status = newStatus
+            }
+            // If item was Pending and now has a warning about why, add pending reason
+            if result[idx].status == "Warning" && result[idx].pendingReason == nil {
+                result[idx].pendingReason = messages.first
+            }
+        }
+        
+        return result
     }
     
     // MARK: - Munki Run Log (extract last complete run from ManagedSoftwareUpdate.log)

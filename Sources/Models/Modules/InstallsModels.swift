@@ -98,6 +98,10 @@ public struct MunkiItem: Codable, Sendable {
     public var installedSize: Int = 0
     public var endTime: String = ""            // Last Munki run end time for this item
     
+    // Per-item message: consolidated warning/error from Munki run (one message max per item)
+    public var message: String?
+    public var pendingReason: String?
+    
     // Enhanced fields for ReportMate dashboard compatibility
     public var type: String = "munki"
     public var lastUpdate: String = ""
