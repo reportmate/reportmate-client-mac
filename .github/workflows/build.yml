@@ -289,15 +289,9 @@ jobs:
 
           echo "APPL????" > "$APP_CONTENTS/PkgInfo"
 
-          # Create LaunchDaemons (boot, hourly, fourhourly, daily)
-          for schedule in boot hourly fourhourly daily; do
+          # Create LaunchDaemons (hourly, fourhourly, daily, 12hourly)
+          for schedule in hourly fourhourly daily 12hourly; do
             case $schedule in
-              boot)
-                INTERVAL=""
-                RUN_AT_LOAD="<true/>"
-                LAUNCH_ONCE="<true/>"
-                MODULES=""
-                ;;
               hourly)
                 INTERVAL="<key>StartInterval</key><integer>3600</integer>"
                 RUN_AT_LOAD="<false/>"
@@ -308,13 +302,19 @@ jobs:
                 INTERVAL="<key>StartInterval</key><integer>14400</integer>"
                 RUN_AT_LOAD="<false/>"
                 LAUNCH_ONCE=""
-                MODULES="<string>--run-modules</string><string>applications,inventory,system</string>"
+                MODULES="<string>--run-modules</string><string>applications,inventory,system,identity</string>"
                 ;;
               daily)
                 INTERVAL="<key>StartCalendarInterval</key><dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>"
                 RUN_AT_LOAD="<false/>"
                 LAUNCH_ONCE=""
-                MODULES="<string>--run-modules</string><string>hardware,displays</string>"
+                MODULES="<string>--run-modules</string><string>hardware,peripherals</string>"
+                ;;
+              12hourly)
+                INTERVAL="<key>StartInterval</key><integer>43200</integer>"
+                RUN_AT_LOAD="<false/>"
+                LAUNCH_ONCE=""
+                MODULES=""
                 ;;
             esac
 
