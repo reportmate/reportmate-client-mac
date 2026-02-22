@@ -552,7 +552,6 @@ struct ReportMateClient: AsyncParsableCommand {
         
         guard let munkiData = installsData["munki"] as? [String: Any],
               munkiData["isInstalled"] as? Bool == true else {
-            // Munki not installed - no events to generate
             return events
         }
         
@@ -561,168 +560,136 @@ struct ReportMateClient: AsyncParsableCommand {
         let warningsString = munkiData["warnings"] as? String ?? ""
         let problemInstalls = munkiData["problemInstalls"] as? String ?? ""
         
-        // Get item counts for context - count items with per-item messages (set by attachMessagesToItems)
+        // Get items and counts
         let items = munkiData["items"] as? [[String: Any]] ?? []
         let newlyInstalledCount = munkiData["newlyInstalledCount"] as? Int ?? 0
+        let newlyInstalledItems = munkiData["newlyInstalledItems"] as? [[String: String]] ?? []
         let pendingCount = items.filter { ($0["status"] as? String) == "Pending" }.count
         let failedItems = items.filter { !($0["lastError"] as? String ?? "").isEmpty }
         let warningItems = items.filter { !($0["lastWarning"] as? String ?? "").isEmpty }
         
-        // Use per-item messages as the source of truth (consolidated at collection time)
-        // Fall back to raw semicolon strings only if no items have per-item messages
+        // Derive message arrays from per-item data or legacy strings
         let errorMessages: [String]
         let warningMessages: [String]
         let problemItems = parseMessagesFromString(problemInstalls)
         if !failedItems.isEmpty || !warningItems.isEmpty {
-            // Per-item messages exist — derive message arrays from items (one per item)
             errorMessages = failedItems.compactMap { $0["lastError"] as? String }.filter { !$0.isEmpty }
             warningMessages = warningItems.compactMap { $0["lastWarning"] as? String }.filter { !$0.isEmpty }
         } else {
-            // Legacy fallback — parse from semicolon-separated strings
             errorMessages = parseMessagesFromString(errorsString)
             warningMessages = parseMessagesFromString(warningsString)
         }
+        
+        let hasErrors = !errorMessages.isEmpty || !failedItems.isEmpty
+        let hasWarnings = !warningMessages.isEmpty || !warningItems.isEmpty
+        let hasInstalls = newlyInstalledCount > 0
+        
+        // Only generate an event if something happened
+        guard hasErrors || hasWarnings || hasInstalls else {
+            return events
+        }
+        
+        // Determine event type by priority: error > warning > success
+        let eventType: String
+        if hasErrors {
+            eventType = "error"
+        } else if hasWarnings {
+            eventType = "warning"
+        } else {
+            eventType = "success"
+        }
+        
+        // Build combined message with all parts
+        var messageParts: [String] = []
+        
+        // Success part: "{item} v{ver}, {item} v{ver} installed"
+        if hasInstalls {
+            if !newlyInstalledItems.isEmpty {
+                let itemStrings = newlyInstalledItems.map { item -> String in
+                    let name = item["name"] ?? "Unknown"
+                    let version = item["version"] ?? ""
+                    return version.isEmpty ? name : "\(name) v\(version)"
+                }
+                messageParts.append("\(itemStrings.joined(separator: ", ")) installed")
+            } else {
+                messageParts.append("\(newlyInstalledCount) package\(newlyInstalledCount == 1 ? "" : "s") installed")
+            }
+        }
+        
+        // Warning part: "{item} has a warning" or "{item}, {item} have warnings"
+        if hasWarnings {
+            let warnNames = warningItems.map { $0["displayName"] as? String ?? $0["name"] as? String ?? "Unknown" }
+            if warnNames.count == 1 {
+                messageParts.append("\(warnNames[0]) has a warning")
+            } else if !warnNames.isEmpty {
+                messageParts.append("\(warnNames.joined(separator: ", ")) have warnings")
+            } else {
+                messageParts.append("managed installs has a warning")
+            }
+        }
+        
+        // Error part: "{item} has an error!" or "{item}, {item} have errors!"
+        if hasErrors {
+            let failedNames = failedItems.map { $0["displayName"] as? String ?? $0["name"] as? String ?? "Unknown" }
+            if failedNames.count == 1 {
+                messageParts.append("\(failedNames[0]) has an error!")
+            } else if !failedNames.isEmpty {
+                messageParts.append("\(failedNames.joined(separator: ", ")) have errors!")
+            } else {
+                messageParts.append("managed installs has an error!")
+            }
+        }
+        
+        let message = messageParts.joined(separator: ", ")
         
         // Build details dictionary
         var details: [String: EventDetailValue] = [
             "module_id": .string("installs"),
             "total_managed_items": .int(items.count),
             "installed_count": .int(newlyInstalledCount),
-            "pending_count": .int(pendingCount)
+            "pending_count": .int(pendingCount),
+            "module_status": .string(eventType)
         ]
         
-        // Determine event type and message based on priority
-        // PRIORITY 1: ERRORS (failed installs or Munki errors)
-        if !errorMessages.isEmpty || !failedItems.isEmpty {
-            let failedCount = max(errorMessages.count, failedItems.count)
-            var messageParts: [String] = []
-            
-            // Primary message: error count with first error text
-            if let firstError = errorMessages.first {
-                // Show the actual error message for single errors
-                if errorMessages.count == 1 {
-                    messageParts.append(firstError)
-                } else {
-                    messageParts.append("\(failedCount) Munki error\(failedCount == 1 ? "" : "s")")
-                }
-            } else if !failedItems.isEmpty {
-                messageParts.append("\(failedItems.count) failed install\(failedItems.count == 1 ? "" : "s")")
-            }
-            
-            // Add warning count if any
-            if !warningMessages.isEmpty || !warningItems.isEmpty {
-                let warnCount = max(warningMessages.count, warningItems.count)
-                messageParts.append("\(warnCount) warning\(warnCount == 1 ? "" : "s")")
-            }
-            
-            // Add newly installed count if any actual activity this run
-            if newlyInstalledCount > 0 {
-                messageParts.append("\(newlyInstalledCount) installed")
-            }
-            
-            // Include error details in payload for expansion
+        if !errorMessages.isEmpty {
             details["error_count"] = .int(errorMessages.count)
             details["error_messages"] = .stringArray(errorMessages)
-            details["module_status"] = .string("error")
-            
-            if !warningMessages.isEmpty {
-                details["warning_count"] = .int(warningMessages.count)
-                details["warning_messages"] = .stringArray(warningMessages)
-            }
-            
-            if !problemItems.isEmpty {
-                details["problem_installs"] = .stringArray(problemItems)
-            }
-            
-            // Include failed item details
-            if !failedItems.isEmpty {
-                let failedItemDetails = failedItems.prefix(10).map { item -> [String: String] in
-                    [
-                        "name": item["name"] as? String ?? "Unknown",
-                        "displayName": item["displayName"] as? String ?? item["name"] as? String ?? "Unknown",
-                        "error": item["lastError"] as? String ?? ""
-                    ]
-                }
-                details["failed_items"] = .dictArray(failedItemDetails)
-            }
-            
-            let message = messageParts.joined(separator: ", ")
-            events.append(ReportMateEvent(
-                moduleId: "installs",
-                eventType: "error",
-                message: message,
-                timestamp: Date(),
-                details: details
-            ))
         }
-        // PRIORITY 2: WARNINGS (Munki warnings without errors)
-        else if !warningMessages.isEmpty || !warningItems.isEmpty {
-            let warnCount = max(warningMessages.count, warningItems.count)
-            var messageParts: [String] = []
-            
-            // Show actual warning message for single warnings
-            if let firstWarning = warningMessages.first, warningMessages.count == 1 {
-                messageParts.append(firstWarning)
-            } else {
-                messageParts.append("\(warnCount) Munki warning\(warnCount == 1 ? "" : "s")")
-            }
-            
-            // Add newly installed count if any
-            if newlyInstalledCount > 0 {
-                messageParts.append("\(newlyInstalledCount) installed")
-            }
-            
+        if !warningMessages.isEmpty {
             details["warning_count"] = .int(warningMessages.count)
             details["warning_messages"] = .stringArray(warningMessages)
-            details["module_status"] = .string("warning")
-            
-            // Include warning item details
-            if !warningItems.isEmpty {
-                let warningItemDetails = warningItems.prefix(10).map { item -> [String: String] in
-                    [
-                        "name": item["name"] as? String ?? "Unknown",
-                        "displayName": item["displayName"] as? String ?? item["name"] as? String ?? "Unknown",
-                        "warning": item["lastWarning"] as? String ?? ""
-                    ]
-                }
-                details["warning_items"] = .dictArray(warningItemDetails)
+        }
+        if !problemItems.isEmpty {
+            details["problem_installs"] = .stringArray(problemItems)
+        }
+        if !failedItems.isEmpty {
+            let failedItemDetails = failedItems.prefix(10).map { item -> [String: String] in
+                [
+                    "name": item["name"] as? String ?? "Unknown",
+                    "displayName": item["displayName"] as? String ?? item["name"] as? String ?? "Unknown",
+                    "error": item["lastError"] as? String ?? ""
+                ]
             }
-            
-            let message = messageParts.joined(separator: ", ")
-            events.append(ReportMateEvent(
-                moduleId: "installs",
-                eventType: "warning",
-                message: message,
-                timestamp: Date(),
-                details: details
-            ))
+            details["failed_items"] = .dictArray(failedItemDetails)
         }
-        // PRIORITY 3: SUCCESS (items actually installed this run, no errors or warnings)
-        else if newlyInstalledCount > 0 {
-            var messageParts: [String] = []
-            
-            messageParts.append("\(newlyInstalledCount) package\(newlyInstalledCount == 1 ? "" : "s") installed")
-            
-            if pendingCount > 0 {
-                messageParts.append("\(pendingCount) pending")
+        if !warningItems.isEmpty {
+            let warningItemDetails = warningItems.prefix(10).map { item -> [String: String] in
+                [
+                    "name": item["name"] as? String ?? "Unknown",
+                    "displayName": item["displayName"] as? String ?? item["name"] as? String ?? "Unknown",
+                    "warning": item["lastWarning"] as? String ?? ""
+                ]
             }
-            
-            details["module_status"] = .string("success")
-            
-            let message = messageParts.joined(separator: ", ")
-            events.append(ReportMateEvent(
-                moduleId: "installs",
-                eventType: "success",
-                message: message,
-                timestamp: Date(),
-                details: details
-            ))
+            details["warning_items"] = .dictArray(warningItemDetails)
         }
-        // NO CHANGES: Munki is running normally, nothing to report - no event needed
-        // Matches Windows behavior: don't generate events for steady-state "all managed" status
-        else {
-            // No event generated - normal operation
-        }
+        
+        events.append(ReportMateEvent(
+            moduleId: "installs",
+            eventType: eventType,
+            message: message,
+            timestamp: Date(),
+            details: details
+        ))
         
         return events
     }
