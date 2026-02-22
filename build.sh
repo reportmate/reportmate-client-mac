@@ -588,43 +588,6 @@ EOF
     # LAUNCHDAEMONS (embedded in app bundle like Outset)
     # ═══════════════════════════════════════════════════════════════════════════
     
-    # Boot daemon - runs all modules at system startup
-    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.boot.plist" << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.github.reportmate.boot</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>LaunchOnlyOnce</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-boot.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-boot.error.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-    <key>Nice</key>
-    <integer>10</integer>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>AbandonProcessGroup</key>
-    <true/>
-    <key>AssociatedBundleIdentifiers</key>
-    <string>com.github.reportmate</string>
-</dict>
-</plist>
-EOF
-
     # Hourly daemon - security, profiles, network, management
     cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.hourly.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -664,7 +627,7 @@ EOF
 </plist>
 EOF
 
-    # 4-hourly daemon - applications, inventory, system
+    # 4-hourly daemon - applications, inventory, system, identity
     cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.fourhourly.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -676,7 +639,7 @@ EOF
     <array>
         <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
         <string>--run-modules</string>
-        <string>applications,inventory,system</string>
+        <string>applications,inventory,system,identity</string>
     </array>
     <key>StartInterval</key>
     <integer>14400</integer>
@@ -703,7 +666,7 @@ EOF
 </plist>
 EOF
 
-    # Daily daemon - hardware, displays (at 9 AM)
+    # Daily daemon - hardware, peripherals (at 9 AM)
     cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.daily.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -715,7 +678,7 @@ EOF
     <array>
         <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
         <string>--run-modules</string>
-        <string>hardware,displays</string>
+        <string>hardware,peripherals</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
@@ -747,6 +710,43 @@ EOF
 </plist>
 EOF
 
+    # 12-hourly daemon - all modules (at 9 AM and 9 PM)
+    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.12hourly.plist" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.github.reportmate.12hourly</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>43200</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-12hourly.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-12hourly.error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>AssociatedBundleIdentifiers</key>
+    <string>com.github.reportmate</string>
+</dict>
+</plist>
+EOF
+
     # ═══════════════════════════════════════════════════════════════════════════
     # MODULE SCHEDULES CONFIGURATION
     # ═══════════════════════════════════════════════════════════════════════════
@@ -761,23 +761,22 @@ EOF
       "description": "Modules that need frequent updates for security monitoring"
     },
     "fourhourly": {
-      "modules": ["applications", "inventory", "system"],
+      "modules": ["applications", "inventory", "system", "identity"],
       "interval_seconds": 14400,
       "launchd_label": "com.github.reportmate.fourhourly",
       "description": "Modules that change moderately - software and device info"
     },
     "daily": {
-      "modules": ["hardware", "displays"],
+      "modules": ["hardware", "peripherals"],
       "calendar_interval": {"hour": 9, "minute": 0},
       "launchd_label": "com.github.reportmate.daily",
       "description": "Modules that rarely change - physical hardware"
     },
-    "boot": {
+    "12hourly": {
       "modules": "all",
-      "run_at_load": true,
-      "launch_only_once": true,
-      "launchd_label": "com.github.reportmate.boot",
-    "description": "Full collection at boot to establish baseline"
+      "interval_seconds": 43200,
+      "launchd_label": "com.github.reportmate.12hourly",
+      "description": "Full collection of all modules every 12 hours"
     }
   },
   "version": "1.0.0",
@@ -995,18 +994,20 @@ chmod 755 /usr/local/reportmate/macadmins_extension.ext 2>/dev/null
 
 # LaunchDaemons to install
 DAEMONS=(
-    "com.github.reportmate.boot.plist"
     "com.github.reportmate.hourly.plist"
     "com.github.reportmate.fourhourly.plist"
     "com.github.reportmate.daily.plist"
+    "com.github.reportmate.12hourly.plist"
 )
 
-# Remove legacy daemon
-if [ -e "${LD_ROOT}/com.github.reportmate.plist" ]; then
-    log_message "Removing legacy daemon..."
-    /bin/launchctl bootout system "${LD_ROOT}/com.github.reportmate.plist" 2>/dev/null
-    rm -f "${LD_ROOT}/com.github.reportmate.plist"
-fi
+# Remove legacy daemons (including boot daemon which was removed in 2026.02)
+for legacy in "com.github.reportmate.plist" "com.github.reportmate.boot.plist"; do
+    if [ -e "${LD_ROOT}/${legacy}" ]; then
+        log_message "Removing legacy daemon: ${legacy}"
+        /bin/launchctl bootout system "${LD_ROOT}/${legacy}" 2>/dev/null
+        rm -f "${LD_ROOT}/${legacy}"
+    fi
+done
 
 # Unload existing and install new daemons
 for daemon in ${DAEMONS}; do
