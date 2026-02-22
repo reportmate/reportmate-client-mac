@@ -561,17 +561,27 @@ struct ReportMateClient: AsyncParsableCommand {
         let warningsString = munkiData["warnings"] as? String ?? ""
         let problemInstalls = munkiData["problemInstalls"] as? String ?? ""
         
-        // Parse into arrays - Munki stores these as semicolon-separated strings
-        let errorMessages = parseMessagesFromString(errorsString)
-        let warningMessages = parseMessagesFromString(warningsString)
-        let problemItems = parseMessagesFromString(problemInstalls)
-        
-        // Get item counts for context
+        // Get item counts for context - count items with per-item messages (set by attachMessagesToItems)
         let items = munkiData["items"] as? [[String: Any]] ?? []
         let newlyInstalledCount = munkiData["newlyInstalledCount"] as? Int ?? 0
         let pendingCount = items.filter { ($0["status"] as? String) == "Pending" }.count
         let failedItems = items.filter { !($0["lastError"] as? String ?? "").isEmpty }
         let warningItems = items.filter { !($0["lastWarning"] as? String ?? "").isEmpty }
+        
+        // Use per-item messages as the source of truth (consolidated at collection time)
+        // Fall back to raw semicolon strings only if no items have per-item messages
+        let errorMessages: [String]
+        let warningMessages: [String]
+        let problemItems = parseMessagesFromString(problemInstalls)
+        if !failedItems.isEmpty || !warningItems.isEmpty {
+            // Per-item messages exist — derive message arrays from items (one per item)
+            errorMessages = failedItems.compactMap { $0["lastError"] as? String }.filter { !$0.isEmpty }
+            warningMessages = warningItems.compactMap { $0["lastWarning"] as? String }.filter { !$0.isEmpty }
+        } else {
+            // Legacy fallback — parse from semicolon-separated strings
+            errorMessages = parseMessagesFromString(errorsString)
+            warningMessages = parseMessagesFromString(warningsString)
+        }
         
         // Build details dictionary
         var details: [String: EventDetailValue] = [
@@ -591,7 +601,7 @@ struct ReportMateClient: AsyncParsableCommand {
             if let firstError = errorMessages.first {
                 // Show the actual error message for single errors
                 if errorMessages.count == 1 {
-                    messageParts.append("Munki error: \(firstError)")
+                    messageParts.append(firstError)
                 } else {
                     messageParts.append("\(failedCount) Munki error\(failedCount == 1 ? "" : "s")")
                 }
@@ -652,7 +662,7 @@ struct ReportMateClient: AsyncParsableCommand {
             
             // Show actual warning message for single warnings
             if let firstWarning = warningMessages.first, warningMessages.count == 1 {
-                messageParts.append("Munki warning: \(firstWarning)")
+                messageParts.append(firstWarning)
             } else {
                 messageParts.append("\(warnCount) Munki warning\(warnCount == 1 ? "" : "s")")
             }
