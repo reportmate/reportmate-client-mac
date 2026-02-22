@@ -710,14 +710,14 @@ EOF
 </plist>
 EOF
 
-    # 12-hourly daemon - all modules (at 9 AM and 9 PM)
-    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.12hourly.plist" << 'EOF'
+    # All-modules daemon - full collection every 12 hours
+    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.allmodules.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.github.reportmate.12hourly</string>
+    <string>com.github.reportmate.allmodules</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
@@ -727,9 +727,9 @@ EOF
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-12hourly.log</string>
+    <string>/Library/Managed Reports/logs/reportmate-allmodules.log</string>
     <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-12hourly.error.log</string>
+    <string>/Library/Managed Reports/logs/reportmate-allmodules.error.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -772,10 +772,10 @@ EOF
       "launchd_label": "com.github.reportmate.daily",
       "description": "Modules that rarely change - physical hardware"
     },
-    "12hourly": {
+    "allmodules": {
       "modules": "all",
       "interval_seconds": 43200,
-      "launchd_label": "com.github.reportmate.12hourly",
+      "launchd_label": "com.github.reportmate.allmodules",
       "description": "Full collection of all modules every 12 hours"
     }
   },
@@ -997,11 +997,11 @@ DAEMONS=(
     "com.github.reportmate.hourly.plist"
     "com.github.reportmate.fourhourly.plist"
     "com.github.reportmate.daily.plist"
-    "com.github.reportmate.12hourly.plist"
+    "com.github.reportmate.allmodules.plist"
 )
 
-# Remove legacy daemons (including boot daemon which was removed in 2026.02)
-for legacy in "com.github.reportmate.plist" "com.github.reportmate.boot.plist"; do
+# Remove legacy daemons (boot removed 2026.02, 12hourly renamed to allmodules 2026.02)
+for legacy in "com.github.reportmate.plist" "com.github.reportmate.boot.plist" "com.github.reportmate.12hourly.plist"; do
     if [ -e "${LD_ROOT}/${legacy}" ]; then
         log_message "Removing legacy daemon: ${legacy}"
         /bin/launchctl bootout system "${LD_ROOT}/${legacy}" 2>/dev/null
