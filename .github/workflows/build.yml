@@ -289,8 +289,8 @@ jobs:
 
           echo "APPL????" > "$APP_CONTENTS/PkgInfo"
 
-          # Create LaunchDaemons (hourly, fourhourly, daily, 12hourly)
-          for schedule in hourly fourhourly daily 12hourly; do
+          # Create LaunchDaemons (hourly, fourhourly, daily, allmodules)
+          for schedule in hourly fourhourly daily allmodules; do
             case $schedule in
               hourly)
                 INTERVAL="<key>StartInterval</key><integer>3600</integer>"
@@ -310,7 +310,7 @@ jobs:
                 LAUNCH_ONCE=""
                 MODULES="<string>--run-modules</string><string>hardware,peripherals</string>"
                 ;;
-              12hourly)
+              allmodules)
                 INTERVAL="<key>StartInterval</key><integer>43200</integer>"
                 RUN_AT_LOAD="<false/>"
                 LAUNCH_ONCE=""
