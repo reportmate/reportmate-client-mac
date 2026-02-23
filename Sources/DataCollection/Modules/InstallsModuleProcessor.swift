@@ -433,9 +433,11 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             info["warningsArray"] = warnings
         }
         
-        // Problem installs
-        if let problems = report["ProblemInstalls"] as? [String], !problems.isEmpty {
-            info["problemInstalls"] = problems.joined(separator: "; ")
+        // Problem installs — ProblemInstalls is [[String: Any]] (array of dicts), not [String]
+        if let problems = report["ProblemInstalls"] as? [[String: Any]], !problems.isEmpty {
+            let names = problems.compactMap { $0["display_name"] as? String ?? $0["name"] as? String }
+            info["problemInstalls"] = names.joined(separator: "; ")
+            info["problemInstallsArray"] = names
         }
         
         // ItemsInstalled - items newly installed during this run (name + version for event messages)
