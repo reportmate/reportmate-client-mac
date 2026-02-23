@@ -149,3 +149,6 @@ dev/
 *.trace
 # Build configuration with sensitive info
 .env
+
+# Per-module version file generated at build time
+Sources/Generated/

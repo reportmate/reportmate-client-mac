@@ -169,12 +169,23 @@ public class DataCollectionService {
             "metadata": metadata,
             "events": [] as [[String: Any]],
             // Also include modules dict for backwards compatibility
-            "modules": moduleResults.mapValues { convertModuleDataToDict($0) }
+            "modules": {
+                var modulesDict: [String: Any] = [:]
+                for (key, data) in moduleResults {
+                    var dict = convertModuleDataToDict(data)
+                    dict["moduleVersion"] = ModuleVersions.version(for: key)
+                    modulesDict[key] = dict
+                }
+                return modulesDict
+            }()
         ]
         
         // Assign module data to top-level fields (mirrors Windows AssignModuleDataToPayload)
         for (moduleId, moduleData) in moduleResults {
-            let moduleDict = convertModuleDataToDict(moduleData)
+            var moduleDict = convertModuleDataToDict(moduleData)
+            
+            // Stamp per-module version from build-time git history
+            moduleDict["moduleVersion"] = ModuleVersions.version(for: moduleId)
             
             // Map module IDs to top-level payload keys (matching Windows structure)
             switch moduleId.lowercased() {
