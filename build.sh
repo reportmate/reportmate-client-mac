@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/opt/homebrew/bin/bash
 
 # ReportMate Unified Build Script
 # One-stop build script that replicates the CI pipeline locally.
@@ -354,7 +354,84 @@ EOF
 }
 
 # Set trap to restore placeholder on exit
-trap restore_version_placeholder EXIT
+trap restore_placeholders EXIT
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GENERATE PER-MODULE VERSIONS FROM GIT HISTORY
+# ═══════════════════════════════════════════════════════════════════════════
+
+log_step "Generating per-module versions from git history..."
+
+FALLBACK_VERSION="$(date +%Y.%m.%d.%H%M)"
+GENERATED_DIR="${SCRIPT_DIR}/Sources/Generated"
+mkdir -p "$GENERATED_DIR"
+
+# Module file map: moduleId -> space-separated list of tracked source files
+declare -A MODULE_FILES
+MODULE_FILES[applications]="Sources/DataCollection/Modules/ApplicationsModuleProcessor.swift Sources/Models/Modules/AnalyticsModels.swift"
+MODULE_FILES[hardware]="Sources/DataCollection/Modules/HardwareModuleProcessor.swift Sources/Models/Modules/HardwareModels.swift"
+MODULE_FILES[identity]="Sources/DataCollection/Modules/IdentityModuleProcessor.swift Sources/Models/Modules/IdentityModels.swift"
+MODULE_FILES[installs]="Sources/DataCollection/Modules/InstallsModuleProcessor.swift Sources/Models/Modules/InstallsModels.swift"
+MODULE_FILES[inventory]="Sources/DataCollection/Modules/InventoryModuleProcessor.swift Sources/Models/Modules/InventoryModels.swift"
+MODULE_FILES[management]="Sources/DataCollection/Modules/ManagementModuleProcessor.swift Sources/Models/Modules/ManagementModels.swift"
+MODULE_FILES[network]="Sources/DataCollection/Modules/NetworkModuleProcessor.swift Sources/Models/Modules/NetworkModels.swift"
+MODULE_FILES[peripherals]="Sources/DataCollection/Modules/PeripheralsModuleProcessor.swift Sources/Models/Modules/PeripheralsModels.swift"
+MODULE_FILES[security]="Sources/DataCollection/Modules/SecurityModuleProcessor.swift Sources/Models/Modules/SecurityModels.swift"
+MODULE_FILES[system]="Sources/DataCollection/Modules/SystemModuleProcessor.swift Sources/Models/Modules/SystemModels.swift"
+
+VERSION_CASES=""
+for module_id in $(echo "${!MODULE_FILES[@]}" | tr ' ' '\n' | sort); do
+    files="${MODULE_FILES[$module_id]}"
+    module_version="$FALLBACK_VERSION"
+    
+    git_date=$(git log --format=%cd --date=format:%Y.%m.%d.%H%M -1 -- $files 2>/dev/null)
+    if [ -n "$git_date" ]; then
+        module_version="$git_date"
+    fi
+    
+    VERSION_CASES="${VERSION_CASES}        case \"${module_id}\": return \"${module_version}\"\n"
+    [ "$VERBOSE" = true ] && log_info "  ${module_id} = ${module_version}"
+done
+
+cat > "${GENERATED_DIR}/ModuleVersions.swift" << EOF
+import Foundation
+
+/// Per-module versions derived from git commit history
+/// Format: YYYY.MM.DD.HHMM — reflects last change to each module's source files
+/// This file is auto-generated at build time — do not edit manually
+public enum ModuleVersions {
+    public static func version(for moduleId: String) -> String {
+        switch moduleId.lowercased() {
+$(echo -e "$VERSION_CASES")        default: return "0.0.0.0000"
+        }
+    }
+}
+EOF
+
+log_success "Generated ModuleVersions.swift with ${#MODULE_FILES[@]} module versions"
+
+# Function to restore ModuleVersions.swift placeholder
+restore_module_versions_placeholder() {
+    cat > "${GENERATED_DIR}/ModuleVersions.swift" << 'MVEOF'
+import Foundation
+
+/// Per-module versions derived from git commit history
+/// Format: YYYY.MM.DD.HHMM — reflects last change to each module's source files
+/// This file is auto-generated at build time — do not edit manually
+public enum ModuleVersions {
+    public static func version(for moduleId: String) -> String {
+        return "0.0.0.0000"
+    }
+}
+MVEOF
+    log_info "Restored ModuleVersions.swift placeholder"
+}
+
+# Combined cleanup function for both generated files
+restore_placeholders() {
+    restore_version_placeholder
+    restore_module_versions_placeholder
+}
 
 # ═══════════════════════════════════════════════════════════════════════════
 # BUILD
