@@ -225,8 +225,8 @@ public class ReportMateCore {
         do {
             try configurationManager.setSystemConfiguration(
                 apiUrl: apiUrl,
-                passphrase: apiKey,
-                deviceId: deviceId
+                deviceId: deviceId,
+                apiKey: apiKey
             )
             
             logger.info("Configuration saved successfully")

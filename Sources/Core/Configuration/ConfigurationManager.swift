@@ -185,12 +185,20 @@ public class ConfigurationManager {
 }
 
 /// ReportMate configuration structure
+/// Storage analysis depth for hardware module
+public enum StorageMode: String {
+    case quick  // Drive totals only (fast)
+    case deep   // Full directory analysis (slow)
+    case auto   // Deep first run, use cache on subsequent runs
+}
+
 public struct ReportMateConfiguration {
     public var apiUrl: String?
     public var deviceId: String?
     /// Client passphrase for API authentication (X-Client-Passphrase header)
     /// Configured via REPORTMATE_PASSPHRASE environment variable or Passphrase plist key
     public var passphrase: String?
+    public var storageMode: StorageMode = .auto
     public var collectionInterval: Int = 3600 // 1 hour default
     public var logLevel: String = "info"
     public var enabledModules: [String] = [
@@ -229,5 +237,9 @@ public struct ReportMateConfiguration {
         if let useAltSystemInfo = other["UseAltSystemInfo"] as? Bool { self.useAltSystemInfo = useAltSystemInfo }
         if let validateSSL = other["ValidateSSL"] as? Bool { self.validateSSL = validateSSL }
         if let timeout = other["Timeout"] as? Int { self.timeout = timeout }
+        if let storageModeStr = other["StorageMode"] as? String,
+           let mode = StorageMode(rawValue: storageModeStr.lowercased()) {
+            self.storageMode = mode
+        }
     }
 }
