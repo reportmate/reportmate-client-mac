@@ -628,15 +628,15 @@ struct ReportMateClient: AsyncParsableCommand {
             }
         }
         
-        // Error part: "{item} has an error!" or "{item}, {item} have errors!"
+        // Error part: "{item} has an error" or "{item}, {item} have errors"
         if hasErrors {
             let failedNames = failedItems.map { $0["displayName"] as? String ?? $0["name"] as? String ?? "Unknown" }
             if failedNames.count == 1 {
-                messageParts.append("\(failedNames[0]) has an error!")
+                messageParts.append("\(failedNames[0]) has an error")
             } else if !failedNames.isEmpty {
-                messageParts.append("\(failedNames.joined(separator: ", ")) have errors!")
+                messageParts.append("\(failedNames.joined(separator: ", ")) have errors")
             } else {
-                messageParts.append("managed installs has an error!")
+                messageParts.append("managed installs has an error")
             }
         }
         
