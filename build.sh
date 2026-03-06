@@ -489,8 +489,17 @@ else
     EXECUTABLE_PATH="${BUILD_PATH}/${PRODUCT_NAME}"
 fi
 
-# Copy binary to dist
+# Copy binaries to dist
 cp "$EXECUTABLE_PATH" "${DIST_DIR}/${PRODUCT_NAME}"
+
+# Copy app usage watcher binary if it was built
+APPUSAGE_PATH="${BUILD_PATH}/reportmate-appusage"
+if [ -f "$APPUSAGE_PATH" ]; then
+    cp "$APPUSAGE_PATH" "${DIST_DIR}/reportmate-appusage"
+    log_success "App usage watcher binary copied to dist"
+else
+    log_warn "reportmate-appusage not found at: $APPUSAGE_PATH (usage watcher will not be packaged)"
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CODE SIGNING
@@ -535,6 +544,13 @@ if [ "$SIGN" = true ]; then
     fi
     
     codesign "${CODESIGN_ARGS[@]}" "${DIST_DIR}/${PRODUCT_NAME}"
+    
+    # Sign app usage watcher if present
+    if [ -f "${DIST_DIR}/reportmate-appusage" ]; then
+        codesign "${CODESIGN_ARGS[@]}" "${DIST_DIR}/reportmate-appusage"
+        codesign --verify --verbose=2 "${DIST_DIR}/reportmate-appusage"
+        log_success "App usage watcher signed"
+    fi
     
     # Verify signature
     codesign --verify --verbose=2 "${DIST_DIR}/${PRODUCT_NAME}"
@@ -583,6 +599,19 @@ if [ "$SKIP_PKG" = false ]; then
 /usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner "${@}"
 WRAPPER
     chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner"
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # APP USAGE WATCHER BINARY
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    if [ -f "${DIST_DIR}/reportmate-appusage" ]; then
+        log_info "Bundling app usage watcher..."
+        cp "${DIST_DIR}/reportmate-appusage" "$PACKAGE_ROOT/usr/local/reportmate/reportmate-appusage"
+        chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/reportmate-appusage"
+        log_success "App usage watcher bundled: reportmate-appusage"
+    else
+        log_warn "reportmate-appusage not in dist, watcher will not be included in package"
+    fi
 
     # ═══════════════════════════════════════════════════════════════════════════
     # OSQUERY MACADMINS EXTENSION
@@ -824,6 +853,44 @@ EOF
 </plist>
 EOF
 
+    # App usage watcher daemon - persistent background process for tracking app launches
+    if [ -f "${DIST_DIR}/reportmate-appusage" ]; then
+        cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.appusage.plist" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.github.reportmate.appusage</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/reportmate/reportmate-appusage</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-appusage.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Managed Reports/logs/reportmate-appusage.error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>AssociatedBundleIdentifiers</key>
+    <string>com.github.reportmate</string>
+</dict>
+</plist>
+EOF
+        log_success "App usage watcher LaunchDaemon plist created"
+    fi
+
     # ═══════════════════════════════════════════════════════════════════════════
     # MODULE SCHEDULES CONFIGURATION
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1063,8 +1130,9 @@ else
     log_message "osquery already installed at $OSQUERY_PATH"
 fi
 
-# Make extension executable
+# Make extension and watcher executable
 chmod 755 /usr/local/reportmate/macadmins_extension.ext 2>/dev/null
+chmod 755 /usr/local/reportmate/reportmate-appusage 2>/dev/null
 
 # Register app bundle
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister "${APP_PATH}"
@@ -1075,6 +1143,7 @@ DAEMONS=(
     "com.github.reportmate.fourhourly.plist"
     "com.github.reportmate.daily.plist"
     "com.github.reportmate.allmodules.plist"
+    "com.github.reportmate.appusage.plist"
 )
 
 # Remove legacy daemons (boot removed 2026.02, 12hourly renamed to allmodules 2026.02)
@@ -1233,7 +1302,7 @@ log_message "Starting ReportMate preinstall..."
 }
 
 # Current daemons
-for daemon in com.github.reportmate.boot com.github.reportmate.hourly com.github.reportmate.fourhourly com.github.reportmate.daily; do
+for daemon in com.github.reportmate.boot com.github.reportmate.hourly com.github.reportmate.fourhourly com.github.reportmate.daily com.github.reportmate.allmodules com.github.reportmate.appusage; do
     daemon_path="${LD_ROOT}/${daemon}.plist"
     [ -e "${daemon_path}" ] && {
         /bin/launchctl bootout system "${daemon_path}" 2>/dev/null
@@ -1242,6 +1311,7 @@ for daemon in com.github.reportmate.boot com.github.reportmate.hourly com.github
 done
 
 pkill -f "managedreportsrunner" 2>/dev/null || true
+pkill -f "reportmate-appusage" 2>/dev/null || true
 log_message "ReportMate preinstall complete."
 exit 0
 PREINSTALL_SCRIPT
