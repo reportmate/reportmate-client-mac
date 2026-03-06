@@ -226,6 +226,8 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     /// Each raw message from Munki's Warnings[] / Errors[] plist arrays is matched to an item
     /// by extracting the exact item name from the message using known Munki patterns.
     /// Messages that don't match any item are left as system-level (in munki.warnings/errors).
+    /// NOTE: Status is NOT overridden — factual status (installed, install_failed, etc.) is preserved.
+    /// Error/warning text goes into lastError/lastWarning fields for display purposes.
     static func attachMessagesToItems(
         items: [MunkiItem],
         warningMessages: [String],
@@ -249,7 +251,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             return nameToIndex[extractedName.lowercased()]
         }
         
-        // Process errors (higher severity)
+        // Process errors — populate lastError field, mark install_failed if not already failed/removed
         for rawMessage in errorMessages {
             let message = rawMessage.hasPrefix("ERROR: ") ? String(rawMessage.dropFirst(7)) : rawMessage
             guard !message.isEmpty else { continue }
@@ -257,20 +259,24 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 if result[idx].lastError.isEmpty {
                     result[idx].lastError = message
                 }
-                result[idx].status = "Error"
+                // Only escalate status to install_failed if item isn't already in a terminal state
+                let terminalStatuses: Set<String> = ["install_failed", "removed", "uninstalled"]
+                if !terminalStatuses.contains(result[idx].status) {
+                    result[idx].status = "install_failed"
+                    if result[idx].pendingReason.isEmpty {
+                        result[idx].pendingReason = message
+                    }
+                }
             }
         }
         
-        // Process warnings (lower severity — won't override Error)
+        // Process warnings — populate lastWarning field, don't change status
         for rawMessage in warningMessages {
             let message = rawMessage.hasPrefix("WARNING: ") ? String(rawMessage.dropFirst(9)) : rawMessage
             guard !message.isEmpty else { continue }
             if let idx = findItem(for: message) {
                 if result[idx].lastWarning.isEmpty {
                     result[idx].lastWarning = message
-                }
-                if result[idx].status != "Error" {
-                    result[idx].status = "Warning"
                 }
                 if result[idx].pendingReason.isEmpty {
                     result[idx].pendingReason = message
@@ -605,16 +611,19 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     // MARK: - Munki Managed Installs (native Swift plist reading — no osquery extension delay)
     
-    /// Reads the ManagedInstalls array from ManagedInstallReport.plist using
-    /// native PropertyListSerialization — zero shell spawning, instant.
+    /// Reads all Munki-managed items from ManagedInstallReport.plist and cross-references
+    /// InstallResults, RemovalResults, ProblemInstalls, ItemsToInstall, ItemsToRemove
+    /// to derive rich status values matching MunkiReport's 7-status model:
+    ///   installed, install_succeeded, install_failed, pending_install, pending_removal, removed, uninstalled
     private func collectMunkiManagedInstalls() async throws -> [MunkiItem] {
         let reportPath = "/Library/Managed Installs/ManagedInstallReport.plist"
         
         guard let reportData = try? Data(contentsOf: URL(fileURLWithPath: reportPath)),
-              let report = try? PropertyListSerialization.propertyList(from: reportData, options: [], format: nil) as? [String: Any],
-              let managedInstalls = report["ManagedInstalls"] as? [[String: Any]] else {
+              let report = try? PropertyListSerialization.propertyList(from: reportData, options: [], format: nil) as? [String: Any] else {
             return []
         }
+        
+        let managedInstalls = report["ManagedInstalls"] as? [[String: Any]] ?? []
         
         // Get the end time from the report (same for all items in this run)
         let isoFormatter = ISO8601DateFormatter()
@@ -624,32 +633,164 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             endTimeStr = isoFormatter.string(from: endTime)
         }
         
-        var items: [MunkiItem] = []
+        // Read all cross-reference arrays from the plist (matching MunkiReport's logic)
+        let installResults = report["InstallResults"] as? [[String: Any]] ?? []
+        let removalResults = report["RemovalResults"] as? [[String: Any]] ?? []
+        let problemInstalls = report["ProblemInstalls"] as? [[String: Any]] ?? []
+        let itemsToInstall = report["ItemsToInstall"] as? [[String: Any]] ?? []
+        let itemsToRemove = report["ItemsToRemove"] as? [[String: Any]] ?? []
         
+        // Build lookup: InstallResults name → (status, time, version)
+        var installResultsMap: [String: (status: Int, time: String, version: String)] = [:]
+        for result in installResults {
+            guard let name = result["name"] as? String else { continue }
+            let status = result["status"] as? Int ?? -1
+            var timeStr = ""
+            if let time = result["time"] as? Date {
+                timeStr = isoFormatter.string(from: time)
+            }
+            let version = result["version"] as? String ?? ""
+            installResultsMap[name] = (status: status, time: timeStr, version: version)
+        }
+        
+        // Build lookup: RemovalResults name → (status, time)
+        var removalResultsMap: [String: (status: Int, time: String)] = [:]
+        for result in removalResults {
+            guard let name = result["name"] as? String else { continue }
+            let status = result["status"] as? Int ?? -1
+            var timeStr = ""
+            if let time = result["time"] as? Date {
+                timeStr = isoFormatter.string(from: time)
+            }
+            removalResultsMap[name] = (status: status, time: timeStr)
+        }
+        
+        // Build lookup: ProblemInstalls name → note (error detail)
+        var problemInstallsMap: [String: String] = [:]
+        for item in problemInstalls {
+            guard let name = item["name"] as? String else { continue }
+            problemInstallsMap[name] = item["note"] as? String ?? ""
+        }
+        
+        // Build sets for pending items
+        let itemsToInstallNames = Set(itemsToInstall.compactMap { $0["name"] as? String })
+        let itemsToRemoveNames = Set(itemsToRemove.compactMap { $0["name"] as? String })
+        
+        // Version info from ItemsToInstall (richer for pending items)
+        var itemsToInstallVersions: [String: String] = [:]
+        for item in itemsToInstall {
+            guard let name = item["name"] as? String else { continue }
+            if let version = item["version_to_install"] as? String, !version.isEmpty {
+                itemsToInstallVersions[name] = version
+            }
+        }
+        
+        var items: [MunkiItem] = []
+        var processedNames = Set<String>()
+        
+        // Process ManagedInstalls (items from managed_installs manifest key)
         for itemData in managedInstalls {
-            var item = MunkiItem()
-            
             let name = itemData["name"] as? String ?? ""
+            guard !name.isEmpty else { continue }
+            processedNames.insert(name)
+            
+            var item = MunkiItem()
+            item.name = name
+            item.displayName = itemData["display_name"] as? String ?? name
+            item.id = name.lowercased().replacingOccurrences(of: " ", with: "-")
+            item.version = itemData["version_to_install"] as? String ?? ""
+            item.installedVersion = itemData["installed_version"] as? String ?? ""
+            item.endTime = endTimeStr
+            item.type = "munki"
+            
+            if let sizeInt = itemData["installed_size"] as? Int {
+                item.installedSize = sizeInt
+            }
+            
+            let installed = itemData["installed"] as? Bool ?? false
+            
+            // Rich status determination matching MunkiReport's priority:
+            // InstallResults > RemovalResults > ProblemInstalls > ItemsToRemove > installed bool > ItemsToInstall
+            if let result = installResultsMap[name] {
+                if result.status == 0 {
+                    item.status = "install_succeeded"
+                    if !result.time.isEmpty { item.endTime = result.time }
+                    if !result.version.isEmpty && item.installedVersion.isEmpty {
+                        item.installedVersion = result.version
+                    }
+                } else {
+                    item.status = "install_failed"
+                    if !result.time.isEmpty { item.endTime = result.time }
+                }
+            } else if let result = removalResultsMap[name] {
+                item.status = result.status == 0 ? "removed" : "install_failed"
+                if !result.time.isEmpty { item.endTime = result.time }
+            } else if let note = problemInstallsMap[name] {
+                item.status = "install_failed"
+                if !note.isEmpty { item.lastError = note }
+            } else if itemsToRemoveNames.contains(name) {
+                item.status = "pending_removal"
+            } else if installed {
+                item.status = "installed"
+            } else if itemsToInstallNames.contains(name) {
+                item.status = "pending_install"
+                if item.version.isEmpty, let v = itemsToInstallVersions[name] {
+                    item.version = v
+                }
+            } else {
+                item.status = "pending_install"
+            }
+            
+            // Derive pending reason for non-installed items
+            if item.status != "installed" && item.status != "install_succeeded" {
+                item.pendingReason = derivePendingReason(item: item)
+            }
+            
+            items.append(item)
+        }
+        
+        // Add items from RemovalResults that aren't in ManagedInstalls (removed/uninstalled items)
+        for result in removalResults {
+            guard let name = result["name"] as? String, !name.isEmpty,
+                  !processedNames.contains(name) else { continue }
+            processedNames.insert(name)
+            
+            var item = MunkiItem()
+            item.name = name
+            item.displayName = result["display_name"] as? String ?? name
+            item.id = name.lowercased().replacingOccurrences(of: " ", with: "-")
+            item.version = ""
+            item.installedVersion = ""
+            item.type = "munki"
+            
+            let status = result["status"] as? Int ?? -1
+            item.status = status == 0 ? "removed" : "install_failed"
+            
+            if let time = result["time"] as? Date {
+                item.endTime = isoFormatter.string(from: time)
+            }
+            
+            items.append(item)
+        }
+        
+        // Add items from ItemsToRemove that aren't already processed (pending_removal)
+        for itemData in itemsToRemove {
+            guard let name = itemData["name"] as? String, !name.isEmpty,
+                  !processedNames.contains(name) else { continue }
+            processedNames.insert(name)
+            
+            var item = MunkiItem()
             item.name = name
             item.displayName = itemData["display_name"] as? String ?? name
             item.id = name.lowercased().replacingOccurrences(of: " ", with: "-")
             item.version = ""
             item.installedVersion = itemData["installed_version"] as? String ?? ""
-            item.endTime = endTimeStr
             item.type = "munki"
+            item.status = "pending_removal"
+            item.pendingReason = "Scheduled for removal"
             
-            // Handle installed_size
             if let sizeInt = itemData["installed_size"] as? Int {
                 item.installedSize = sizeInt
-            }
-            
-            // Map 'installed' to status
-            let installed = itemData["installed"] as? Bool ?? false
-            if installed {
-                item.status = "Installed"
-            } else {
-                item.status = "Pending"
-                item.pendingReason = derivePendingReason(item: item)
             }
             
             items.append(item)
@@ -692,29 +833,44 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     // MARK: - Derive Pending Reason
     
-    /// Derives a human-readable pending reason for a MunkiItem based on its state
-    /// Mirrors the Windows CimianItem.DerivePendingReason() logic
+    /// Derives a human-readable pending reason for a MunkiItem based on its status
+    /// Works with MunkiReport-matching statuses: install_failed, pending_install, pending_removal, removed, uninstalled
     private func derivePendingReason(item: MunkiItem) -> String {
-        let version = item.version.isEmpty ? "Unknown" : item.version
-        let installedVersion = item.installedVersion.isEmpty ? "Unknown" : item.installedVersion
+        let version = item.version
+        let installedVersion = item.installedVersion
         
-        // Not yet installed (no installed version)
-        if installedVersion == "Unknown" || installedVersion.isEmpty {
-            return "Not yet installed"
+        switch item.status {
+        case "install_failed":
+            if !item.lastError.isEmpty { return item.lastError }
+            return "Installation failed"
+            
+        case "pending_removal":
+            return "Scheduled for removal"
+            
+        case "removed":
+            return "Removed"
+            
+        case "uninstalled":
+            return "Uninstalled"
+            
+        case "pending_install":
+            if installedVersion.isEmpty {
+                return "Not yet installed"
+            }
+            if !version.isEmpty && version != installedVersion {
+                return "Update available: \(installedVersion) → \(version)"
+            }
+            return "Installation pending"
+            
+        default:
+            if installedVersion.isEmpty {
+                return "Not yet installed"
+            }
+            if !version.isEmpty && version != installedVersion {
+                return "Update available: \(installedVersion) → \(version)"
+            }
+            return "Installation pending"
         }
-        
-        // Version mismatch = update available
-        if version != installedVersion && version != "Unknown" {
-            return "Update available: \(installedVersion) → \(version)"
-        }
-        
-        // Versions match but still pending (possible re-install or metadata sync)
-        if version == installedVersion {
-            return "Reinstallation pending"
-        }
-        
-        // Generic pending
-        return "Installation pending"
     }
     
     // MARK: - Catalog Metadata Collection
