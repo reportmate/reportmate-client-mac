@@ -446,12 +446,12 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             info["problemInstallsArray"] = names
         }
         
-        // ItemsInstalled - items newly installed during this run (name + version for event messages)
-        if let itemsInstalled = report["ItemsInstalled"] as? [[String: Any]] {
-            info["newlyInstalledCount"] = itemsInstalled.count
-            let installedDetails = itemsInstalled.map { item -> [String: String] in
+        // InstallResults - items installed during the most recent Munki run (name + version for event messages)
+        if let installResults = report["InstallResults"] as? [[String: Any]], !installResults.isEmpty {
+            info["newlyInstalledCount"] = installResults.count
+            let installedDetails = installResults.map { item -> [String: String] in
                 let name = item["display_name"] as? String ?? item["name"] as? String ?? "Unknown"
-                let version = item["version_to_install"] as? String ?? item["installed_version"] as? String ?? ""
+                let version = item["version"] as? String ?? item["installed_version"] as? String ?? ""
                 return ["name": name, "version": version]
             }
             info["newlyInstalledItems"] = installedDetails
