@@ -72,11 +72,11 @@ public struct MunkiInfo: Codable, Sendable {
     
     // Computed properties for dashboard compatibility
     public var pendingPackages: [String] {
-        items.filter { $0.status == "Pending" }.map { $0.name }
+        items.filter { $0.status == "pending_install" || $0.status == "pending_removal" || $0.status == "Pending" }.map { $0.name }
     }
     
     public var installedItems: [MunkiItem] {
-        items.filter { $0.status == "Installed" }
+        items.filter { $0.status == "installed" || $0.status == "install_succeeded" || $0.status == "Installed" }
     }
     
     // Reports metadata
@@ -92,9 +92,9 @@ public struct MunkiItem: Codable, Sendable {
     public var id: String = ""
     public var name: String = ""
     public var displayName: String = ""
-    public var version: String = ""            // Version Munki wants to install
+    public var version: String = ""            // Version Munki wants to install (version_to_install from plist)
     public var installedVersion: String = ""    // Currently installed version
-    public var status: String = "Unknown"       // Installed, Pending, Removed (mapped from 'installed' column)
+    public var status: String = "Unknown"       // MunkiReport-matching: installed, install_succeeded, install_failed, pending_install, pending_removal, removed, uninstalled
     public var installedSize: Int = 0
     public var endTime: String = ""            // Last Munki run end time for this item
     
