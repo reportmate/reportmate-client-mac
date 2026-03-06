@@ -1,11 +1,7 @@
 import Foundation
 
 /// Configuration manager for ReportMate macOS client
-/// Handles configuration hierarchy: CLI args > Environment > plist file > Defaults
-/// Configuration can be set via:
-/// - Configuration Profiles (MDM) → /Library/Managed Preferences/com.github.reportmate.plist
-/// - System plist (written as root) → /Library/Preferences/com.github.reportmate.plist
-/// - Environment variables (REPORTMATE_*)
+/// Handles configuration hierarchy: CLI args > Environment > Config Profiles > System plist > User plist > Defaults
 public class ConfigurationManager {
     public private(set) var configuration: ReportMateConfiguration
     private var overrides: [String: Any] = [:]
@@ -25,36 +21,46 @@ public class ConfigurationManager {
         }
     }
     
-    /// Save system-wide configuration to /Library/Preferences/com.github.reportmate.plist
-    /// Writes directly via NSDictionary to avoid the UserDefaults(suiteName: bundleId) restriction.
+    /// Save system-wide configuration
     public func setSystemConfiguration(
         apiUrl: String,
-        passphrase: String? = nil,
-        deviceId: String? = nil
+        deviceId: String? = nil,
+        apiKey: String? = nil
     ) throws {
-        let plistPath = "/Library/Preferences/com.github.reportmate.plist"
-
-        // Load existing values so we don't clobber unrelated keys
-        var dict: [String: Any] = (NSDictionary(contentsOfFile: plistPath) as? [String: Any]) ?? [:]
-
-        dict["ApiUrl"] = apiUrl
-        dict["CollectionInterval"] = 3600
-        dict["LogLevel"] = "info"
-        dict["EnabledModules"] = [
-            "hardware", "system", "network", "security",
-            "applications", "management", "inventory"
+        
+        let systemConfigPath = "/Library/Managed Reports/reportmate.plist"
+        
+        // Ensure directory exists
+        let systemConfigDir = URL(fileURLWithPath: systemConfigPath).deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: systemConfigDir, withIntermediateDirectories: true)
+        
+        // Create configuration dictionary
+        var configDict: [String: Any] = [
+            "ApiUrl": apiUrl,
+            "CollectionInterval": 3600,
+            "LogLevel": "info",
+            "EnabledModules": [
+                "hardware", "system", "network", "security", 
+                "applications", "management", "inventory"
+            ]
         ]
-        if let passphrase = passphrase { dict["Passphrase"] = passphrase }
-        if let deviceId = deviceId { dict["DeviceId"] = deviceId }
-
-        let nsd = NSDictionary(dictionary: dict)
-        guard nsd.write(toFile: plistPath, atomically: true) else {
-            throw ConfigurationError.failedToAccessPreferences
+        
+        if let deviceId = deviceId {
+            configDict["DeviceId"] = deviceId
         }
-    }
-    
-    public enum ConfigurationError: Error {
-        case failedToAccessPreferences
+        
+        if let apiKey = apiKey {
+            configDict["ApiKey"] = apiKey
+        }
+        
+        // Write plist file
+        let plistData = try PropertyListSerialization.data(
+            fromPropertyList: configDict,
+            format: .xml,
+            options: 0
+        )
+        
+        try plistData.write(to: URL(fileURLWithPath: systemConfigPath))
     }
     
     // MARK: - Private Configuration Loading
@@ -64,38 +70,68 @@ public class ConfigurationManager {
         
         // 1. Load defaults (already set in init)
         
-        // 2. Load Configuration Profiles / UserDefaults (includes /Library/Preferences/com.github.reportmate.plist)
+        // 2. Load user plist
+        if let userConfig = loadUserPlist() {
+            config.merge(with: userConfig)
+        }
+        
+        // 3. Load system plist  
+        if let systemConfig = loadSystemPlist() {
+            config.merge(with: systemConfig)
+        }
+        
+        // 4. Load Configuration Profiles
         if let profileConfig = loadConfigurationProfiles() {
             config.merge(with: profileConfig)
         }
         
-        // 3. Load environment variables
+        // 5. Load environment variables
         config.merge(with: loadEnvironmentVariables())
         
-        // 4. Apply runtime overrides
+        // 6. Apply runtime overrides
         config.merge(with: overrides)
         
         return config
     }
     
+    private static func loadUserPlist() -> [String: Any]? {
+        let userConfigPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Managed Reports/reportmate.plist")
+        
+        return loadPlist(at: userConfigPath)
+    }
+    
+    private static func loadSystemPlist() -> [String: Any]? {
+        let systemConfigPath = URL(fileURLWithPath: "/Library/Managed Reports/reportmate.plist")
+        return loadPlist(at: systemConfigPath)
+    }
+    
     private static func loadConfigurationProfiles() -> [String: Any]? {
-        // Read directly from the plist file rather than via UserDefaults(suiteName:).
-        // Using the app's own bundle identifier as a suite name is explicitly rejected by
-        // macOS ("will not work"), so UserDefaults-based reading is unreliable here.
-        // Reading the file directly works regardless of which user context the runner executes under.
-        let plistPaths = [
-            "/Library/Managed Preferences/com.github.reportmate.plist", // MDM-pushed (highest priority)
-            "/Library/Preferences/com.github.reportmate.plist",          // system-wide (written as root)
+        // Check for Configuration Profile managed preferences
+        let profileDefaults = UserDefaults(suiteName: "com.github.reportmate")
+        
+        guard let profileDefaults = profileDefaults else { return nil }
+        
+        var config: [String: Any] = [:]
+        
+        // Map Configuration Profile keys to internal configuration
+        // Passphrase is for device-to-api authentication
+        let keyMappings: [String: String] = [
+            "ApiUrl": "ApiUrl",
+            "DeviceId": "DeviceId", 
+            "Passphrase": "Passphrase",
+            "CollectionInterval": "CollectionInterval",
+            "LogLevel": "LogLevel",
+            "EnabledModules": "EnabledModules"
         ]
-
-        var merged: [String: Any] = [:]
-        for path in plistPaths {
-            if let dict = NSDictionary(contentsOfFile: path) as? [String: Any] {
-                merged.merge(dict) { _, new in new }
+        
+        for (profileKey, configKey) in keyMappings {
+            if let value = profileDefaults.object(forKey: profileKey) {
+                config[configKey] = value
             }
         }
-
-        return merged.isEmpty ? nil : merged
+        
+        return config.isEmpty ? nil : config
     }
     
     private static func loadEnvironmentVariables() -> [String: Any] {
@@ -129,13 +165,23 @@ public class ConfigurationManager {
         
         return config
     }
-}
-
-/// Storage analysis mode for hardware module
-public enum StorageAnalysisMode: String {
-    case quick = "quick"   // Drive totals only (capacity, free space)
-    case deep = "deep"     // Full directory analysis with per-folder sizes
-    case auto = "auto"     // Deep if cache expired (>24h), otherwise use cache
+    
+    private static func loadPlist(at url: URL) -> [String: Any]? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        
+        do {
+            let data = try Data(contentsOf: url)
+            let plist = try PropertyListSerialization.propertyList(
+                from: data,
+                options: [],
+                format: nil
+            )
+            return plist as? [String: Any]
+        } catch {
+            print("Warning: Failed to load plist at \(url.path): \(error)")
+            return nil
+        }
+    }
 }
 
 /// ReportMate configuration structure
@@ -169,12 +215,6 @@ public struct ReportMateConfiguration {
     public var validateSSL: Bool = true
     public var timeout: Int = 300 // 5 minutes
     
-    /// Storage analysis mode: quick, deep, or auto (default: auto)
-    /// - quick: Drive totals only (fast, ~1 second)
-    /// - deep: Full directory analysis with per-folder sizes (slow, ~minutes to hours depending on drive size)
-    /// - auto: Use cached deep analysis if available and <24h old, otherwise run deep analysis
-    public var storageMode: StorageAnalysisMode = .auto
-    
     /// Merge configuration with another dictionary
     mutating func merge(with other: [String: Any]) {
         if let apiUrl = other["ApiUrl"] as? String { self.apiUrl = apiUrl }
@@ -189,7 +229,5 @@ public struct ReportMateConfiguration {
         if let useAltSystemInfo = other["UseAltSystemInfo"] as? Bool { self.useAltSystemInfo = useAltSystemInfo }
         if let validateSSL = other["ValidateSSL"] as? Bool { self.validateSSL = validateSSL }
         if let timeout = other["Timeout"] as? Int { self.timeout = timeout }
-        if let storageMode = other["StorageMode"] as? String, 
-           let mode = StorageAnalysisMode(rawValue: storageMode) { self.storageMode = mode }
     }
 }
