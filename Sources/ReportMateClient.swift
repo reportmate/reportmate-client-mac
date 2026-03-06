@@ -414,8 +414,16 @@ struct ReportMateClient: AsyncParsableCommand {
         let moduleList = nonInstallsModules.map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: ", ")
         let eventMessage = moduleList.isEmpty ? "Data collection complete" : "\(moduleList) data reported"
         
-        // Build events array - start with Munki events if installs module is present
+        // Build events array - start with OS update detection
         var events: [ReportMateEvent] = []
+        
+        // Detect OS version changes (before caching new data)
+        if modulesToRun.contains("system"), let systemData = collectedData["system"] as? [String: Any] {
+            if let osUpdateEvent = detectOSVersionChange(systemData: systemData, logger: logger) {
+                events.append(osUpdateEvent)
+                logger.info("OS version change detected")
+            }
+        }
         
         // Generate Munki/Installs events with actual error/warning messages
         if modulesToRun.contains("installs"), let installsData = collectedData["installs"] as? [String: Any] {
@@ -543,10 +551,85 @@ struct ReportMateClient: AsyncParsableCommand {
         }
     }
     
-    // MARK: - Munki Event Generation
+    // MARK: - OS Version Change Detection
     
-    /// Generates ReportMate events from Munki data with actual error/warning messages
-    /// Mirrors the Windows InstallsModuleProcessor.GenerateEventsFromDataAsync pattern
+    /// Path to the persistent OS version state file (in base cache directory, not timestamped)
+    private static let previousOSVersionPath = "/Library/Managed Reports/cache/previous_os_version.json"
+    
+    /// Detects OS version changes by comparing current system data against stored previous version.
+    /// Returns a system event if the version changed, nil otherwise.
+    private func detectOSVersionChange(systemData: [String: Any], logger: Logger) -> ReportMateEvent? {
+        guard let osInfo = systemData["operatingSystem"] as? [String: Any] else {
+            return nil
+        }
+        
+        let currentVersion = osInfo["version"] as? String ?? ""
+        let currentBuild = osInfo["buildNumber"] as? String ?? ""
+        let currentName = osInfo["name"] as? String ?? "macOS"
+        
+        guard !currentVersion.isEmpty else { return nil }
+        
+        // Read previous version state
+        let fileURL = URL(fileURLWithPath: Self.previousOSVersionPath)
+        var previousVersion: String?
+        var previousBuild: String?
+        
+        if FileManager.default.fileExists(atPath: Self.previousOSVersionPath),
+           let data = try? Data(contentsOf: fileURL),
+           let stored = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            previousVersion = stored["version"] as? String
+            previousBuild = stored["build"] as? String
+        }
+        
+        // Always write current version for next comparison
+        let stateDict: [String: Any] = [
+            "name": currentName,
+            "version": currentVersion,
+            "build": currentBuild,
+            "platform": "macOS",
+            "recorded_at": ISO8601DateFormatter().string(from: Date())
+        ]
+        if let jsonData = try? JSONSerialization.data(withJSONObject: stateDict, options: [.prettyPrinted, .sortedKeys]) {
+            try? jsonData.write(to: fileURL)
+        }
+        
+        // No previous version stored (first run) — no event
+        guard let oldVersion = previousVersion, !oldVersion.isEmpty else {
+            logger.info("No previous OS version recorded, storing \(currentVersion)")
+            return nil
+        }
+        
+        // Version unchanged — no event
+        guard oldVersion != currentVersion else { return nil }
+        
+        // Version changed — generate event
+        let message = "\(currentName) updated \(oldVersion) \u{2192} \(currentVersion)"
+        logger.info(Logger.Message(stringLiteral: message))
+        
+        return ReportMateEvent(
+            moduleId: "os_update",
+            eventType: "system",
+            message: message,
+            timestamp: Date(),
+            stringDetails: [
+                "previous_version": oldVersion,
+                "new_version": currentVersion,
+                "previous_build": previousBuild ?? "",
+                "new_build": currentBuild
+            ]
+        )
+    }
+    
+    // MARK: - Munki Event Generation (diff-based, matches MunkiReport's _storeEvents approach)
+    
+    /// Path to the persistent managed installs state file for diff-based event detection.
+    /// Stores the previous collection's installed items map so we can detect changes.
+    private static let previousManagedInstallsPath = "/Library/Managed Reports/cache/previous_managed_installs.json"
+    
+    /// Generates ReportMate events from Munki data using diff-based detection.
+    /// Compares current installed items against previously stored state to detect
+    /// installs and removals — matches MunkiReport's managedinstalls_processor approach.
+    /// Separate events for installs, removals, errors, and warnings.
     private func generateMunkiEvents(from installsData: [String: Any]) -> [ReportMateEvent] {
         var events: [ReportMateEvent] = []
         
@@ -555,141 +638,137 @@ struct ReportMateClient: AsyncParsableCommand {
             return events
         }
         
-        // Parse errors and warnings from semicolon-separated strings
+        let items = munkiData["items"] as? [[String: Any]] ?? []
         let errorsString = munkiData["errors"] as? String ?? ""
         let warningsString = munkiData["warnings"] as? String ?? ""
-        let problemInstalls = munkiData["problemInstalls"] as? String ?? ""
         
-        // Get items and counts
-        let items = munkiData["items"] as? [[String: Any]] ?? []
-        let newlyInstalledCount = munkiData["newlyInstalledCount"] as? Int ?? 0
-        let newlyInstalledItems = munkiData["newlyInstalledItems"] as? [[String: String]] ?? []
-        let pendingCount = items.filter { ($0["status"] as? String) == "Pending" }.count
-        let failedItems = items.filter { !($0["lastError"] as? String ?? "").isEmpty }
-        let warningItems = items.filter { !($0["lastWarning"] as? String ?? "").isEmpty }
-        
-        // Derive message arrays from per-item data or legacy strings
-        let errorMessages: [String]
-        let warningMessages: [String]
-        let problemItems = parseMessagesFromString(problemInstalls)
-        if !failedItems.isEmpty || !warningItems.isEmpty {
-            errorMessages = failedItems.compactMap { $0["lastError"] as? String }.filter { !$0.isEmpty }
-            warningMessages = warningItems.compactMap { $0["lastWarning"] as? String }.filter { !$0.isEmpty }
-        } else {
-            errorMessages = parseMessagesFromString(errorsString)
-            warningMessages = parseMessagesFromString(warningsString)
+        // Build current installed items map: name -> {displayName, version}
+        // Items with status "installed" or "install_succeeded" are currently installed
+        let installedStatuses: Set<String> = ["installed", "install_succeeded"]
+        var currentInstalled: [String: [String: String]] = [:]
+        for item in items {
+            let name = item["name"] as? String ?? ""
+            let status = item["status"] as? String ?? ""
+            guard !name.isEmpty, installedStatuses.contains(status) else { continue }
+            let displayName = item["displayName"] as? String ?? name
+            // Version lives in installedVersion (from ManagedInstalls plist installed_version)
+            let version = item["installedVersion"] as? String ?? item["version"] as? String ?? ""
+            currentInstalled[name] = ["displayName": displayName, "version": version]
         }
         
-        let hasErrors = !errorMessages.isEmpty || !failedItems.isEmpty
-        let hasWarnings = !warningMessages.isEmpty || !warningItems.isEmpty
-        let hasInstalls = newlyInstalledCount > 0
-        
-        // Only generate an event if something happened
-        guard hasErrors || hasWarnings || hasInstalls else {
-            return events
+        // Load previous installed items state
+        let stateURL = URL(fileURLWithPath: Self.previousManagedInstallsPath)
+        var previousInstalled: [String: [String: String]] = [:]
+        var isFirstRun = true
+        if FileManager.default.fileExists(atPath: Self.previousManagedInstallsPath),
+           let data = try? Data(contentsOf: stateURL),
+           let stored = try? JSONSerialization.jsonObject(with: data) as? [String: [String: String]] {
+            previousInstalled = stored
+            isFirstRun = false
         }
         
-        // Determine event type by priority: error > warning > success
-        let eventType: String
-        if hasErrors {
-            eventType = "error"
-        } else if hasWarnings {
-            eventType = "warning"
-        } else {
-            eventType = "success"
+        // Save current state for next comparison
+        if let jsonData = try? JSONSerialization.data(withJSONObject: currentInstalled, options: [.sortedKeys]) {
+            try? jsonData.write(to: stateURL)
         }
         
-        // Build combined message with all parts
-        var messageParts: [String] = []
-        
-        // Success part: "{item} v{ver}, {item} v{ver} installed"
-        if hasInstalls {
-            if !newlyInstalledItems.isEmpty {
-                let itemStrings = newlyInstalledItems.map { item -> String in
-                    let name = item["name"] ?? "Unknown"
-                    let version = item["version"] ?? ""
-                    return version.isEmpty ? name : "\(name) v\(version)"
+        // First run: no previous state to compare against — store state only, no events.
+        // This avoids a flood of "{N} packages installed" on first deployment.
+        if !isFirstRun {
+            // Diff: items in current but not in previous, or version changed → newly installed
+            var newlyInstalled: [(displayName: String, version: String)] = []
+            for (name, info) in currentInstalled {
+                let displayName = info["displayName"] ?? name
+                let version = info["version"] ?? ""
+                if let prev = previousInstalled[name] {
+                    // Version changed → updated/reinstalled
+                    if prev["version"] != version, !version.isEmpty {
+                        newlyInstalled.append((displayName: displayName, version: version))
+                    }
+                } else {
+                    // Not in previous → newly installed
+                    newlyInstalled.append((displayName: displayName, version: version))
                 }
-                messageParts.append("\(itemStrings.joined(separator: ", ")) installed")
-            } else {
-                messageParts.append("\(newlyInstalledCount) package\(newlyInstalledCount == 1 ? "" : "s") installed")
+            }
+            
+            // Diff: items in previous but not in current → removed
+            var removedItems: [(displayName: String, version: String)] = []
+            for (name, info) in previousInstalled {
+                if currentInstalled[name] == nil {
+                    let displayName = info["displayName"] ?? name
+                    let version = info["version"] ?? ""
+                    removedItems.append((displayName: displayName, version: version))
+                }
+            }
+            
+            // Generate install event (MunkiReport format: "{name} {version} installed")
+            if !newlyInstalled.isEmpty {
+                let message: String
+                if newlyInstalled.count == 1 {
+                    let item = newlyInstalled[0]
+                    message = item.version.isEmpty
+                        ? "\(item.displayName) installed"
+                        : "\(item.displayName) \(item.version) installed"
+                } else {
+                    message = "\(newlyInstalled.count) packages installed"
+                }
+                events.append(ReportMateEvent(
+                    moduleId: "managedinstalls",
+                    eventType: "success",
+                    message: message,
+                    timestamp: Date(),
+                    stringDetails: newlyInstalled.count <= 5
+                        ? Dictionary(uniqueKeysWithValues: newlyInstalled.map { ($0.displayName, $0.version) })
+                        : ["count": String(newlyInstalled.count)]
+                ))
+            }
+            
+            // Generate removal event (MunkiReport format: "{name} {version} removed")
+            if !removedItems.isEmpty {
+                let message: String
+                if removedItems.count == 1 {
+                    let item = removedItems[0]
+                    message = item.version.isEmpty
+                        ? "\(item.displayName) removed"
+                        : "\(item.displayName) \(item.version) removed"
+                } else {
+                    message = "\(removedItems.count) packages removed"
+                }
+                events.append(ReportMateEvent(
+                    moduleId: "managedinstalls",
+                    eventType: "success",
+                    message: message,
+                    timestamp: Date(),
+                    stringDetails: removedItems.count <= 5
+                        ? Dictionary(uniqueKeysWithValues: removedItems.map { ($0.displayName, $0.version) })
+                        : ["count": String(removedItems.count)]
+                ))
             }
         }
         
-        // Warning part: "{item} has a warning" or "{item}, {item} have warnings"
-        if hasWarnings {
-            let warnNames = warningItems.map { $0["displayName"] as? String ?? $0["name"] as? String ?? "Unknown" }
-            if warnNames.count == 1 {
-                messageParts.append("\(warnNames[0]) has a warning")
-            } else if !warnNames.isEmpty {
-                messageParts.append("\(warnNames.joined(separator: ", ")) have warnings")
-            } else {
-                messageParts.append("managed installs has a warning")
-            }
-        }
-        
-        // Error part: "{item} has an error" or "{item}, {item} have errors"
-        if hasErrors {
-            let failedNames = failedItems.map { $0["displayName"] as? String ?? $0["name"] as? String ?? "Unknown" }
-            if failedNames.count == 1 {
-                messageParts.append("\(failedNames[0]) has an error")
-            } else if !failedNames.isEmpty {
-                messageParts.append("\(failedNames.joined(separator: ", ")) have errors")
-            } else {
-                messageParts.append("managed installs has an error")
-            }
-        }
-        
-        let message = messageParts.joined(separator: ", ")
-        
-        // Build details dictionary
-        var details: [String: EventDetailValue] = [
-            "module_id": .string("installs"),
-            "total_managed_items": .int(items.count),
-            "installed_count": .int(newlyInstalledCount),
-            "pending_count": .int(pendingCount),
-            "module_status": .string(eventType)
-        ]
-        
+        // Generate error event (MunkiReport format: "{count} Munki errors")
+        let errorMessages = parseMessagesFromString(errorsString)
         if !errorMessages.isEmpty {
-            details["error_count"] = .int(errorMessages.count)
-            details["error_messages"] = .stringArray(errorMessages)
-        }
-        if !warningMessages.isEmpty {
-            details["warning_count"] = .int(warningMessages.count)
-            details["warning_messages"] = .stringArray(warningMessages)
-        }
-        if !problemItems.isEmpty {
-            details["problem_installs"] = .stringArray(problemItems)
-        }
-        if !failedItems.isEmpty {
-            let failedItemDetails = failedItems.prefix(10).map { item -> [String: String] in
-                [
-                    "name": item["name"] as? String ?? "Unknown",
-                    "displayName": item["displayName"] as? String ?? item["name"] as? String ?? "Unknown",
-                    "error": item["lastError"] as? String ?? ""
-                ]
-            }
-            details["failed_items"] = .dictArray(failedItemDetails)
-        }
-        if !warningItems.isEmpty {
-            let warningItemDetails = warningItems.prefix(10).map { item -> [String: String] in
-                [
-                    "name": item["name"] as? String ?? "Unknown",
-                    "displayName": item["displayName"] as? String ?? item["name"] as? String ?? "Unknown",
-                    "warning": item["lastWarning"] as? String ?? ""
-                ]
-            }
-            details["warning_items"] = .dictArray(warningItemDetails)
+            events.append(ReportMateEvent(
+                moduleId: "munkireport",
+                eventType: "error",
+                message: "\(errorMessages.count) Munki error\(errorMessages.count == 1 ? "" : "s")",
+                timestamp: Date(),
+                stringDetails: ["errors": errorsString]
+            ))
         }
         
-        events.append(ReportMateEvent(
-            moduleId: "installs",
-            eventType: eventType,
-            message: message,
-            timestamp: Date(),
-            details: details
-        ))
+        // Generate warning event (MunkiReport format: "{count} Munki warnings")
+        let warningMessages = parseMessagesFromString(warningsString)
+        if !warningMessages.isEmpty {
+            events.append(ReportMateEvent(
+                moduleId: "munkireport",
+                eventType: "warning",
+                message: "\(warningMessages.count) Munki warning\(warningMessages.count == 1 ? "" : "s")",
+                timestamp: Date(),
+                stringDetails: ["warnings": warningsString]
+            ))
+        }
         
         return events
     }
