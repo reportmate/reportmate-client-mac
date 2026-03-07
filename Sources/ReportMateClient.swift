@@ -620,15 +620,10 @@ struct ReportMateClient: AsyncParsableCommand {
         )
     }
     
-    // MARK: - Munki Event Generation (diff-based, matches MunkiReport's _storeEvents approach)
-    
-    /// Path to the persistent managed installs state file for diff-based event detection.
-    /// Stores the previous collection's installed items map so we can detect changes.
-    private static let previousManagedInstallsPath = "/Library/Managed Reports/cache/previous_managed_installs.json"
-    
-    /// Generates ReportMate events from Munki data using diff-based detection.
-    /// Compares current installed items against previously stored state to detect
-    /// installs and removals — matches MunkiReport's managedinstalls_processor approach.
+    // MARK: - Munki Event Generation
+
+    /// Generates ReportMate events from Munki data using InstallResults/RemovalResults
+    /// from ManagedInstallReport.plist — matches MunkiReport's per-run event approach.
     /// Separate events for installs, removals, errors, and warnings.
     private func generateMunkiEvents(from installsData: [String: Any]) -> [ReportMateEvent] {
         var events: [ReportMateEvent] = []
@@ -638,112 +633,62 @@ struct ReportMateClient: AsyncParsableCommand {
             return events
         }
         
-        let items = munkiData["items"] as? [[String: Any]] ?? []
         let errorsString = munkiData["errors"] as? String ?? ""
         let warningsString = munkiData["warnings"] as? String ?? ""
         
-        // Build current installed items map: name -> {displayName, version}
-        // Items with status "installed" or "install_succeeded" are currently installed
-        let installedStatuses: Set<String> = ["installed", "install_succeeded"]
-        var currentInstalled: [String: [String: String]] = [:]
-        for item in items {
-            let name = item["name"] as? String ?? ""
-            let status = item["status"] as? String ?? ""
-            guard !name.isEmpty, installedStatuses.contains(status) else { continue }
-            let displayName = item["displayName"] as? String ?? name
-            // Version lives in installedVersion (from ManagedInstalls plist installed_version)
-            let version = item["installedVersion"] as? String ?? item["version"] as? String ?? ""
-            currentInstalled[name] = ["displayName": displayName, "version": version]
+        // Read what Munki actually installed/removed this run from InstallResults/RemovalResults
+        // (collected from ManagedInstallReport.plist by collectMunkiInfo)
+        let newlyInstalledItems = munkiData["newlyInstalledItems"] as? [[String: String]] ?? []
+        let newlyRemovedItems = munkiData["newlyRemovedItems"] as? [[String: String]] ?? []
+        
+        // Generate install event (MunkiReport format: "{name} {version} installed")
+        if !newlyInstalledItems.isEmpty {
+            let message: String
+            if newlyInstalledItems.count == 1 {
+                let item = newlyInstalledItems[0]
+                let name = item["name"] ?? "Unknown"
+                let version = item["version"] ?? ""
+                message = version.isEmpty ? "\(name) installed" : "\(name) \(version) installed"
+            } else {
+                message = "\(newlyInstalledItems.count) packages installed"
+            }
+            events.append(ReportMateEvent(
+                moduleId: "managedinstalls",
+                eventType: "success",
+                message: message,
+                timestamp: Date(),
+                stringDetails: newlyInstalledItems.count <= 5
+                    ? Dictionary(uniqueKeysWithValues: newlyInstalledItems.compactMap { item -> (String, String)? in
+                        guard let name = item["name"] else { return nil }
+                        return (name, item["version"] ?? "")
+                      })
+                    : ["count": String(newlyInstalledItems.count)]
+            ))
         }
         
-        // Load previous installed items state
-        let stateURL = URL(fileURLWithPath: Self.previousManagedInstallsPath)
-        var previousInstalled: [String: [String: String]] = [:]
-        var isFirstRun = true
-        if FileManager.default.fileExists(atPath: Self.previousManagedInstallsPath),
-           let data = try? Data(contentsOf: stateURL),
-           let stored = try? JSONSerialization.jsonObject(with: data) as? [String: [String: String]] {
-            previousInstalled = stored
-            isFirstRun = false
-        }
-        
-        // Save current state for next comparison
-        if let jsonData = try? JSONSerialization.data(withJSONObject: currentInstalled, options: [.sortedKeys]) {
-            try? jsonData.write(to: stateURL)
-        }
-        
-        // First run: no previous state to compare against — store state only, no events.
-        // This avoids a flood of "{N} packages installed" on first deployment.
-        if !isFirstRun {
-            // Diff: items in current but not in previous, or version changed → newly installed
-            var newlyInstalled: [(displayName: String, version: String)] = []
-            for (name, info) in currentInstalled {
-                let displayName = info["displayName"] ?? name
-                let version = info["version"] ?? ""
-                if let prev = previousInstalled[name] {
-                    // Version changed → updated/reinstalled
-                    if prev["version"] != version, !version.isEmpty {
-                        newlyInstalled.append((displayName: displayName, version: version))
-                    }
-                } else {
-                    // Not in previous → newly installed
-                    newlyInstalled.append((displayName: displayName, version: version))
-                }
+        // Generate removal event (MunkiReport format: "{name} {version} removed")
+        if !newlyRemovedItems.isEmpty {
+            let message: String
+            if newlyRemovedItems.count == 1 {
+                let item = newlyRemovedItems[0]
+                let name = item["name"] ?? "Unknown"
+                let version = item["version"] ?? ""
+                message = version.isEmpty ? "\(name) removed" : "\(name) \(version) removed"
+            } else {
+                message = "\(newlyRemovedItems.count) packages removed"
             }
-            
-            // Diff: items in previous but not in current → removed
-            var removedItems: [(displayName: String, version: String)] = []
-            for (name, info) in previousInstalled {
-                if currentInstalled[name] == nil {
-                    let displayName = info["displayName"] ?? name
-                    let version = info["version"] ?? ""
-                    removedItems.append((displayName: displayName, version: version))
-                }
-            }
-            
-            // Generate install event (MunkiReport format: "{name} {version} installed")
-            if !newlyInstalled.isEmpty {
-                let message: String
-                if newlyInstalled.count == 1 {
-                    let item = newlyInstalled[0]
-                    message = item.version.isEmpty
-                        ? "\(item.displayName) installed"
-                        : "\(item.displayName) \(item.version) installed"
-                } else {
-                    message = "\(newlyInstalled.count) packages installed"
-                }
-                events.append(ReportMateEvent(
-                    moduleId: "managedinstalls",
-                    eventType: "success",
-                    message: message,
-                    timestamp: Date(),
-                    stringDetails: newlyInstalled.count <= 5
-                        ? Dictionary(uniqueKeysWithValues: newlyInstalled.map { ($0.displayName, $0.version) })
-                        : ["count": String(newlyInstalled.count)]
-                ))
-            }
-            
-            // Generate removal event (MunkiReport format: "{name} {version} removed")
-            if !removedItems.isEmpty {
-                let message: String
-                if removedItems.count == 1 {
-                    let item = removedItems[0]
-                    message = item.version.isEmpty
-                        ? "\(item.displayName) removed"
-                        : "\(item.displayName) \(item.version) removed"
-                } else {
-                    message = "\(removedItems.count) packages removed"
-                }
-                events.append(ReportMateEvent(
-                    moduleId: "managedinstalls",
-                    eventType: "success",
-                    message: message,
-                    timestamp: Date(),
-                    stringDetails: removedItems.count <= 5
-                        ? Dictionary(uniqueKeysWithValues: removedItems.map { ($0.displayName, $0.version) })
-                        : ["count": String(removedItems.count)]
-                ))
-            }
+            events.append(ReportMateEvent(
+                moduleId: "managedinstalls",
+                eventType: "success",
+                message: message,
+                timestamp: Date(),
+                stringDetails: newlyRemovedItems.count <= 5
+                    ? Dictionary(uniqueKeysWithValues: newlyRemovedItems.compactMap { item -> (String, String)? in
+                        guard let name = item["name"] else { return nil }
+                        return (name, item["version"] ?? "")
+                      })
+                    : ["count": String(newlyRemovedItems.count)]
+            ))
         }
         
         // Generate error event (MunkiReport format: "{count} Munki errors")
