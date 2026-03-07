@@ -460,6 +460,20 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             info["newlyInstalledItems"] = [] as [[String: String]]
         }
         
+        // RemovalResults - items removed during the most recent Munki run
+        if let removalResults = report["RemovalResults"] as? [[String: Any]], !removalResults.isEmpty {
+            info["newlyRemovedCount"] = removalResults.count
+            let removedDetails = removalResults.map { item -> [String: String] in
+                let name = item["display_name"] as? String ?? item["name"] as? String ?? "Unknown"
+                let version = item["version"] as? String ?? ""
+                return ["name": name, "version": version]
+            }
+            info["newlyRemovedItems"] = removedDetails
+        } else {
+            info["newlyRemovedCount"] = 0
+            info["newlyRemovedItems"] = [] as [[String: String]]
+        }
+        
         return info
     }
     
