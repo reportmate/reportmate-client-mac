@@ -33,6 +33,7 @@ public class ApplicationsModuleProcessor: BaseModuleProcessor, @unchecked Sendab
         
         // Get application usage data if available
         var usageData: [String: Any] = [:]
+        var dailyUsageHistory: [[String: Any]] = []
         if let usageService = applicationUsageService {
             let usageSnapshot = await usageService.collectUsageData(installedApps: apps)
             usageData = [
@@ -45,13 +46,15 @@ public class ApplicationsModuleProcessor: BaseModuleProcessor, @unchecked Sendab
                 "totalUsageSeconds": usageSnapshot.totalUsageSeconds,
                 "activeSessions": usageSnapshot.activeSessions.map { $0.toDictionary() }
             ]
+            dailyUsageHistory = usageService.buildDailySummaries(sessions: usageSnapshot.activeSessions)
         }
         
         let applicationsData: [String: Any] = [
             "installedApplications": apps,
             "runningProcesses": processes,
             "startupPrograms": startup,
-            "applicationUsage": usageData
+            "applicationUsage": usageData,
+            "dailyUsageHistory": dailyUsageHistory
         ]
         
         return BaseModuleData(moduleId: moduleId, data: applicationsData)
