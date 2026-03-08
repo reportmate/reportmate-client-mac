@@ -355,4 +355,49 @@ public class ApplicationUsageService: @unchecked Sendable {
         }
         return nil
     }
+
+    /// Build daily per-application usage summaries from sessions.
+    /// Groups by (date, app name). Cumulative: last collection of the day wins (UPSERT on API).
+    public func buildDailySummaries(sessions: [ApplicationUsageSession]) -> [[String: Any]] {
+        guard !sessions.isEmpty else { return [] }
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.timeZone = TimeZone.current
+
+        // Group by (date string, app name)
+        var groups: [String: [ApplicationUsageSession]] = [:]
+        for session in sessions {
+            let dateStr = dateFormatter.string(from: session.startTime)
+            let key = "\(dateStr)||\(session.name)"
+            groups[key, default: []].append(session)
+        }
+
+        var summaries: [[String: Any]] = []
+        for (key, grouped) in groups {
+            let parts = key.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+            guard parts.count >= 3 else { continue }
+            let dateStr = String(parts[0])
+            let appName = String(parts[2])
+
+            let users = Array(Set(grouped.map { $0.user }.filter { !$0.isEmpty }))
+
+            summaries.append([
+                "date": dateStr,
+                "appName": appName,
+                "publisher": "",
+                "launches": grouped.count,
+                "totalSeconds": grouped.reduce(0.0) { $0 + $1.durationSeconds },
+                "users": users
+            ])
+        }
+
+        return summaries.sorted { a, b in
+            let dateA = a["date"] as? String ?? ""
+            let dateB = b["date"] as? String ?? ""
+            if dateA != dateB { return dateA < dateB }
+            return (a["totalSeconds"] as? Double ?? 0) > (b["totalSeconds"] as? Double ?? 0)
+        }
+    }
 }
