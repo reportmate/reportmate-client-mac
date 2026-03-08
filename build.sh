@@ -38,7 +38,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
 PKG_DIR="${BUILD_DIR}/pkg"
 RESOURCES_DIR="${BUILD_DIR}/resources"
-DIST_DIR="${SCRIPT_DIR}/dist"
+DIST_DIR="${SCRIPT_DIR}/release"
 OUTPUT_DIR="${BUILD_DIR}/output"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -489,14 +489,14 @@ else
     EXECUTABLE_PATH="${BUILD_PATH}/${PRODUCT_NAME}"
 fi
 
-# Copy binaries to dist
+# Copy binaries to release
 cp "$EXECUTABLE_PATH" "${DIST_DIR}/${PRODUCT_NAME}"
 
 # Copy app usage watcher binary if it was built
 APPUSAGE_PATH="${BUILD_PATH}/reportmate-appusage"
 if [ -f "$APPUSAGE_PATH" ]; then
     cp "$APPUSAGE_PATH" "${DIST_DIR}/reportmate-appusage"
-    log_success "App usage watcher binary copied to dist"
+    log_success "App usage watcher binary copied to release"
 else
     log_warn "reportmate-appusage not found at: $APPUSAGE_PATH (usage watcher will not be packaged)"
 fi
@@ -610,7 +610,7 @@ WRAPPER
         chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/reportmate-appusage"
         log_success "App usage watcher bundled: reportmate-appusage"
     else
-        log_warn "reportmate-appusage not in dist, watcher will not be included in package"
+        log_warn "reportmate-appusage not in release, watcher will not be included in package"
     fi
 
     # ═══════════════════════════════════════════════════════════════════════════

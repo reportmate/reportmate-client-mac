@@ -211,12 +211,12 @@ jobs:
         id: pkg
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          DIST_DIR="dist"
+          DIST_DIR="release"
           OUTPUT_DIR="build/output"
 
           mkdir -p "$DIST_DIR" "$OUTPUT_DIR"
 
-          # Copy executable to dist
+          # Copy executable to release
           cp "$BUILD_PATH/${{ env.PRODUCT_NAME }}" "$DIST_DIR/"
 
           # ═══════════════════════════════════════════════════════════════════
@@ -561,8 +561,8 @@ jobs:
         if: env.SIGN_BUILD == 'true' && env.INSTALLER_IDENTITY != ''
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          PKG_PATH="dist/ReportMate-${VERSION}.pkg"
-          SIGNED_PKG="dist/ReportMate-${VERSION}-signed.pkg"
+          PKG_PATH="release/ReportMate-${VERSION}.pkg"
+          SIGNED_PKG="release/ReportMate-${VERSION}-signed.pkg"
 
           productsign --sign "$INSTALLER_IDENTITY" \
                       --keychain "$KEYCHAIN_PATH" \
@@ -586,7 +586,7 @@ jobs:
           fi
 
           VERSION="${{ steps.version.outputs.version }}"
-          PKG_PATH="dist/ReportMate-${VERSION}.pkg"
+          PKG_PATH="release/ReportMate-${VERSION}.pkg"
 
           echo "Submitting for notarization..."
           xcrun notarytool submit "$PKG_PATH" \
@@ -602,13 +602,13 @@ jobs:
       - name: Create ZIP
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          cd dist
+          cd release
           zip -r "ReportMate-${VERSION}.zip" "${{ env.PRODUCT_NAME }}"
 
       - name: Generate checksums
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          cd dist
+          cd release
           shasum -a 256 ReportMate-${VERSION}.* > checksums.txt
           cat checksums.txt
 
@@ -617,9 +617,9 @@ jobs:
         with:
           name: ReportMate-${{ steps.version.outputs.version }}
           path: |
-            dist/ReportMate-*.pkg
-            dist/ReportMate-*.zip
-            dist/checksums.txt
+            release/ReportMate-*.pkg
+            release/ReportMate-*.zip
+            release/checksums.txt
           retention-days: 30
 
       - name: Create GitHub Release
@@ -643,7 +643,7 @@ jobs:
 
           ### Checksums
           \`\`\`
-          $(cat dist/checksums.txt)
+          $(cat release/checksums.txt)
           \`\`\`
           "
 
@@ -659,13 +659,13 @@ jobs:
           gh release create "$TAG" \
             --title "ReportMate macOS ${VERSION}" \
             --notes "$RELEASE_NOTES" \
-            dist/ReportMate-${VERSION}.pkg \
-            dist/ReportMate-${VERSION}.zip \
-            dist/checksums.txt \
+            release/ReportMate-${VERSION}.pkg \
+            release/ReportMate-${VERSION}.zip \
+            release/checksums.txt \
             || gh release upload "$TAG" \
-               dist/ReportMate-${VERSION}.pkg \
-               dist/ReportMate-${VERSION}.zip \
-               dist/checksums.txt \
+               release/ReportMate-${VERSION}.pkg \
+               release/ReportMate-${VERSION}.zip \
+               release/checksums.txt \
                --clobber
 
       - name: Cleanup keychain

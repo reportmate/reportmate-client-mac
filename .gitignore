@@ -118,7 +118,7 @@ osquery-temp/
 test_modules.swift
 
 ## Build artifacts
-dist/
+release/
 installer/
 *.pkg
 *.dmg
