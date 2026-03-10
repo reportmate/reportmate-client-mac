@@ -226,13 +226,14 @@ jobs:
           PACKAGE_ROOT="$OUTPUT_DIR/package_root"
           rm -rf "$PACKAGE_ROOT"
 
-          APP_BUNDLE="$PACKAGE_ROOT/usr/local/reportmate/ReportMate.app"
+          APP_BUNDLE="$PACKAGE_ROOT/Applications/Utilities/ReportMate.app"
           APP_CONTENTS="$APP_BUNDLE/Contents"
           APP_MACOS="$APP_CONTENTS/MacOS"
           APP_RESOURCES="$APP_CONTENTS/Resources"
           APP_LAUNCHDAEMONS="$APP_CONTENTS/Library/LaunchDaemons"
 
           mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_LAUNCHDAEMONS"
+          mkdir -p "$PACKAGE_ROOT/usr/local/reportmate"
           mkdir -p "$PACKAGE_ROOT/Library/Managed Reports/logs"
           mkdir -p "$PACKAGE_ROOT/etc/paths.d"
 
@@ -251,7 +252,7 @@ jobs:
           # Create wrapper script
           cat > "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner" << 'WRAPPER'
           #!/bin/sh
-          /usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner "${@}"
+          /Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner "${@}"
           WRAPPER
           chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner"
 
@@ -264,7 +265,7 @@ jobs:
               <key>CFBundleDevelopmentRegion</key>
               <string>en</string>
               <key>CFBundleExecutable</key>
-              <string>managedreportsrunner</string>
+              <string>ReportMateApp</string>
               <key>CFBundleIdentifier</key>
               <string>${{ env.BUNDLE_ID }}</string>
               <key>CFBundleInfoDictionaryVersion</key>
@@ -277,12 +278,8 @@ jobs:
               <string>$VERSION</string>
               <key>CFBundleVersion</key>
               <string>$VERSION</string>
-              <key>LSBackgroundOnly</key>
-              <true/>
               <key>LSMinimumSystemVersion</key>
               <string>14.0</string>
-              <key>LSUIElement</key>
-              <true/>
           </dict>
           </plist>
           PLIST
@@ -327,7 +324,7 @@ jobs:
               <string>com.github.reportmate.${schedule}</string>
               <key>ProgramArguments</key>
               <array>
-                  <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+                  <string>/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
                   ${MODULES}
               </array>
               <key>RunAtLoad</key>
@@ -400,7 +397,7 @@ jobs:
           #!/bin/zsh
           # ReportMate Postinstall
           LD_ROOT="/Library/LaunchDaemons"
-          APP_PATH="/usr/local/reportmate/ReportMate.app"
+          APP_PATH="/Applications/Utilities/ReportMate.app"
           APP_ROOT="${APP_PATH}/Contents"
           LOG_DIR="/Library/Managed Reports/logs"
 

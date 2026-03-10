@@ -233,6 +233,12 @@ if [ -z "$VERSION" ]; then
     VERSION="$(date +%Y.%m.%d.%H%M)"
 fi
 
+# Split version: 2026.03.07.1012 → MARKETING_VERSION=2026.03.07, BUILD_NUMBER=1012
+# Used to populate CFBundleShortVersionString and CFBundleVersion separately
+# so macOS About window shows "2026.03.07 (1012)" instead of a duplicate.
+MARKETING_VERSION="$(echo "$VERSION" | sed 's/\.[^.]*$//')"
+BUILD_NUMBER="$(echo "$VERSION" | sed 's/.*\.//')"
+
 # Export as REPORTMATE_VERSION for envsubst substitution in scripts and build-info.yaml
 export REPORTMATE_VERSION="$VERSION"
 
@@ -501,6 +507,24 @@ else
     log_warn "reportmate-appusage not found at: $APPUSAGE_PATH (usage watcher will not be packaged)"
 fi
 
+# Copy GUI app binary if it was built
+GUI_APP_PATH="${BUILD_PATH}/ReportMateApp"
+if [ -f "$GUI_APP_PATH" ]; then
+    cp "$GUI_APP_PATH" "${DIST_DIR}/ReportMateApp"
+    log_success "GUI app binary copied to dist"
+else
+    log_warn "ReportMateApp not found at: $GUI_APP_PATH (GUI will not be packaged)"
+fi
+
+# Copy privileged helper binary if it was built
+HELPER_PATH="${BUILD_PATH}/ReportMateHelper"
+if [ -f "$HELPER_PATH" ]; then
+    cp "$HELPER_PATH" "${DIST_DIR}/ReportMateHelper"
+    log_success "Privileged helper binary copied to dist"
+else
+    log_warn "ReportMateHelper not found at: $HELPER_PATH (helper will not be packaged)"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════════
 # CODE SIGNING
 # ═══════════════════════════════════════════════════════════════════════════
@@ -552,6 +576,20 @@ if [ "$SIGN" = true ]; then
         log_success "App usage watcher signed"
     fi
     
+    # Sign GUI app if present
+    if [ -f "${DIST_DIR}/ReportMateApp" ]; then
+        codesign "${CODESIGN_ARGS[@]}" "${DIST_DIR}/ReportMateApp"
+        codesign --verify --verbose=2 "${DIST_DIR}/ReportMateApp"
+        log_success "GUI app signed"
+    fi
+    
+    # Sign helper if present
+    if [ -f "${DIST_DIR}/ReportMateHelper" ]; then
+        codesign "${CODESIGN_ARGS[@]}" "${DIST_DIR}/ReportMateHelper"
+        codesign --verify --verbose=2 "${DIST_DIR}/ReportMateHelper"
+        log_success "Helper binary signed"
+    fi
+    
     # Verify signature
     codesign --verify --verbose=2 "${DIST_DIR}/${PRODUCT_NAME}"
     log_success "Code signing complete"
@@ -573,8 +611,8 @@ if [ "$SKIP_PKG" = false ]; then
     PACKAGE_ROOT="${OUTPUT_DIR}/package_root"
     rm -rf "$PACKAGE_ROOT"
     
-    # App bundle structure
-    APP_BUNDLE="${PACKAGE_ROOT}/usr/local/reportmate/ReportMate.app"
+    # App bundle structure — installed to /Applications/Utilities/
+    APP_BUNDLE="${PACKAGE_ROOT}/Applications/Utilities/ReportMate.app"
     APP_CONTENTS="${APP_BUNDLE}/Contents"
     APP_MACOS="${APP_CONTENTS}/MacOS"
     APP_RESOURCES="${APP_CONTENTS}/Resources"
@@ -583,20 +621,45 @@ if [ "$SKIP_PKG" = false ]; then
     mkdir -p "$APP_MACOS"
     mkdir -p "$APP_RESOURCES"
     mkdir -p "$APP_LAUNCHDAEMONS"
+    mkdir -p "$PACKAGE_ROOT/usr/local/reportmate"
     mkdir -p "$PACKAGE_ROOT/Library/Managed Reports/logs"
     mkdir -p "$PACKAGE_ROOT/etc/paths.d"
     
     # Add reportmate to PATH
     echo "/usr/local/reportmate" > "$PACKAGE_ROOT/etc/paths.d/reportmate"
     
-    # Copy executable to app bundle
+    # Copy CLI executable to app bundle
     cp "${DIST_DIR}/${PRODUCT_NAME}" "$APP_MACOS/"
     
-    # Create wrapper script for CLI access
+    # Copy GUI executable to app bundle (CFBundleExecutable)
+    GUI_EXECUTABLE="${BUILD_PATH}/ReportMateApp"
+    if [ -f "$GUI_EXECUTABLE" ]; then
+        cp "$GUI_EXECUTABLE" "$APP_MACOS/ReportMateApp"
+        log_success "GUI app binary copied to app bundle"
+    else
+        log_warn "ReportMateApp not found at: $GUI_EXECUTABLE (GUI will not be available)"
+    fi
+    
+    # Copy privileged helper binary to app bundle
+    HELPER_EXECUTABLE="${BUILD_PATH}/ReportMateHelper"
+    if [ -f "$HELPER_EXECUTABLE" ]; then
+        cp "$HELPER_EXECUTABLE" "$APP_MACOS/ReportMateHelper"
+        log_success "Helper binary copied to app bundle"
+        
+        # Copy helper LaunchDaemon plist into app bundle for SMAppService registration
+        HELPER_LD_DIR="${APP_CONTENTS}/Library/LaunchDaemons"
+        mkdir -p "$HELPER_LD_DIR"
+        cp "${BUILD_DIR}/launchdaemons/com.github.reportmate.helper.plist" "$HELPER_LD_DIR/"
+        log_success "Helper LaunchDaemon plist copied to app bundle"
+    else
+        log_warn "ReportMateHelper not found at: $HELPER_EXECUTABLE (privileged helper will not be available)"
+    fi
+    
+    # Create wrapper script for CLI access from /usr/local/reportmate/
     cat > "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner" << 'WRAPPER'
 #!/bin/sh
-# ReportMate CLI wrapper
-/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner "${@}"
+# ReportMate CLI wrapper — forwards to app bundle in /Applications/Utilities/
+/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner "${@}"
 WRAPPER
     chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner"
 
@@ -656,7 +719,7 @@ WRAPPER
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>managedreportsrunner</string>
+    <string>ReportMateApp</string>
     <key>CFBundleIconFile</key>
     <string>ReportMate</string>
     <key>CFBundleIconName</key>
@@ -670,15 +733,11 @@ WRAPPER
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>${VERSION}</string>
+    <string>${MARKETING_VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>${VERSION}</string>
-    <key>LSBackgroundOnly</key>
-    <true/>
+    <string>${BUILD_NUMBER}</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
-    <key>LSUIElement</key>
-    <true/>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright 2025 ReportMate Contributors. All rights reserved.</string>
     <key>NSPrincipalClass</key>
@@ -694,7 +753,7 @@ EOF
     # LAUNCHDAEMONS (embedded in app bundle like Outset)
     # ═══════════════════════════════════════════════════════════════════════════
     
-    # Hourly daemon - security, profiles, network, management
+    # Hourly daemon - security, network, management
     cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.hourly.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -704,9 +763,9 @@ EOF
     <string>com.github.reportmate.hourly</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
         <string>--run-modules</string>
-        <string>security,profiles,network,management</string>
+        <string>security,network,management</string>
     </array>
     <key>StartInterval</key>
     <integer>3600</integer>
@@ -743,7 +802,7 @@ EOF
     <string>com.github.reportmate.fourhourly</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
         <string>--run-modules</string>
         <string>applications,inventory,system,identity</string>
     </array>
@@ -782,7 +841,7 @@ EOF
     <string>com.github.reportmate.daily</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
         <string>--run-modules</string>
         <string>hardware,peripherals</string>
     </array>
@@ -826,7 +885,7 @@ EOF
     <string>com.github.reportmate.allmodules</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/reportmate/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
     </array>
     <key>StartInterval</key>
     <integer>43200</integer>
@@ -899,7 +958,7 @@ EOF
 {
   "schedules": {
     "hourly": {
-      "modules": ["security", "profiles", "network", "management"],
+      "modules": ["security", "network", "management"],
       "interval_seconds": 3600,
       "launchd_label": "com.github.reportmate.hourly",
       "description": "Modules that need frequent updates for security monitoring"
@@ -948,44 +1007,43 @@ EOF
     # ═══════════════════════════════════════════════════════════════════════════
     # APP ICON (Liquid Glass / Tahoe icon pipeline for macOS Sequoia+)
     # ═══════════════════════════════════════════════════════════════════════════
-    
-    ICON_SOURCE="${SCRIPT_DIR}/packages/client/Resources/ReportMate.icon"
+
+    ICON_SOURCE="${RESOURCES_DIR}/ReportMate.icon"
+    ICON_BUILD_DIR="${BUILD_DIR}/actool-out"
+    mkdir -p "$ICON_BUILD_DIR"
+
     if [ -d "$ICON_SOURCE" ]; then
-        log_info "Compiling Liquid Glass icon (.icon → Assets.car)"
-        
-        # Create temporary directory for icon compilation
-        ICON_BUILD_DIR="${BUILD_DIR}/icon_assets"
-        mkdir -p "$ICON_BUILD_DIR"
-        
-        # Compile .icon to Assets.car using actool
-        # The .icon directory is the modern Liquid Glass format from Icon Composer
-        xcrun actool "$ICON_SOURCE" \
+        log_info "Compiling icon bundle with actool..."
+
+        # actool compiles the .icon bundle (Icon Composer format) into:
+        #   Assets.car  — Liquid Glass icon for macOS 26+
+        #   ReportMate.icns — composited fallback for macOS 13–25
+        # Icon directory must be the last argument (xcrun actool convention).
+        xcrun actool \
             --compile "$ICON_BUILD_DIR" \
-            --app-icon "ReportMate" \
-            --enable-on-demand-resources NO \
-            --development-region en \
-            --target-device mac \
             --platform macosx \
             --minimum-deployment-target 14.0 \
-            --include-all-app-icons \
-            --output-partial-info-plist /dev/null 2>&1 || true
-        
-        # Copy compiled Assets.car to app bundle (actool may emit warnings but still produce Assets.car)
-        if [ -f "$ICON_BUILD_DIR/Assets.car" ]; then
-            cp "$ICON_BUILD_DIR/Assets.car" "$APP_RESOURCES/Assets.car"
-            log_success "Icon compiled and installed: Assets.car"
-            
-            # Also copy the .icns fallback if generated (for pre-Sequoia compatibility)
-            if [ -f "$ICON_BUILD_DIR/ReportMate.icns" ]; then
-                cp "$ICON_BUILD_DIR/ReportMate.icns" "$APP_RESOURCES/ReportMate.icns"
-                log_info "Legacy .icns fallback also installed"
-            fi
+            --app-icon "ReportMate" \
+            --output-partial-info-plist "${ICON_BUILD_DIR}/partial-info.plist" \
+            --warnings --errors \
+            "$ICON_SOURCE" > /dev/null
+
+        if [ -f "${ICON_BUILD_DIR}/Assets.car" ]; then
+            cp "${ICON_BUILD_DIR}/Assets.car" "$APP_RESOURCES/Assets.car"
+            log_success "Icon compiled: Assets.car"
         else
-            log_error "Failed to compile icon - Assets.car not generated"
+            log_error "actool did not produce Assets.car"
             exit 1
         fi
+
+        # .icns fallback — composited by actool from the icon layers, not a raw layer PNG
+        if [ -f "${ICON_BUILD_DIR}/ReportMate.icns" ]; then
+            cp "${ICON_BUILD_DIR}/ReportMate.icns" "$APP_RESOURCES/ReportMate.icns"
+            log_success "Icon compiled: ReportMate.icns (legacy fallback)"
+        fi
     else
-        log_warn "Icon not found at ${ICON_SOURCE}"
+        log_error "Icon bundle not found at: ${ICON_SOURCE}"
+        exit 1
     fi
 
     # NOTE: The preference plist is NOT included in the package payload.
@@ -1028,8 +1086,20 @@ EOF
             CODESIGN_ARGS+=(--verbose)
         fi
         
-        # Sign the main executable
+        # Sign the CLI executable
         codesign "${CODESIGN_ARGS[@]}" "$APP_MACOS/${PRODUCT_NAME}"
+        
+        # Sign the GUI executable (if present)
+        if [ -f "$APP_MACOS/ReportMateApp" ]; then
+            codesign "${CODESIGN_ARGS[@]}" "$APP_MACOS/ReportMateApp"
+            log_success "GUI app binary signed"
+        fi
+        
+        # Sign the helper executable (if present)
+        if [ -f "$APP_MACOS/ReportMateHelper" ]; then
+            codesign "${CODESIGN_ARGS[@]}" "$APP_MACOS/ReportMateHelper"
+            log_success "Helper binary signed"
+        fi
         
         # Sign the app bundle
         codesign "${CODESIGN_ARGS[@]}" --deep "$APP_BUNDLE"
@@ -1083,7 +1153,7 @@ EOF
 #!/bin/zsh
 # ReportMate Postinstall
 LD_ROOT="/Library/LaunchDaemons"
-APP_PATH="/usr/local/reportmate/ReportMate.app"
+APP_PATH="/Applications/Utilities/ReportMate.app"
 APP_ROOT="${APP_PATH}/Contents"
 LOG_DIR="/Library/Managed Reports/logs"
 
@@ -1134,7 +1204,30 @@ fi
 chmod 755 /usr/local/reportmate/macadmins_extension.ext 2>/dev/null
 chmod 755 /usr/local/reportmate/reportmate-appusage 2>/dev/null
 
-# Register app bundle
+# ═══════════════════════════════════════════════════════════════════════════
+# CLEAN UP OLD APP LOCATION AND DUPLICATE COPIES
+# ═══════════════════════════════════════════════════════════════════════════
+# Previously the app lived in /usr/local/reportmate/ReportMate.app.
+# Remove the old bundle and any numbered copies (ReportMate-N.localized)
+# that macOS Installer may have created during past upgrades.
+
+OLD_APP="/usr/local/reportmate/ReportMate.app"
+if [ -d "$OLD_APP" ]; then
+    log_message "Removing old app bundle at ${OLD_APP}"
+    rm -rf "$OLD_APP"
+fi
+
+# Remove numbered duplicates created by macOS Installer relocation
+setopt NULL_GLOB 2>/dev/null
+for dup in /usr/local/reportmate/ReportMate-*.localized; do
+    if [ -e "$dup" ]; then
+        log_message "Removing duplicate: $dup"
+        rm -rf "$dup"
+    fi
+done
+unsetopt NULL_GLOB 2>/dev/null
+
+# Register app bundle at new location
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister "${APP_PATH}"
 
 # LaunchDaemons to install
@@ -1209,7 +1302,18 @@ if [ -d "$MUNKI_DIR" ]; then
     # Create postflight.d directory
     mkdir -p "$POSTFLIGHT_D"
     chmod 755 "$POSTFLIGHT_D"
-    
+
+    # Remove any stale wrapper copies that previous installs may have left in postflight.d/.
+    # Old versions used "00-original.sh" or "original.sh" as the fallback backup name, which
+    # means the wrapper itself could end up inside the directory it orchestrates — causing
+    # an infinite loop (wrapper → runs postflight.d/ → runs itself → ...).
+    for stale in "${POSTFLIGHT_D}/00-original.sh" "${POSTFLIGHT_D}/original.sh"; do
+        if [ -f "$stale" ] && grep -q "Deployed by: ReportMate macOS Client" "$stale" 2>/dev/null; then
+            log_message "Removing stale wrapper copy from postflight.d/: $(basename $stale)"
+            rm -f "$stale"
+        fi
+    done
+
     # Backup existing postflight if it exists and isn't our wrapper
     if [ -f "$POSTFLIGHT" ]; then
         if ! grep -q "Deployed by: ReportMate macOS Client" "$POSTFLIGHT" 2>/dev/null; then
@@ -1221,9 +1325,16 @@ if [ -d "$MUNKI_DIR" ]; then
             else
                 BACKUP_NAME="original.sh"
             fi
-            log_message "Backing up existing postflight to postflight.d/${BACKUP_NAME}"
-            mv "$POSTFLIGHT" "${POSTFLIGHT_D}/${BACKUP_NAME}"
-            chmod 755 "${POSTFLIGHT_D}/${BACKUP_NAME}"
+            # Only backup if we're not about to overwrite an existing same-named file
+            # (i.e., a previous backup from an earlier install is already in place)
+            if [ ! -f "${POSTFLIGHT_D}/${BACKUP_NAME}" ]; then
+                log_message "Backing up existing postflight to postflight.d/${BACKUP_NAME}"
+                mv "$POSTFLIGHT" "${POSTFLIGHT_D}/${BACKUP_NAME}"
+                chmod 755 "${POSTFLIGHT_D}/${BACKUP_NAME}"
+            else
+                log_message "postflight.d/${BACKUP_NAME} already exists, removing superseded postflight"
+                rm -f "$POSTFLIGHT"
+            fi
         fi
     fi
     
@@ -1266,7 +1377,7 @@ plist_set_if_missing OsqueryExtensionPath -string /usr/local/reportmate/macadmin
 plist_set_if_missing ExtensionEnabled -bool true
 plist_set_if_missing ValidateSSL -bool true
 plist_set_if_missing Timeout -integer 300
-plist_set_if_missing EnabledModules -array hardware system network security applications management inventory profiles displays
+plist_set_if_missing EnabledModules -array installs applications system management identity hardware peripherals security network inventory
 
 # Run initial collection immediately so the device appears in ReportMate right away
 log_message "Running initial inventory and system collection..."
@@ -1312,6 +1423,20 @@ done
 
 pkill -f "managedreportsrunner" 2>/dev/null || true
 pkill -f "reportmate-appusage" 2>/dev/null || true
+
+# Remove old app bundle from legacy location and any numbered duplicates
+# that macOS Installer may have created during past upgrades.
+OLD_APP="/usr/local/reportmate/ReportMate.app"
+if [ -d "$OLD_APP" ]; then
+    log_message "Removing old app bundle at ${OLD_APP}"
+    rm -rf "$OLD_APP"
+fi
+setopt NULL_GLOB 2>/dev/null
+for dup in /usr/local/reportmate/ReportMate-*.localized; do
+    [ -e "$dup" ] && { log_message "Removing duplicate: $dup"; rm -rf "$dup"; }
+done
+unsetopt NULL_GLOB 2>/dev/null
+
 log_message "ReportMate preinstall complete."
 exit 0
 PREINSTALL_SCRIPT
@@ -1331,11 +1456,11 @@ PREINSTALL_SCRIPT
         <key>BundleIsRelocatable</key>
         <false/>
         <key>BundleIsVersionChecked</key>
-        <true/>
+        <false/>
         <key>BundleOverwriteAction</key>
         <string>upgrade</string>
         <key>RootRelativeBundlePath</key>
-        <string>usr/local/reportmate/ReportMate.app</string>
+        <string>Applications/Utilities/ReportMate.app</string>
     </dict>
 </array>
 </plist>
