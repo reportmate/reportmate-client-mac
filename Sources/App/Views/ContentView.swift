@@ -1,49 +1,43 @@
+//
+//  ContentView.swift
+//  ReportMate
+//
+//  Main window with three tabs: Main, Run, and Logs.
+//
+
 import SwiftUI
 
-enum SidebarItem: String, CaseIterable, Identifiable {
-    case runner = "Run Collection"
-    case settings = "Settings"
-
-    var id: String { rawValue }
-
-    var icon: String {
-        switch self {
-        case .runner: "play.circle"
-        case .settings: "gearshape"
-        }
-    }
-}
-
 struct ContentView: View {
+    @Environment(XPCClient.self) private var xpcClient
+    @State private var viewModel = SettingsViewModel()
+    @State private var selectedTab: ContentTab = .main
 
-    @State private var selection: SidebarItem = .runner
+    enum ContentTab: Hashable {
+        case main, run, logs
+    }
 
     var body: some View {
-        NavigationSplitView {
-            List(SidebarItem.allCases, selection: $selection) { item in
-                Label(item.rawValue, systemImage: item.icon)
-            }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
-        } detail: {
-            switch selection {
-            case .runner:
-                RunnerView()
-            case .settings:
-                SettingsView()
-            }
-        }
-        .navigationTitle("ReportMate")
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Text(appVersion)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
+        TabView(selection: $selectedTab) {
+            SettingsView(viewModel: viewModel)
+                .environment(xpcClient)
+                .tabItem { Text("Main") }
+                .tag(ContentTab.main)
 
-    private var appVersion: String {
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
-        return "v\(version)"
+            RunView(viewModel: viewModel)
+                .environment(xpcClient)
+                .tabItem { Text("Run") }
+                .tag(ContentTab.run)
+
+            LogView()
+                .tabItem { Text("Logs") }
+                .tag(ContentTab.logs)
+        }
+        .onAppear {
+            xpcClient.checkHelperStatus()
+            if xpcClient.helperStatus != .registered {
+                xpcClient.registerHelper()
+            }
+            xpcClient.connect()
+        }
     }
 }

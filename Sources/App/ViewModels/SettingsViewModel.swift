@@ -1,120 +1,174 @@
+//
+//  SettingsViewModel.swift
+//  ReportMate
+//
+//  Manages all configuration settings for the GUI.
+//  Reads current values from the system plist and MDM status.
+//  Writes changes via XPC helper for system-level persistence.
+//
+
 import Foundation
 
-@MainActor
 @Observable
+@MainActor
 final class SettingsViewModel {
+
+    // MARK: - Auto-Save
+
+    private var xpcClient: XPCClient?
+    private var autoSaveTask: Task<Void, Never>?
+    private var isLoading = false
+
+    func configure(client: XPCClient) {
+        xpcClient = client
+    }
+
+    private func scheduleAutoSave() {
+        guard !isLoading, let client = xpcClient, !client.isRunning else { return }
+        autoSaveTask?.cancel()
+        autoSaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(0.75))
+            guard !Task.isCancelled, let self else { return }
+            self.save(using: client)
+        }
+    }
 
     // MARK: - Connection Settings
 
-    var apiUrl = ""
-    var deviceId = ""
-    var passphrase = ""
-    var validateSSL = true
+    var apiUrl = "" { didSet { scheduleAutoSave() } }
+    var deviceId = "" { didSet { scheduleAutoSave() } }
+    var passphrase = "" { didSet { scheduleAutoSave() } }
+    var validateSSL = true { didSet { scheduleAutoSave() } }
 
     // MARK: - Collection Settings
 
-    var collectionInterval = "3600"
-    var logLevel = "info"
-    var storageMode = "auto"
-    var timeout = "300"
+    var collectionInterval = "3600" { didSet { scheduleAutoSave() } }
+    var logLevel = "info" { didSet { scheduleAutoSave() } }
+    var storageMode = "auto" { didSet { scheduleAutoSave() } }
+    var timeout = "300" { didSet { scheduleAutoSave() } }
 
     // MARK: - osquery Settings
 
-    var osqueryPath = "/usr/local/bin/osqueryi"
-    var osqueryExtensionPath = ""
-    var extensionEnabled = true
-    var useAltSystemInfo = true
+    var osqueryPath = "/usr/local/bin/osqueryi" { didSet { scheduleAutoSave() } }
+    var osqueryExtensionPath = "" { didSet { scheduleAutoSave() } }
+    var extensionEnabled = true { didSet { scheduleAutoSave() } }
+    var useAltSystemInfo = true { didSet { scheduleAutoSave() } }
 
     // MARK: - Default Enabled Modules
 
-    var enabledModules: Set<String> = []
+    var enabledModules: Set<String> = [] { didSet { scheduleAutoSave() } }
 
-    // MARK: - State
+    // MARK: - Save Status
 
-    var isSaving = false
-    var saveMessage: String?
-    var managedKeys: Set<String> = []
+    private(set) var saveStatus: SaveStatus = .idle
 
-    // Snapshot of values at load time for change detection
-    private var snapshot: [String: String] = [:]
+    enum SaveStatus {
+        case idle, saving, saved, failed(String)
+    }
+
+    // MARK: - MDM Status
+
+    private(set) var managedKeys: Set<String> = []
 
     private static let preferencesDomain = "com.github.reportmate"
     private static let systemPlistPath = "/Library/Preferences/com.github.reportmate.plist"
-
-    var hasChanges: Bool {
-        !buildChanges().isEmpty
-    }
-
-    init() {
-        loadSettings()
-    }
-
-    // MARK: - Public API
-
-    func loadSettings() {
-        let defaults = UserDefaults(suiteName: Self.preferencesDomain)
-
-        apiUrl = readString(defaults, "ApiUrl") ?? ""
-        deviceId = readString(defaults, "DeviceId") ?? ""
-        passphrase = readString(defaults, "Passphrase") ?? ""
-        validateSSL = readBool(defaults, "ValidateSSL") ?? true
-
-        collectionInterval = readString(defaults, "CollectionInterval") ?? "3600"
-        logLevel = readString(defaults, "LogLevel") ?? "info"
-        storageMode = readString(defaults, "StorageMode") ?? "auto"
-        timeout = readString(defaults, "Timeout") ?? "300"
-
-        osqueryPath = readString(defaults, "OsqueryPath") ?? "/usr/local/bin/osqueryi"
-        osqueryExtensionPath = readString(defaults, "OsqueryExtensionPath") ?? ""
-        extensionEnabled = readBool(defaults, "ExtensionEnabled") ?? true
-        useAltSystemInfo = readBool(defaults, "UseAltSystemInfo") ?? true
-
-        let modules = defaults?.stringArray(forKey: "EnabledModules")
-            ?? ["hardware", "system", "network", "security", "applications", "management", "inventory"]
-        enabledModules = Set(modules)
-
-        detectManagedKeys()
-        storeSnapshot()
-        saveMessage = nil
-    }
 
     func isManaged(_ key: String) -> Bool {
         managedKeys.contains(key)
     }
 
-    func save() {
-        let changes = buildChanges()
-        guard !changes.isEmpty else { return }
+    // MARK: - Loading
 
-        isSaving = true
-        saveMessage = nil
+    func load() {
+        isLoading = true
+        defer { isLoading = false }
 
-        let commands = changes.map { buildDefaultsWriteCommand($0.key, $0.value) }
+        detectManagedKeys()
 
-        Task {
-            let success = await performPrivilegedSave(commands)
-            isSaving = false
-            if success {
-                loadSettings()
-                saveMessage = "Settings saved successfully."
+        var dict: [String: Any] = [:]
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: Self.systemPlistPath)),
+           let parsed = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
+            dict = parsed
+        }
+
+        apiUrl               = dict["ApiUrl"]             as? String ?? ""
+        deviceId             = dict["DeviceId"]           as? String ?? ""
+        passphrase           = dict["Passphrase"]         as? String ?? ""
+        validateSSL          = dict["ValidateSSL"]        as? Bool   ?? true
+        collectionInterval   = plistString(dict["CollectionInterval"]) ?? "3600"
+        logLevel             = dict["LogLevel"]           as? String ?? "info"
+        storageMode          = dict["StorageMode"]        as? String ?? "auto"
+        timeout              = plistString(dict["Timeout"])            ?? "300"
+        osqueryPath          = dict["OsqueryPath"]        as? String ?? "/usr/local/bin/osqueryi"
+        osqueryExtensionPath = dict["OsqueryExtensionPath"] as? String ?? ""
+        extensionEnabled     = dict["ExtensionEnabled"]   as? Bool   ?? true
+        useAltSystemInfo     = dict["UseAltSystemInfo"]   as? Bool   ?? true
+
+        let modules = dict["EnabledModules"] as? [String]
+            ?? ["installs", "applications", "system", "management", "identity", "hardware", "peripherals", "security", "network", "inventory"]
+        enabledModules = Set(modules)
+    }
+
+    // MARK: - Saving
+
+    /// Saves all non-MDM-managed settings via the XPC helper.
+    func save(using client: XPCClient) {
+        saveStatus = .saving
+
+        func saveString(_ key: String, _ value: String) {
+            guard !isManaged(key) else { return }
+            if value.isEmpty {
+                client.removePreference(key: key)
             } else {
-                saveMessage = "Save failed. Authentication may have been cancelled."
+                client.setStringPreference(key: key, value: value)
             }
+        }
+
+        func saveBool(_ key: String, _ value: Bool) {
+            guard !isManaged(key) else { return }
+            client.setBoolPreference(key: key, value: value)
+        }
+
+        func saveInt(_ key: String, _ value: Int) {
+            guard !isManaged(key) else { return }
+            client.setIntPreference(key: key, value: value)
+        }
+
+        // Connection
+        saveString("ApiUrl", apiUrl)
+        saveString("DeviceId", deviceId)
+        saveString("Passphrase", passphrase)
+        saveBool("ValidateSSL", validateSSL)
+
+        // Collection
+        saveInt("CollectionInterval", Int(collectionInterval) ?? 3600)
+        saveString("LogLevel", logLevel)
+        saveString("StorageMode", storageMode)
+        saveInt("Timeout", Int(timeout) ?? 300)
+
+        // osquery
+        saveString("OsqueryPath", osqueryPath)
+        saveString("OsqueryExtensionPath", osqueryExtensionPath)
+        saveBool("ExtensionEnabled", extensionEnabled)
+        saveBool("UseAltSystemInfo", useAltSystemInfo)
+
+        // Modules
+        if !isManaged("EnabledModules") {
+            client.setArrayPreference(key: "EnabledModules", value: enabledModules.sorted())
+        }
+
+        saveStatus = .saved
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            if case .saved = saveStatus { saveStatus = .idle }
         }
     }
 
     // MARK: - Private Helpers
 
-    private func readString(_ defaults: UserDefaults?, _ key: String) -> String? {
-        if let val = defaults?.object(forKey: key) {
-            return "\(val)"
-        }
-        return nil
-    }
-
-    private func readBool(_ defaults: UserDefaults?, _ key: String) -> Bool? {
-        guard defaults?.object(forKey: key) != nil else { return nil }
-        return defaults?.bool(forKey: key)
+    private func plistString(_ val: Any?) -> String? {
+        guard let val else { return nil }
+        return "\(val)"
     }
 
     private func detectManagedKeys() {
@@ -128,107 +182,5 @@ final class SettingsViewModel {
         managedKeys = Set(allKeys.filter {
             CFPreferencesAppValueIsForced($0 as CFString, domain)
         })
-    }
-
-    private func storeSnapshot() {
-        snapshot = [
-            "ApiUrl": apiUrl,
-            "DeviceId": deviceId,
-            "Passphrase": passphrase,
-            "ValidateSSL": validateSSL ? "1" : "0",
-            "CollectionInterval": collectionInterval,
-            "LogLevel": logLevel,
-            "StorageMode": storageMode,
-            "Timeout": timeout,
-            "OsqueryPath": osqueryPath,
-            "OsqueryExtensionPath": osqueryExtensionPath,
-            "ExtensionEnabled": extensionEnabled ? "1" : "0",
-            "UseAltSystemInfo": useAltSystemInfo ? "1" : "0",
-            "EnabledModules": enabledModules.sorted().joined(separator: ","),
-        ]
-    }
-
-    private func currentValues() -> [String: String] {
-        [
-            "ApiUrl": apiUrl,
-            "DeviceId": deviceId,
-            "Passphrase": passphrase,
-            "ValidateSSL": validateSSL ? "1" : "0",
-            "CollectionInterval": collectionInterval,
-            "LogLevel": logLevel,
-            "StorageMode": storageMode,
-            "Timeout": timeout,
-            "OsqueryPath": osqueryPath,
-            "OsqueryExtensionPath": osqueryExtensionPath,
-            "ExtensionEnabled": extensionEnabled ? "1" : "0",
-            "UseAltSystemInfo": useAltSystemInfo ? "1" : "0",
-            "EnabledModules": enabledModules.sorted().joined(separator: ","),
-        ]
-    }
-
-    /// Returns dictionary of changed keys -> new values (only non-managed keys).
-    private func buildChanges() -> [String: String] {
-        let current = currentValues()
-        var changes: [String: String] = [:]
-        for (key, value) in current where !isManaged(key) {
-            if snapshot[key] != value {
-                changes[key] = value
-            }
-        }
-        return changes
-    }
-
-    private func buildDefaultsWriteCommand(_ key: String, _ value: String) -> String {
-        let domain = Self.systemPlistPath
-
-        switch key {
-        case "ValidateSSL", "ExtensionEnabled", "UseAltSystemInfo":
-            let boolVal = value == "1" ? "TRUE" : "FALSE"
-            return "/usr/bin/defaults write \(domain) \(key) -bool \(boolVal)"
-        case "CollectionInterval", "Timeout":
-            return "/usr/bin/defaults write \(domain) \(key) -integer \(value)"
-        case "EnabledModules":
-            let modules = value.components(separatedBy: ",").map { "'\($0)'" }.joined(separator: " ")
-            return "/usr/bin/defaults write \(domain) EnabledModules -array \(modules)"
-        default:
-            // Shell-escape single quotes in value
-            let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
-            return "/usr/bin/defaults write \(domain) \(key) -string '\(escaped)'"
-        }
-    }
-
-    private func performPrivilegedSave(_ commands: [String]) async -> Bool {
-        let scriptPath = NSTemporaryDirectory() + "reportmate-save-\(ProcessInfo.processInfo.processIdentifier).sh"
-        let scriptContent = "#!/bin/sh\n" + commands.joined(separator: "\n") + "\n"
-
-        do {
-            try scriptContent.write(toFile: scriptPath, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes(
-                [.posixPermissions: NSNumber(value: Int16(0o755))],
-                ofItemAtPath: scriptPath
-            )
-        } catch {
-            return false
-        }
-
-        return await withCheckedContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            process.arguments = [
-                "-e",
-                "do shell script \"\(scriptPath)\" with administrator privileges",
-            ]
-            process.terminationHandler = { @Sendable proc in
-                try? FileManager.default.removeItem(atPath: scriptPath)
-                continuation.resume(returning: proc.terminationStatus == 0)
-            }
-
-            do {
-                try process.run()
-            } catch {
-                try? FileManager.default.removeItem(atPath: scriptPath)
-                continuation.resume(returning: false)
-            }
-        }
     }
 }
