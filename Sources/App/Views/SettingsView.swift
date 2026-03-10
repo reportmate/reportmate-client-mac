@@ -1,174 +1,307 @@
+//
+//  SettingsView.swift
+//  ReportMate
+//
+//  Main tab — centered app info header, then a 50/50 two-column layout.
+//  Left column: Connection + osquery. Right column: Collection Schedules + Modules.
+//  MDM-managed settings display a lock icon and are disabled.
+//
+
 import SwiftUI
 
 struct SettingsView: View {
+    @Bindable var viewModel: SettingsViewModel
+    @Environment(XPCClient.self) private var xpcClient
 
-    @State private var viewModel = SettingsViewModel()
+    private var marketingVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "–"
+    }
+
+    private var buildNumber: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "–"
+    }
 
     var body: some View {
-        Form {
-            connectionSection
-            collectionSection
-            osquerySection
-            enabledModulesSection
-        }
-        .formStyle(.grouped)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                HStack(spacing: 12) {
-                    if let message = viewModel.saveMessage {
-                        Text(message)
-                            .font(.caption)
-                            .foregroundStyle(message.contains("success") ? .green : .red)
+        ScrollView {
+            VStack(spacing: 16) {
+                appInfoHeader
+
+                Divider()
+
+                // Two-column layout — boxes stack within each column
+                HStack(alignment: .top, spacing: 16) {
+                    // Left column: Connection + osquery
+                    VStack(spacing: 16) {
+                        connectionSection
+                        osquerySection
                     }
-                    Button("Save") {
-                        viewModel.save()
+                    .frame(maxWidth: .infinity)
+
+                    // Right column: Collection Schedules + Modules
+                    VStack(spacing: 16) {
+                        collectionSection
+                        modulesSection
                     }
-                    .disabled(!viewModel.hasChanges || viewModel.isSaving)
+                    .frame(maxWidth: .infinity)
                 }
+
+                HStack {
+                    saveStatusLabel
+                    Spacer()
+                }
+                .padding(.top, 4)
+            }
+            .padding()
+        }
+        .onAppear {
+            viewModel.configure(client: xpcClient)
+            viewModel.load()
+        }
+    }
+
+    // MARK: - App Info Header
+
+    @ViewBuilder
+    private var appInfoHeader: some View {
+        VStack(spacing: 8) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 72, height: 72)
+
+            Text("ReportMate")
+                .font(.largeTitle.bold())
+
+            Text("Device telemetry collection and reporting for macOS endpoints.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            HStack(spacing: 12) {
+                Text("v\(marketingVersion) (\(buildNumber))")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+
+                Link("Documentation", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/wiki")!)
+                    .font(.caption)
+                Link("Report Issue", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/issues")!)
+                    .font(.caption)
             }
         }
-        .overlay {
-            if viewModel.isSaving {
-                Color.black.opacity(0.1)
-                ProgressView("Saving…")
-                    .padding()
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-            }
+        .padding(.top, 8)
+    }
+
+    // MARK: - Auto-Save Status
+
+    @ViewBuilder
+    private var saveStatusLabel: some View {
+        switch viewModel.saveStatus {
+        case .idle:
+            EmptyView()
+        case .saving:
+            ProgressView()
+                .controlSize(.small)
+        case .saved:
+            Label("Saved", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .font(.callout)
+                .transition(.opacity)
+        case .failed(let msg):
+            Label(msg, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+                .font(.callout)
         }
     }
 
     // MARK: - Connection Section
 
+    @ViewBuilder
     private var connectionSection: some View {
-        Section("Connection") {
-            settingTextField("API URL", text: $viewModel.apiUrl, key: "ApiUrl",
-                             prompt: "https://reportmate.example.com")
-            settingTextField("Device ID", text: $viewModel.deviceId, key: "DeviceId",
-                             prompt: "Auto-detected if empty")
-            settingSecureField("Passphrase", text: $viewModel.passphrase, key: "Passphrase")
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                settingRow("ApiUrl", label: "API URL") {
+                    TextField("https://reportmate.example.com", text: $viewModel.apiUrl)
+                        .textFieldStyle(.roundedBorder)
+                }
 
-            HStack {
-                Toggle("Validate SSL", isOn: $viewModel.validateSSL)
-                    .disabled(viewModel.isManaged("ValidateSSL"))
-                managedBadge(for: "ValidateSSL")
+                settingRow("DeviceId", label: "Device ID") {
+                    TextField("Auto-detected if empty", text: $viewModel.deviceId)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                settingRow("Passphrase", label: "Passphrase") {
+                    SecureField("Client passphrase", text: $viewModel.passphrase)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                settingRow("ValidateSSL") {
+                    Toggle("Validate SSL Certificates", isOn: $viewModel.validateSSL)
+                }
             }
+            .padding(.vertical, 8)
+        } label: {
+            Label("Connection", systemImage: "network")
+                .font(.headline)
         }
     }
 
-    // MARK: - Collection Section
+    // MARK: - Collection Schedules Section
 
+    @ViewBuilder
     private var collectionSection: some View {
-        Section("Collection") {
-            settingTextField("Interval (seconds)", text: $viewModel.collectionInterval,
-                             key: "CollectionInterval", prompt: "3600")
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                scheduleRow(
+                    label: "Hourly",
+                    interval: "Every 60 min",
+                    modules: "security, network, management"
+                )
+                Divider()
+                scheduleRow(
+                    label: "Fourhourly",
+                    interval: "Every 4 hrs",
+                    modules: "applications, inventory, system, identity"
+                )
+                Divider()
+                scheduleRow(
+                    label: "Daily",
+                    interval: "9:00 AM",
+                    modules: "hardware, peripherals"
+                )
+                Divider()
+                scheduleRow(
+                    label: "Full",
+                    interval: "Every 12 hrs",
+                    modules: "All modules"
+                )
+                Divider()
 
-            HStack {
-                Picker("Log Level", selection: $viewModel.logLevel) {
-                    Text("debug").tag("debug")
-                    Text("info").tag("info")
-                    Text("warning").tag("warning")
-                    Text("error").tag("error")
+                settingRow("LogLevel", label: "Log Level") {
+                    Picker("", selection: $viewModel.logLevel) {
+                        Text("debug").tag("debug")
+                        Text("info").tag("info")
+                        Text("warning").tag("warning")
+                        Text("error").tag("error")
+                    }
+                    .labelsHidden()
+                    .frame(width: 120)
                 }
-                .disabled(viewModel.isManaged("LogLevel"))
-                managedBadge(for: "LogLevel")
-            }
 
-            HStack {
-                Picker("Storage Mode", selection: $viewModel.storageMode) {
-                    Text("auto").tag("auto")
-                    Text("quick").tag("quick")
-                    Text("deep").tag("deep")
+                settingRow("Timeout", label: "Timeout (seconds)") {
+                    HStack {
+                        TextField("300", text: $viewModel.timeout)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 80)
+                        Text("seconds")
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                .disabled(viewModel.isManaged("StorageMode"))
-                managedBadge(for: "StorageMode")
             }
+            .padding(.vertical, 8)
+        } label: {
+            Label("Collection Schedules", systemImage: "clock.arrow.2.circlepath")
+                .font(.headline)
+        }
+    }
 
-            settingTextField("Timeout (seconds)", text: $viewModel.timeout,
-                             key: "Timeout", prompt: "300")
+    @ViewBuilder
+    private func scheduleRow(label: String, interval: String, modules: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(label)
+                    .font(.callout.bold())
+                Spacer()
+                Text(interval)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(modules)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
         }
     }
 
     // MARK: - osquery Section
 
+    @ViewBuilder
     private var osquerySection: some View {
-        Section("osquery") {
-            settingTextField("osquery Path", text: $viewModel.osqueryPath,
-                             key: "OsqueryPath", prompt: "/usr/local/bin/osqueryi")
-            settingTextField("Extension Path", text: $viewModel.osqueryExtensionPath,
-                             key: "OsqueryExtensionPath",
-                             prompt: "/usr/local/reportmate/macadmins_extension.ext")
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                settingRow("OsqueryPath", label: "osquery Path") {
+                    TextField("/usr/local/bin/osqueryi", text: $viewModel.osqueryPath)
+                        .textFieldStyle(.roundedBorder)
+                }
 
-            HStack {
-                Toggle("Extension Enabled", isOn: $viewModel.extensionEnabled)
-                    .disabled(viewModel.isManaged("ExtensionEnabled"))
-                managedBadge(for: "ExtensionEnabled")
-            }
+                settingRow("OsqueryExtensionPath", label: "Extension Path") {
+                    TextField("/usr/local/reportmate/macadmins_extension.ext", text: $viewModel.osqueryExtensionPath)
+                        .textFieldStyle(.roundedBorder)
+                }
 
-            HStack {
-                Toggle("Use Alt System Info", isOn: $viewModel.useAltSystemInfo)
-                    .disabled(viewModel.isManaged("UseAltSystemInfo"))
-                managedBadge(for: "UseAltSystemInfo")
+                settingRow("ExtensionEnabled") {
+                    Toggle("Extension Enabled", isOn: $viewModel.extensionEnabled)
+                }
+
+                settingRow("UseAltSystemInfo") {
+                    Toggle("Use Alt System Info", isOn: $viewModel.useAltSystemInfo)
+                }
             }
+            .padding(.vertical, 8)
+        } label: {
+            Label("osquery", systemImage: "terminal")
+                .font(.headline)
         }
     }
 
-    // MARK: - Enabled Modules Section
+    // MARK: - Modules Section
 
-    private var enabledModulesSection: some View {
-        Section {
-            let isManaged = viewModel.isManaged("EnabledModules")
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150))], spacing: 8) {
+    @ViewBuilder
+    private var modulesSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                let managed = viewModel.isManaged("EnabledModules")
                 ForEach(ModuleDefinition.all) { module in
                     Toggle(isOn: moduleBinding(module.id)) {
                         Label(module.displayName, systemImage: module.systemImage)
                     }
                     .toggleStyle(.checkbox)
-                    .disabled(isManaged)
+                    .disabled(managed)
+                }
+
+                if managed {
+                    Label("Managed by MDM", systemImage: "lock.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                 }
             }
-            .padding(.vertical, 4)
-
-            if isManaged {
-                Label("Managed by configuration profile", systemImage: "lock.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-        } header: {
-            Text("Default Enabled Modules")
-        } footer: {
-            Text("Modules enabled for scheduled daemon runs. Manual runs from the Run tab can override these.")
+            .padding(.vertical, 8)
+        } label: {
+            Label("Default Enabled Modules", systemImage: "square.grid.2x2")
+                .font(.headline)
         }
     }
 
-    // MARK: - Helpers
-
-    private func settingTextField(
-        _ label: String, text: Binding<String>, key: String, prompt: String = ""
-    ) -> some View {
-        HStack {
-            TextField(label, text: text, prompt: Text(prompt))
-                .disabled(viewModel.isManaged(key))
-            managedBadge(for: key)
-        }
-    }
-
-    private func settingSecureField(
-        _ label: String, text: Binding<String>, key: String
-    ) -> some View {
-        HStack {
-            SecureField(label, text: text)
-                .disabled(viewModel.isManaged(key))
-            managedBadge(for: key)
-        }
-    }
+    // MARK: - Managed Setting Row
 
     @ViewBuilder
-    private func managedBadge(for key: String) -> some View {
-        if viewModel.isManaged(key) {
-            Label("MDM", systemImage: "lock.fill")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .help("Set by MDM configuration profile — cannot be changed here")
+    private func settingRow<Content: View>(
+        _ key: String,
+        label: String? = nil,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let managed = viewModel.isManaged(key)
+        VStack(alignment: .leading, spacing: 2) {
+            if let label {
+                Text(label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            content()
+                .disabled(managed)
+            if managed {
+                Label("Managed by MDM", systemImage: "lock.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

@@ -2,11 +2,18 @@ import SwiftUI
 
 @main
 struct ReportMateApp: App {
+    @State private var xpcClient = XPCClient()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environment(xpcClient)
+                .frame(minWidth: 700, minHeight: 500)
+                .onAppear {
+                    xpcClient.setup()
+                }
         }
-        .defaultSize(width: 900, height: 650)
+        .windowResizability(.contentSize)
+        .defaultSize(width: 850, height: 748)
     }
 }
