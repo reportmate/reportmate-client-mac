@@ -119,7 +119,12 @@ Sources/
 ├── Models/
 │   ├── DeviceModels.swift       # DeviceInfo, EventMetadata, UnifiedDevicePayload
 │   └── Modules/                 # Data models for each module type
-└── AppUsageWatcher/             # Separate executable for app usage tracking
+├── App/                         # SwiftUI GUI app (separate executable target)
+│   ├── ReportMateApp.swift      # @main App entry point
+│   ├── Models/                  # ModuleDefinition etc.
+│   ├── ViewModels/              # SettingsViewModel, RunnerViewModel
+│   └── Views/                   # ContentView, SettingsView, RunnerView
+└── Watcher/                     # Separate executable for app usage tracking
 ```
 
 ### Data Collection Flow
@@ -156,7 +161,9 @@ Available modules: `hardware`, `system`, `network`, `security`, `applications`, 
 
 - `build.sh` generates `AppVersion.swift` with the version at build time and restores placeholder on exit
 - Signing requires `.env` file with `SIGNING_IDENTITY_APP` and `SIGNING_IDENTITY_INSTALLER`
-- PKG installer creates an app bundle at `/usr/local/reportmate/ReportMate.app`
+- PKG installer creates an app bundle at `/Applications/Utilities/ReportMate.app`
+- CLI binary and GUI binary both live in `Contents/MacOS/`
+- A wrapper at `/usr/local/reportmate/managedreportsrunner` forwards to the app bundle CLI
 - LaunchDaemons are embedded in the app bundle and installed by postinstall script
 
 ## LaunchDaemons

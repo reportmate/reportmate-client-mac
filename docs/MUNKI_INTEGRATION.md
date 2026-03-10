@@ -247,7 +247,7 @@ head -5 /usr/local/munki/postflight
 **Fix:**
 ```bash
 # Reinstall ReportMate.pkg or manually copy wrapper
-sudo cp /usr/local/reportmate/ReportMate.app/Contents/Resources/munki/postflight-wrapper \
+sudo cp /Applications/Utilities/ReportMate.app/Contents/Resources/munki/postflight-wrapper \
         /usr/local/munki/postflight
 sudo chmod 755 /usr/local/munki/postflight
 sudo chown root:wheel /usr/local/munki/postflight
