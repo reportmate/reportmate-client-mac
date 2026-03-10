@@ -212,8 +212,7 @@ public class SystemInfoService {
         }
         
         // Check if configuration comes from Configuration Profiles
-        let profileDefaults = UserDefaults(suiteName: "com.github.reportmate")
-        if profileDefaults?.object(forKey: "ApiUrl") != nil {
+        if CFPreferencesCopyAppValue("ApiUrl" as CFString, "com.github.reportmate" as CFString) != nil {
             return "Configuration Profiles"
         }
         
