@@ -509,10 +509,14 @@ struct ReportMateClient: AsyncParsableCommand {
                 case .failure(let error):
                     print("[\(completionTimestamp)] ERROR Transmission failed: \(error.localizedDescription)")
                     logger.error("Transmission failed: \(error)")
+                    throw ExitCode.failure
                 }
+            } catch let exitCode as ExitCode {
+                throw exitCode
             } catch {
                 print("[\(completionTimestamp)] ERROR Transmission error: \(error.localizedDescription)")
                 logger.error("Transmission error: \(error)")
+                throw ExitCode.failure
             }
         }
     }
@@ -544,10 +548,14 @@ struct ReportMateClient: AsyncParsableCommand {
             case .failure(let error):
                 print("[\(timestamp)] ERROR Transmission failed: \(error.localizedDescription)")
                 logger.error("Transmission failed: \(error)")
+                throw ExitCode.failure
             }
+        } catch let exitCode as ExitCode {
+            throw exitCode
         } catch {
             print("[\(timestamp)] ERROR Transmission error: \(error.localizedDescription)")
             logger.error("Transmission error: \(error)")
+            throw ExitCode.failure
         }
     }
     
