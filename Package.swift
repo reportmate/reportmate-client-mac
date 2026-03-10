@@ -21,6 +21,14 @@ let package = Package(
             name: "ReportMateApp",
             targets: ["App"]
         ),
+        .executable(
+            name: "ReportMateHelper",
+            targets: ["Helper"]
+        ),
+        .library(
+            name: "ReportMateXPC",
+            targets: ["ReportMateXPC"]
+        ),
     ],
     dependencies: [
         // Swift Argument Parser for CLI
@@ -33,6 +41,11 @@ let package = Package(
         .package(url: "https://github.com/stephencelis/SQLite.swift.git", from: "0.15.4"),
     ],
     targets: [
+        .target(
+            name: "ReportMateXPC",
+            dependencies: [],
+            path: "Sources/ReportMateXPC"
+        ),
         .executableTarget(
             name: "ReportMate",
             dependencies: [
@@ -42,7 +55,7 @@ let package = Package(
                 .product(name: "SQLite", package: "SQLite.swift"),
             ],
             path: "Sources",
-            exclude: ["Watcher", "App"],
+            exclude: ["Watcher", "App", "ReportMateXPC", "Helper"],
             resources: [
                 .copy("Resources")
             ]
@@ -58,8 +71,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "App",
-            dependencies: [],
+            dependencies: ["ReportMateXPC"],
             path: "Sources/App"
+        ),
+        .executableTarget(
+            name: "Helper",
+            dependencies: ["ReportMateXPC"],
+            path: "Sources/Helper"
         ),
     ]
 )
