@@ -671,55 +671,104 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             FROM pending_apple_updates;
         """
         
-        // Fallback to bash softwareupdate command
+        // Fallback to bash: checks both standard pending updates and MDM-deferred updates
         let bashScript = """
-            # Get pending software updates (no-scan uses cached results)
+            current_version=$(sw_vers -productVersion)
+            items=""
+
+            # --- Part 1: Standard pending updates (non-deferred, from cached scan) ---
             updates_output=$(softwareupdate --list --no-scan 2>/dev/null)
-            
-            if echo "$updates_output" | grep -q "No new software available"; then
-                echo "[]"
-                exit 0
-            fi
-            
-            echo "["
-            first=true
-            current_name=""
-            current_version=""
-            current_size=""
-            current_recommended="false"
-            current_restart="false"
-            
-            echo "$updates_output" | while IFS= read -r line; do
-                # New update starts with *
-                if echo "$line" | grep -q "^\\s*\\*"; then
-                    # Output previous if exists
-                    if [ -n "$current_name" ]; then
-                        if [ "$first" = "false" ]; then echo ","; fi
-                        first=false
-                        echo "{\\"name\\": \\"$current_name\\", \\"version\\": \\"$current_version\\", \\"size\\": \\"$current_size\\", \\"recommended\\": $current_recommended, \\"restart_required\\": $current_restart}"
+            if ! echo "$updates_output" | grep -q "No new software available"; then
+                upd_name=""
+                upd_version=""
+                upd_recommended="false"
+                upd_restart="false"
+
+                while IFS= read -r line; do
+                    if echo "$line" | grep -q "^[[:space:]]*\\*"; then
+                        if [ -n "$upd_name" ]; then
+                            esc_name=$(printf '%s' "$upd_name" | sed 's/\\\\/\\\\\\\\/g;s/"/\\\\"/g')
+                            esc_ver=$(printf '%s' "$upd_version" | sed 's/\\\\/\\\\\\\\/g;s/"/\\\\"/g')
+                            item="{\\\"name\\\":\\\"$esc_name\\\",\\\"version\\\":\\\"$esc_ver\\\",\\\"recommended\\\":$upd_recommended,\\\"restartRequired\\\":$upd_restart,\\\"deferred\\\":false}"
+                            [ -n "$items" ] && items="$items,"
+                            items="$items$item"
+                        fi
+                        upd_name=$(echo "$line" | sed 's/^[[:space:]]*\\*[[:space:]]*//' | cut -d',' -f1)
+                        upd_version=""
+                        upd_recommended="false"
+                        upd_restart="false"
+                    elif echo "$line" | grep -qi "Version:"; then
+                        upd_version=$(echo "$line" | sed 's/.*Version:[[:space:]]*//' | tr -d '\\r')
+                    elif echo "$line" | grep -qi "Recommended:.*YES"; then
+                        upd_recommended="true"
+                    elif echo "$line" | grep -qi "Restart:.*YES"; then
+                        upd_restart="true"
                     fi
-                    current_name=$(echo "$line" | sed 's/^[[:space:]]*\\*[[:space:]]*//' | cut -d',' -f1)
-                    current_version=""
-                    current_size=""
-                    current_recommended="false"
-                    current_restart="false"
-                elif echo "$line" | grep -qi "Version:"; then
-                    current_version=$(echo "$line" | sed 's/.*Version:[[:space:]]*//')
-                elif echo "$line" | grep -qi "Size:"; then
-                    current_size=$(echo "$line" | sed 's/.*Size:[[:space:]]*//')
-                elif echo "$line" | grep -qi "Recommended:.*YES"; then
-                    current_recommended="true"
-                elif echo "$line" | grep -qi "Restart:.*YES"; then
-                    current_restart="true"
+                done <<< "$updates_output"
+
+                if [ -n "$upd_name" ]; then
+                    esc_name=$(printf '%s' "$upd_name" | sed 's/\\\\/\\\\\\\\/g;s/"/\\\\"/g')
+                    esc_ver=$(printf '%s' "$upd_version" | sed 's/\\\\/\\\\\\\\/g;s/"/\\\\"/g')
+                    item="{\\\"name\\\":\\\"$esc_name\\\",\\\"version\\\":\\\"$esc_ver\\\",\\\"recommended\\\":$upd_recommended,\\\"restartRequired\\\":$upd_restart,\\\"deferred\\\":false}"
+                    [ -n "$items" ] && items="$items,"
+                    items="$items$item"
                 fi
-            done
-            
-            # Output last item
-            if [ -n "$current_name" ]; then
-                if [ "$first" = "false" ]; then echo ","; fi
-                echo "{\\"name\\": \\"$current_name\\", \\"version\\": \\"$current_version\\", \\"size\\": \\"$current_size\\", \\"recommended\\": $current_recommended, \\"restart_required\\": $current_restart}"
             fi
-            echo "]"
+
+            # --- Part 2: MDM-deferred updates from SoftwareUpdate plist ---
+            # Running as root (LaunchDaemon), so direct read access is available
+            sw_plist="/Library/Preferences/com.apple.SoftwareUpdate.plist"
+            if [ -f "$sw_plist" ]; then
+                installed_builds=$(defaults read "$sw_plist" InstallDateDictionary 2>/dev/null | grep -oE '[0-9]{2}[A-Z][0-9]+' | sort)
+
+                # Read MDM deferral delay days from Restrictions profile
+                # forceDelayedSoftwareUpdates applies a default 30-day minor delay unless overridden
+                # enforcedSoftwareUpdateMajorOSDeferredInstallDelay / Minor apply specific delays
+                minor_delay=$(sudo /usr/bin/profiles show -output stdout-xml 2>/dev/null | python3 -c "import sys,plistlib; data=plistlib.loads(sys.stdin.buffer.read()); result=next((c.get('enforcedSoftwareUpdateMinorOSDeferredInstallDelay',c.get('enforcedSoftwareUpdateDelay',30)) for p in data.get('_computerlevel',[]) for item in p.get('ProfileItems',[]) for c in [item.get('PayloadContent',{})] if c.get('forceDelayedSoftwareUpdates') or 'enforcedSoftwareUpdateMinorOSDeferredInstallDelay' in c),0); print(result)" 2>/dev/null || echo 0)
+
+                major_delay=$(sudo /usr/bin/profiles show -output stdout-xml 2>/dev/null | python3 -c "import sys,plistlib; data=plistlib.loads(sys.stdin.buffer.read()); result=next((c['enforcedSoftwareUpdateMajorOSDeferredInstallDelay'] for p in data.get('_computerlevel',[]) for item in p.get('ProfileItems',[]) for c in [item.get('PayloadContent',{})] if 'enforcedSoftwareUpdateMajorOSDeferredInstallDelay' in c),0); print(result)" 2>/dev/null || echo 0)
+
+                # Read FirstOfferDateDictionary as "key = date" lines
+                offer_dates=$(defaults read "$sw_plist" FirstOfferDateDictionary 2>/dev/null)
+                offered_keys=$(echo "$offer_dates" | grep -oE 'MSU_UPDATE_[A-Z0-9]+_patch_[0-9.]+_(minor|major)')
+
+                while IFS= read -r key; do
+                    [ -z "$key" ] && continue
+                    build=$(echo "$key" | sed -E 's/MSU_UPDATE_([0-9A-Z]+)_.*/\\1/')
+                    version=$(echo "$key" | sed -E 's/MSU_UPDATE_[0-9A-Z]+_patch_([0-9.]+)_.*/\\1/')
+                    upd_type=$(echo "$key" | sed -E 's/.*_(minor|major)$/\\1/')
+
+                    # Skip if already installed
+                    if echo "$installed_builds" | grep -qx "$build"; then
+                        continue
+                    fi
+
+                    # Only include if version > current
+                    higher=$(printf '%s\\n%s' "$current_version" "$version" | sort -V | tail -1)
+                    [ "$higher" != "$version" ] || [ "$version" = "$current_version" ] && continue
+
+                    # Get first offer date for this key
+                    offer_date=$(echo "$offer_dates" | grep "$key" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4}')
+
+                    # Calculate deferred-until: firstOfferDate + delay_days
+                    deferred_until=""
+                    if [ -n "$offer_date" ]; then
+                        delay_days=$minor_delay
+                        [ "$upd_type" = "major" ] && delay_days=$major_delay
+                        if [ "$delay_days" -gt 0 ] 2>/dev/null; then
+                            deferred_until=$(python3 -c "from datetime import datetime,timedelta; d=datetime.strptime('$offer_date','%Y-%m-%d %H:%M:%S %z'); print((d+timedelta(days=int('$delay_days'))).strftime('%Y-%m-%dT%H:%M:%SZ'))" 2>/dev/null)
+                        fi
+                    fi
+
+                    esc_first=$(printf '%s' "$offer_date" | sed 's/\\\\/\\\\\\\\/g;s/"/\\\\"/g')
+                    esc_until=$(printf '%s' "$deferred_until" | sed 's/\\\\/\\\\\\\\/g;s/"/\\\\"/g')
+                    item="{\\\"name\\\":\\\"macOS $version\\\",\\\"version\\\":\\\"$version\\\",\\\"buildVersion\\\":\\\"$build\\\",\\\"deferred\\\":true,\\\"updateType\\\":\\\"$upd_type\\\",\\\"recommended\\\":true,\\\"firstOfferedAt\\\":\\\"$esc_first\\\",\\\"deferredUntil\\\":\\\"$esc_until\\\"}"
+                    [ -n "$items" ] && items="$items,"
+                    items="$items$item"
+                done <<< "$offered_keys"
+            fi
+
+            echo "[$items]"
         """
         
         let result = try await executeWithFallback(
@@ -730,24 +779,60 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         var updates: [[String: Any]] = []
         
         if let items = result["items"] as? [[String: Any]] {
-            // Normalize macadmins extension format
+            // Normalize: handles both osquery (display_name, is_recommended as "0"/"1") 
+            // and bash formats (name, recommended as Bool, deferred flag)
             updates = items.map { item in
                 var normalized: [String: Any] = [:]
                 
-                normalized["name"] = item["display_name"] as? String ?? item["product_key"] as? String ?? ""
+                // Name: osquery uses display_name, bash uses name directly
+                let name = item["display_name"] as? String
+                    ?? item["name"] as? String
+                    ?? item["product_key"] as? String
+                    ?? ""
+                normalized["name"] = name
                 normalized["productKey"] = item["product_key"] as? String ?? ""
                 normalized["version"] = item["version"] as? String ?? ""
-                normalized["installDate"] = item["install_date"] as? String ?? ""
+                normalized["installDate"] = item["install_date"] as? String ?? item["installDate"] as? String ?? ""
                 
-                // Parse boolean flags
-                let isRecommended = item["is_recommended"] as? String ?? "0"
-                normalized["recommended"] = (isRecommended == "1" || isRecommended == "true")
+                // Build version and deferred flag (from bash deferred update detection)
+                if let buildVersion = item["buildVersion"] as? String {
+                    normalized["buildVersion"] = buildVersion
+                }
+                normalized["deferred"] = item["deferred"] as? Bool ?? false
+                if let updateType = item["updateType"] as? String {
+                    normalized["updateType"] = updateType
+                }
+                if let firstOfferedAt = item["firstOfferedAt"] as? String, !firstOfferedAt.isEmpty {
+                    normalized["firstOfferedAt"] = firstOfferedAt
+                }
+                if let deferredUntil = item["deferredUntil"] as? String, !deferredUntil.isEmpty {
+                    normalized["deferredUntil"] = deferredUntil
+                }
                 
-                let isSecurity = item["is_security"] as? String ?? "0"
-                normalized["isSecurity"] = (isSecurity == "1" || isSecurity == "true")
+                // Boolean flags: osquery returns strings ("0"/"1"), bash returns JSON Bools
+                let isRecommended: Bool
+                if let strVal = item["is_recommended"] as? String {
+                    isRecommended = strVal == "1" || strVal == "true"
+                } else {
+                    isRecommended = item["recommended"] as? Bool ?? false
+                }
+                normalized["recommended"] = isRecommended
                 
-                let rebootRequired = item["reboot_required"] as? String ?? "0"
-                normalized["restartRequired"] = (rebootRequired == "1" || rebootRequired == "true")
+                let isSecurity: Bool
+                if let strVal = item["is_security"] as? String {
+                    isSecurity = strVal == "1" || strVal == "true"
+                } else {
+                    isSecurity = item["isSecurity"] as? Bool ?? false
+                }
+                normalized["isSecurity"] = isSecurity
+                
+                let rebootRequired: Bool
+                if let strVal = item["reboot_required"] as? String {
+                    rebootRequired = strVal == "1" || strVal == "true"
+                } else {
+                    rebootRequired = item["restartRequired"] as? Bool ?? false
+                }
+                normalized["restartRequired"] = rebootRequired
                 
                 return normalized
             }

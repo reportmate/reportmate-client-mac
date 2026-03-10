@@ -70,25 +70,34 @@ public class ConfigurationManager {
         
         // 1. Load defaults (already set in init)
         
-        // 2. Load user plist
+        // 2. Load user plist (~/<user>/Library/Managed Reports/reportmate.plist)
         if let userConfig = loadUserPlist() {
             config.merge(with: userConfig)
         }
         
-        // 3. Load system plist  
+        // 3. Load system plist (/Library/Managed Reports/reportmate.plist)
         if let systemConfig = loadSystemPlist() {
             config.merge(with: systemConfig)
         }
         
-        // 4. Load Configuration Profiles
+        // 4. Load global preferences plist (/Library/Preferences/com.github.reportmate.plist)
+        // Read directly as a file — UserDefaults(suiteName:) maps to the CURRENT USER's home
+        // domain (/var/root/Library/Preferences/ when running as root/daemon), not this global
+        // file. Direct file I/O is the correct approach for daemon-context admin tools.
+        if let globalConfig = loadGlobalPreferencesPlist() {
+            config.merge(with: globalConfig)
+        }
+        
+        // 5. Load MDM-managed Configuration Profiles (highest external authority)
+        // UserDefaults correctly surfaces managed preferences regardless of user context.
         if let profileConfig = loadConfigurationProfiles() {
             config.merge(with: profileConfig)
         }
         
-        // 5. Load environment variables
+        // 6. Load environment variables
         config.merge(with: loadEnvironmentVariables())
         
-        // 6. Apply runtime overrides
+        // 7. Apply runtime overrides
         config.merge(with: overrides)
         
         return config
@@ -105,32 +114,34 @@ public class ConfigurationManager {
         let systemConfigPath = URL(fileURLWithPath: "/Library/Managed Reports/reportmate.plist")
         return loadPlist(at: systemConfigPath)
     }
+
+    private static func loadGlobalPreferencesPlist() -> [String: Any]? {
+        // /Library/Preferences/com.github.reportmate.plist is written by the postinstall
+        // script and by `defaults write /Library/Preferences/com.github.reportmate ...`.
+        // It must be read as a raw file because UserDefaults(suiteName:) maps to the current
+        // user's HOME preferences domain — which is /var/root/Library/Preferences/ for root/
+        // daemon processes, not this global path.
+        let globalPrefsPath = URL(fileURLWithPath: "/Library/Preferences/com.github.reportmate.plist")
+        return loadPlist(at: globalPrefsPath)
+    }
     
     private static func loadConfigurationProfiles() -> [String: Any]? {
-        // Check for Configuration Profile managed preferences
-        let profileDefaults = UserDefaults(suiteName: "com.github.reportmate")
-        
-        guard let profileDefaults = profileDefaults else { return nil }
-        
+        // Use CFPreferencesCopyAppValue instead of UserDefaults(suiteName:).
+        // UserDefaults(suiteName: bundleID) triggers an OS warning ("does not make
+        // sense and will not work") when the suite name matches the process's own
+        // bundle identifier. CFPreferences reads the same MDM-managed preferences
+        // domain without that restriction.
+        let appID = "com.github.reportmate" as CFString
+
+        let keys = ["ApiUrl", "DeviceId", "Passphrase", "CollectionInterval", "LogLevel", "EnabledModules"]
         var config: [String: Any] = [:]
-        
-        // Map Configuration Profile keys to internal configuration
-        // Passphrase is for device-to-api authentication
-        let keyMappings: [String: String] = [
-            "ApiUrl": "ApiUrl",
-            "DeviceId": "DeviceId", 
-            "Passphrase": "Passphrase",
-            "CollectionInterval": "CollectionInterval",
-            "LogLevel": "LogLevel",
-            "EnabledModules": "EnabledModules"
-        ]
-        
-        for (profileKey, configKey) in keyMappings {
-            if let value = profileDefaults.object(forKey: profileKey) {
-                config[configKey] = value
+
+        for key in keys {
+            if let value = CFPreferencesCopyAppValue(key as CFString, appID) {
+                config[key] = value
             }
         }
-        
+
         return config.isEmpty ? nil : config
     }
     

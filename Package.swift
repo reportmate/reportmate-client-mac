@@ -15,7 +15,11 @@ let package = Package(
         ),
         .executable(
             name: "reportmate-appusage",
-            targets: ["AppUsageWatcher"]
+            targets: ["Watcher"]
+        ),
+        .executable(
+            name: "ReportMateApp",
+            targets: ["App"]
         ),
     ],
     dependencies: [
@@ -38,19 +42,24 @@ let package = Package(
                 .product(name: "SQLite", package: "SQLite.swift"),
             ],
             path: "Sources",
-            exclude: ["AppUsageWatcher"],
+            exclude: ["Watcher", "App"],
             resources: [
                 .copy("Resources")
             ]
         ),
         .executableTarget(
-            name: "AppUsageWatcher",
+            name: "Watcher",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "SQLite", package: "SQLite.swift"),
             ],
-            path: "Sources/AppUsageWatcher"
+            path: "Sources/Watcher"
+        ),
+        .executableTarget(
+            name: "App",
+            dependencies: [],
+            path: "Sources/App"
         ),
     ]
 )
