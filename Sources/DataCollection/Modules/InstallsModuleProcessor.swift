@@ -425,18 +425,22 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         }
         
         // Errors array — keep raw array AND joined string for API compatibility
+        // Strip "ERROR: " prefix from joined string so it matches per-item lastError values
         if let errors = report["Errors"] as? [String], !errors.isEmpty {
-            info["errors"] = errors.joined(separator: "; ")
-            info["errorsArray"] = errors
+            let stripped = errors.map { $0.hasPrefix("ERROR: ") ? String($0.dropFirst(7)) : $0 }
+            info["errors"] = stripped.joined(separator: "; ")
+            info["errorsArray"] = errors  // raw array retained for attachMessagesToItems (which strips prefix itself)
             info["success"] = "false"
         } else {
             info["success"] = "true"
         }
         
         // Warnings array — keep raw array AND joined string for API compatibility
+        // Strip "WARNING: " prefix from joined string so it matches per-item lastWarning values
         if let warnings = report["Warnings"] as? [String], !warnings.isEmpty {
-            info["warnings"] = warnings.joined(separator: "; ")
-            info["warningsArray"] = warnings
+            let stripped = warnings.map { $0.hasPrefix("WARNING: ") ? String($0.dropFirst(9)) : $0 }
+            info["warnings"] = stripped.joined(separator: "; ")
+            info["warningsArray"] = warnings  // raw array retained for attachMessagesToItems
         }
         
         // Problem installs — ProblemInstalls is [[String: Any]] (array of dicts), not [String]
