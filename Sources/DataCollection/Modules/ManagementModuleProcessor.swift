@@ -13,33 +13,37 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
     
     public override func collectData() async throws -> ModuleData {
         // Total collection steps for progress tracking
-        let totalSteps = 7
+        let totalSteps = 8
         
         // Collect management data sequentially with progress tracking
         ConsoleFormatter.writeQueryProgress(queryName: "mdm_status", current: 1, total: totalSteps)
         let mdm = try await collectMDMEnrollmentStatus()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "mdm_certificate", current: 2, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "mdm_info", current: 2, total: totalSteps)
+        let mdmInfo = try await collectMDMClientInfo()
+        
+        ConsoleFormatter.writeQueryProgress(queryName: "mdm_certificate", current: 3, total: totalSteps)
         let mdmCert = try await collectMDMCertificateDetails()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "ade_config", current: 3, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "ade_config", current: 4, total: totalSteps)
         let ade = try await collectADEConfiguration()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "device_ids", current: 4, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "device_ids", current: 5, total: totalSteps)
         let ids = try await collectDeviceIdentifiers()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "remote_mgmt", current: 5, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "remote_mgmt", current: 6, total: totalSteps)
         let remote = try await collectRemoteManagement()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "profiles", current: 6, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "profiles", current: 7, total: totalSteps)
         let profiles = try await collectInstalledProfiles()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "managed_policies", current: 7, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "managed_policies", current: 8, total: totalSteps)
         let policies = try await collectManagedPolicies()
 
         // Use snake_case for top-level keys to match osquery conventions
         let managementData: [String: Any] = [
             "mdm_enrollment": mdm,
+            "mdm_info": mdmInfo,
             "mdm_certificate": mdmCert,
             "ade_configuration": ade,
             "device_identifiers": ids,
@@ -49,6 +53,168 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         ]
 
         return BaseModuleData(moduleId: moduleId, data: managementData)
+    }
+    
+    // MARK: - MDM Client Info (mdmclient dumpManagementStatus)
+    // Reference: https://github.com/munkireport/mdm_status/tree/mr5-python3
+    // Provides: supervised, user enrollment, activation lock policy, org details, original OS version
+    
+    private func collectMDMClientInfo() async throws -> [String: Any] {
+        let bashScript = """
+            # Parse mdmclient dumpManagementStatus for detailed MDM info
+            # This provides fields not available from 'profiles status' or osquery
+            mdm_output=$(/usr/libexec/mdmclient dumpManagementStatus 2>/dev/null || echo "")
+            
+            if [ -z "$mdm_output" ]; then
+                echo "{}"
+                exit 0
+            fi
+            
+            # Initialize all fields
+            is_supervised=""
+            enrolled_in_dep=""
+            denies_activation_lock=""
+            activation_lock_manageable=""
+            is_user_approved=""
+            is_user_enrollment=""
+            managed_via_mdm=""
+            original_os_version=""
+            mdm_server_url_full=""
+            org_name=""
+            org_email=""
+            org_phone=""
+            org_address=""
+            org_city=""
+            org_country=""
+            org_zip_code=""
+            org_department=""
+            org_support_email=""
+            org_magic=""
+            
+            # Parse each line from mdmclient output
+            while IFS= read -r line; do
+                case "$line" in
+                    *"DeviceIsSupervised = "*)
+                        val=$(echo "$line" | sed 's/.*DeviceIsSupervised = //' | sed 's/[;"]//g' | xargs)
+                        [ "$val" = "1" ] || [ "$val" = "YES" ] || [ "$val" = "Yes" ] || [ "$val" = "yes" ] && is_supervised="true" || is_supervised="false"
+                        ;;
+                    *"EnrolledInDEP = "*)
+                        val=$(echo "$line" | sed 's/.*EnrolledInDEP = //' | sed 's/[;"]//g' | xargs)
+                        [ "$val" = "1" ] || [ "$val" = "YES" ] || [ "$val" = "Yes" ] || [ "$val" = "yes" ] && enrolled_in_dep="true" || enrolled_in_dep="false"
+                        ;;
+                    *"DeniesActivationLock = "*)
+                        val=$(echo "$line" | sed 's/.*DeniesActivationLock = //' | sed 's/[;"]//g' | xargs)
+                        [ "$val" = "1" ] || [ "$val" = "YES" ] || [ "$val" = "Yes" ] || [ "$val" = "yes" ] && denies_activation_lock="true" || denies_activation_lock="false"
+                        ;;
+                    *"IsActivationLockManageable = "*)
+                        val=$(echo "$line" | sed 's/.*IsActivationLockManageable = //' | sed 's/[;"]//g' | xargs)
+                        [ "$val" = "1" ] || [ "$val" = "YES" ] || [ "$val" = "Yes" ] || [ "$val" = "yes" ] && activation_lock_manageable="true" || activation_lock_manageable="false"
+                        ;;
+                    *"IsUserApproved = "*)
+                        val=$(echo "$line" | sed 's/.*IsUserApproved = //' | sed 's/[;"]//g' | xargs)
+                        [ "$val" = "1" ] || [ "$val" = "YES" ] || [ "$val" = "Yes" ] || [ "$val" = "yes" ] && is_user_approved="true" || is_user_approved="false"
+                        ;;
+                    *"IsUserEnrollment = "*)
+                        val=$(echo "$line" | sed 's/.*IsUserEnrollment = //' | sed 's/[;"]//g' | xargs)
+                        [ "$val" = "1" ] || [ "$val" = "YES" ] || [ "$val" = "Yes" ] || [ "$val" = "yes" ] && is_user_enrollment="true" || is_user_enrollment="false"
+                        ;;
+                    *"ManagedViaMDM = "*)
+                        val=$(echo "$line" | sed 's/.*ManagedViaMDM = //' | sed 's/[;"]//g' | xargs)
+                        [ "$val" = "1" ] || [ "$val" = "YES" ] || [ "$val" = "Yes" ] || [ "$val" = "yes" ] && managed_via_mdm="true" || managed_via_mdm="false"
+                        ;;
+                    *"OrigInstallOSVersion = "*)
+                        original_os_version=$(echo "$line" | sed 's/.*OrigInstallOSVersion = //' | sed 's/[;"]//g' | xargs)
+                        ;;
+                    *"ServerURL = "*)
+                        mdm_server_url_full=$(echo "$line" | sed 's/.*ServerURL = //' | sed 's/[;"]//g' | xargs)
+                        ;;
+                    *"OrganizationName = "*)
+                        org_name=$(echo "$line" | sed 's/.*OrganizationName = //' | sed 's/[;"]//g' | xargs)
+                        ;;
+                    *"OrganizationEmail = "*)
+                        org_email=$(echo "$line" | sed 's/.*OrganizationEmail = //' | sed 's/[;"]//g' | xargs)
+                        ;;
+                    *"OrganizationPhone = "*)
+                        org_phone=$(echo "$line" | sed 's/.*OrganizationPhone = //' | sed 's/[;"]//g' | xargs)
+                        ;;
+                    *"OrganizationAddressLine1 = "*)
+                        org_address=$(echo "$line" | sed 's/.*OrganizationAddressLine1 = //' | sed 's/[;"]//g' | xargs)
+                        ;;
+                    *"OrganizationCity = "*)
+                        org_city=$(echo "$line" | sed 's/.*OrganizationCity = //' | sed 's/[;"]//g' | xargs)
+                        ;;
+                    *"OrganizationCountry = "*)
+                        org_country=$(echo "$line" | sed 's/.*OrganizationCountry = //' | sed 's/[;"]//g' | xargs)
+                        ;;
+                    *"OrganizationZipCode = "*)
+                        org_zip_code=$(echo "$line" | sed 's/.*OrganizationZipCode = //' | sed 's/[;"]//g' | xargs)
+                        ;;
+                    *"OrganizationDepartment = "*)
+                        org_department=$(echo "$line" | sed 's/.*OrganizationDepartment = //' | sed 's/[;"]//g' | xargs)
+                        ;;
+                    *"OrganizationSupportEmail = "*)
+                        org_support_email=$(echo "$line" | sed 's/.*OrganizationSupportEmail = //' | sed 's/[;"]//g' | xargs)
+                        ;;
+                    *"OrganizationMagic = "*)
+                        org_magic=$(echo "$line" | sed 's/.*OrganizationMagic = //' | sed 's/[;"]//g' | xargs)
+                        ;;
+                esac
+            done <<< "$mdm_output"
+            
+            # Build JSON - use jq if available, otherwise manual construction
+            if command -v jq &>/dev/null; then
+                jq -n \\
+                    --arg is_supervised "$is_supervised" \\
+                    --arg enrolled_in_dep "$enrolled_in_dep" \\
+                    --arg denies_activation_lock "$denies_activation_lock" \\
+                    --arg activation_lock_manageable "$activation_lock_manageable" \\
+                    --arg is_user_approved "$is_user_approved" \\
+                    --arg is_user_enrollment "$is_user_enrollment" \\
+                    --arg managed_via_mdm "$managed_via_mdm" \\
+                    --arg original_os_version "$original_os_version" \\
+                    --arg mdm_server_url_full "$mdm_server_url_full" \\
+                    --arg org_name "$org_name" \\
+                    --arg org_email "$org_email" \\
+                    --arg org_phone "$org_phone" \\
+                    --arg org_address "$org_address" \\
+                    --arg org_city "$org_city" \\
+                    --arg org_country "$org_country" \\
+                    --arg org_zip_code "$org_zip_code" \\
+                    --arg org_department "$org_department" \\
+                    --arg org_support_email "$org_support_email" \\
+                    --arg org_magic "$org_magic" \\
+                    '{is_supervised: $is_supervised, enrolled_in_dep: $enrolled_in_dep, denies_activation_lock: $denies_activation_lock, activation_lock_manageable: $activation_lock_manageable, is_user_approved: $is_user_approved, is_user_enrollment: $is_user_enrollment, managed_via_mdm: $managed_via_mdm, original_os_version: $original_os_version, mdm_server_url_full: $mdm_server_url_full, org_name: $org_name, org_email: $org_email, org_phone: $org_phone, org_address: $org_address, org_city: $org_city, org_country: $org_country, org_zip_code: $org_zip_code, org_department: $org_department, org_support_email: $org_support_email, org_magic: $org_magic}'
+            else
+                # Escape any double quotes in values for safe JSON
+                esc() { echo "$1" | sed 's/\\"/\\\\\\"/g'; }
+                echo "{"
+                echo "  \\"is_supervised\\": \\"$(esc "$is_supervised")\\","
+                echo "  \\"enrolled_in_dep\\": \\"$(esc "$enrolled_in_dep")\\","
+                echo "  \\"denies_activation_lock\\": \\"$(esc "$denies_activation_lock")\\","
+                echo "  \\"activation_lock_manageable\\": \\"$(esc "$activation_lock_manageable")\\","
+                echo "  \\"is_user_approved\\": \\"$(esc "$is_user_approved")\\","
+                echo "  \\"is_user_enrollment\\": \\"$(esc "$is_user_enrollment")\\","
+                echo "  \\"managed_via_mdm\\": \\"$(esc "$managed_via_mdm")\\","
+                echo "  \\"original_os_version\\": \\"$(esc "$original_os_version")\\","
+                echo "  \\"mdm_server_url_full\\": \\"$(esc "$mdm_server_url_full")\\","
+                echo "  \\"org_name\\": \\"$(esc "$org_name")\\","
+                echo "  \\"org_email\\": \\"$(esc "$org_email")\\","
+                echo "  \\"org_phone\\": \\"$(esc "$org_phone")\\","
+                echo "  \\"org_address\\": \\"$(esc "$org_address")\\","
+                echo "  \\"org_city\\": \\"$(esc "$org_city")\\","
+                echo "  \\"org_country\\": \\"$(esc "$org_country")\\","
+                echo "  \\"org_zip_code\\": \\"$(esc "$org_zip_code")\\","
+                echo "  \\"org_department\\": \\"$(esc "$org_department")\\","
+                echo "  \\"org_support_email\\": \\"$(esc "$org_support_email")\\","
+                echo "  \\"org_magic\\": \\"$(esc "$org_magic")\\""
+                echo "}"
+            fi
+        """
+        
+        return try await executeWithFallback(
+            osquery: nil,
+            bash: bashScript
+        )
     }
     
     // MARK: - MDM Enrollment Status (osquery: mdm table via macadmins extension + bash fallback)
