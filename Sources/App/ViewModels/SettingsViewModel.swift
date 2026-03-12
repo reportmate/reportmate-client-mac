@@ -71,7 +71,7 @@ final class SettingsViewModel {
     private(set) var managedKeys: Set<String> = []
 
     private static let preferencesDomain = "com.github.reportmate"
-    private static let systemPlistPath = "/Library/Preferences/com.github.reportmate.plist"
+    private static let globalPrefsPath = "/Library/Preferences/com.github.reportmate.plist"
 
     func isManaged(_ key: String) -> Bool {
         managedKeys.contains(key)
@@ -85,8 +85,11 @@ final class SettingsViewModel {
 
         detectManagedKeys()
 
+        // Read global preferences plist — written by Munki preinstall and XPC helper GUI writes.
+        // Use direct file I/O: PlistBuddy (used by preinstall) writes directly without cfprefsd,
+        // and we need to see the same values regardless of user context / daemon context.
         var dict: [String: Any] = [:]
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: Self.systemPlistPath)),
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: Self.globalPrefsPath)),
            let parsed = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
             dict = parsed
         }
