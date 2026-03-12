@@ -365,12 +365,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                         
                         // Display type (Retina LCD, etc.) - snake_case
                         if let displayType = display["spdisplays_display_type"] as? String {
-                            // Clean up "spdisplays_retinaLCD" -> "Retina LCD"
-                            var cleanType = displayType.replacingOccurrences(of: "spdisplays_", with: "")
-                            // Add space before LCD
-                            cleanType = cleanType.replacingOccurrences(of: "retinaLCD", with: "Retina LCD")
-                            cleanType = cleanType.replacingOccurrences(of: "retina", with: "Retina")
-                            displayInfo["display_type"] = cleanType
+                            displayInfo["display_type"] = cleanDisplayType(displayType)
                         }
                         
                         // Resolution - use pixel resolution for display (e.g., "5120 x 2880")
@@ -407,10 +402,24 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                             displayInfo["connection_type"] = connType.replacingOccurrences(of: "spdisplays_", with: "")
                         }
                         
-                        // Display type (internal/external) - detect based on name and connection
-                        // "Built-in" = internal, "Color LCD" on laptops = internal, others = external
+                        // Vendor/product/manufacture info for external displays
+                        if let vendorId = display["_spdisplays_display-vendor-id"] as? String, !vendorId.isEmpty {
+                            displayInfo["vendor_id"] = vendorId
+                        }
+                        if let productId = display["_spdisplays_display-product-id"] as? String, !productId.isEmpty {
+                            displayInfo["product_id"] = productId
+                        }
+                        if let mfgYear = display["_spdisplays_display-year"] as? String, !mfgYear.isEmpty {
+                            displayInfo["manufacture_year"] = Int(mfgYear) ?? mfgYear
+                        }
+                        if let mfgWeek = display["_spdisplays_display-week"] as? String, !mfgWeek.isEmpty {
+                            displayInfo["manufacture_week"] = Int(mfgWeek) ?? mfgWeek
+                        }
+                        
+                        // Display type (internal/external) - detect based on name, display_type, and connection
                         let displayName = displayInfo["name"] as? String ?? ""
-                        if displayName.contains("Built-in") || displayName == "Color LCD" {
+                        let rawDisplayType = display["spdisplays_display_type"] as? String ?? ""
+                        if displayName.contains("Built-in") || displayName == "Color LCD" || rawDisplayType.contains("built-in") {
                             displayInfo["type"] = "internal"
                         } else {
                             displayInfo["type"] = "external"
@@ -421,24 +430,54 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 }
             }
             
-            // Fallback: If no displays found OR display has generic/unhelpful name, use model-based lookup
-            // This handles Apple Silicon iMacs and some laptops where system_profiler doesn't enumerate properly
-            let needsModelLookup = displaysArray.isEmpty || 
-                                   (displaysArray.count == 1 && 
-                                    (displaysArray[0]["name"] as? String == "iMac" || 
-                                     displaysArray[0]["name"] as? String == "MacBook Pro" ||
-                                     displaysArray[0]["name"] as? String == "MacBook Air"))
+            // Enrich built-in "Color LCD" displays with proper model-based data
+            // system_profiler reports built-in laptop displays as "Color LCD" with no useful name
+            for i in 0..<displaysArray.count {
+                let name = displaysArray[i]["name"] as? String ?? ""
+                let type = displaysArray[i]["type"] as? String ?? ""
+                if type == "internal" && (name == "Color LCD" || name == "iMac" || name == "MacBook Pro" || name == "MacBook Air") {
+                    if let builtIn = getBuiltInDisplayInfo(from: modelId) {
+                        // Merge model lookup data but preserve live data (resolution, online, is_main_display)
+                        let liveResolution = displaysArray[i]["resolution"] as? String
+                        let liveIsMain = displaysArray[i]["is_main_display"]
+                        let liveOnline = displaysArray[i]["online"]
+                        let liveScaledRes = displaysArray[i]["scaled_resolution"]
+                        let liveMirror = displaysArray[i]["mirror"]
+                        let liveAmbient = displaysArray[i]["ambient_brightness_enabled"]
+                        
+                        // Apply model lookup data
+                        for (key, value) in builtIn {
+                            displaysArray[i][key] = value
+                        }
+                        
+                        // Restore live data (overrides model lookup)
+                        if let res = liveResolution, res != "Unknown" { displaysArray[i]["resolution"] = res }
+                        if let main = liveIsMain { displaysArray[i]["is_main_display"] = main }
+                        if let online = liveOnline { displaysArray[i]["online"] = online }
+                        if let scaled = liveScaledRes { displaysArray[i]["scaled_resolution"] = scaled }
+                        if let mirror = liveMirror { displaysArray[i]["mirror"] = mirror }
+                        if let ambient = liveAmbient { displaysArray[i]["ambient_brightness_enabled"] = ambient }
+                        displaysArray[i]["data_source"] = "model_lookup"
+                        print("[\(timestamp())] Enriched built-in display '\(name)' with model data for \(modelId)")
+                    }
+                }
+            }
             
-            if needsModelLookup {
+            // Fallback: If no displays found at all, use model-based lookup
+            // This handles Apple Silicon iMacs and some machines where system_profiler doesn't enumerate displays
+            if displaysArray.isEmpty {
                 if var builtInDisplay = getBuiltInDisplayInfo(from: modelId) {
-                    // Add is_main_display flag for built-in displays
                     builtInDisplay["is_main_display"] = true
                     builtInDisplay["online"] = true
-                    builtInDisplay["data_source"] = "model_lookup"  // Indicate this came from our database
-                    displaysArray = [builtInDisplay]  // Replace generic data with accurate model data
+                    builtInDisplay["data_source"] = "model_lookup"
+                    displaysArray = [builtInDisplay]
                     print("[\(timestamp())] Using model-based display info for \(modelId)")
                 }
             }
+            
+            // Enrich external displays with EDID data (serial numbers, manufacturer)
+            // Non-Apple displays often lack serial numbers in system_profiler but have them in EDID
+            await enrichDisplaysWithEDID(&displaysArray)
             
             // For laptops (MacBook Air/Pro): ALWAYS add built-in display even if lid is closed
             // This ensures we show the built-in display specs even when using external displays only
@@ -2730,6 +2769,118 @@ private func collectBatteryInfo() async throws -> [String: Any] {
         device["storageAnalysisEnabled"] = true
         device["lastAnalyzed"] = ISO8601DateFormatter().string(from: Date())
         device["rootDirectories"] = directoryAnalysis
+    }
+    
+    // MARK: - EDID Display Enrichment
+    
+    /// Enrich external displays with data from EDID (serial numbers, manufacturer name)
+    /// Non-Apple displays often lack spdisplays_display-serial-number in system_profiler
+    /// but have serial numbers embedded in EDID descriptor blocks
+    private func enrichDisplaysWithEDID(_ displays: inout [[String: Any]]) async {
+        // Only enrich external displays that are missing serial numbers
+        let needsEnrichment = displays.contains { display in
+            let type = display["type"] as? String ?? ""
+            let hasSerial = display["serial_number"] as? String != nil
+            return type == "external" && !hasSerial
+        }
+        
+        guard needsEnrichment else { return }
+        
+        // Extract EDID data from ioreg for all connected displays
+        // ioreg DisplayAttributes contains AlphanumericSerialNumber for most displays
+        let edidScript = """
+            ioreg -l -w0 2>/dev/null | grep 'DisplayAttributes.*ProductAttributes' | while IFS= read -r line; do
+                # Extract ProductName from ProductAttributes
+                pname=$(echo "$line" | sed -n 's/.*"ProductName"="\\([^"]*\\)".*/\\1/p')
+                
+                # Extract AlphanumericSerialNumber (the human-readable serial)
+                serial=$(echo "$line" | sed -n 's/.*"AlphanumericSerialNumber"="\\([^"]*\\)".*/\\1/p')
+                
+                # Extract ManufacturerID
+                mfr=$(echo "$line" | sed -n 's/.*"ManufacturerID"="\\([^"]*\\)".*/\\1/p')
+                
+                if [ -n "$pname" ]; then
+                    printf '%s|%s|%s\\n' "$pname" "$serial" "$mfr"
+                fi
+            done
+        """
+        
+        do {
+            let output = try await BashService.execute(edidScript).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !output.isEmpty else { return }
+            
+            // Parse EDID results into lookup by product name
+            var edidLookup: [String: (serial: String, manufacturer: String)] = [:]
+            for line in output.split(separator: "\n") {
+                let parts = line.split(separator: "|", maxSplits: 3).map(String.init)
+                guard parts.count >= 3 else { continue }
+                let productName = parts[0].trimmingCharacters(in: .whitespaces)
+                let serial = parts[1].trimmingCharacters(in: .whitespaces)
+                let manufacturer = parts[2].trimmingCharacters(in: .whitespaces)
+                if !productName.isEmpty && !serial.isEmpty {
+                    edidLookup[productName] = (serial: serial, manufacturer: manufacturer)
+                }
+            }
+            
+            // Match EDID data to displays
+            for i in 0..<displays.count {
+                let type = displays[i]["type"] as? String ?? ""
+                let hasSerial = displays[i]["serial_number"] as? String != nil
+                guard type == "external" && !hasSerial else { continue }
+                
+                let displayName = displays[i]["name"] as? String ?? ""
+                // Try exact name match (system_profiler _name often matches EDID ProductName)
+                if let edid = edidLookup[displayName] {
+                    displays[i]["serial_number"] = edid.serial
+                    if !edid.manufacturer.isEmpty {
+                        displays[i]["manufacturer"] = edid.manufacturer
+                    }
+                    print("[\(timestamp())] Enriched '\(displayName)' with EDID serial: \(edid.serial), manufacturer: \(edid.manufacturer)")
+                } else {
+                    // Try fuzzy match - display name might have spaces where EDID doesn't
+                    let normalizedName = displayName.replacingOccurrences(of: " ", with: "")
+                    for (edidName, edid) in edidLookup {
+                        if edidName.replacingOccurrences(of: " ", with: "") == normalizedName {
+                            displays[i]["serial_number"] = edid.serial
+                            if !edid.manufacturer.isEmpty {
+                                displays[i]["manufacturer"] = edid.manufacturer
+                            }
+                            print("[\(timestamp())] Enriched '\(displayName)' with EDID serial: \(edid.serial) (fuzzy match)")
+                            break
+                        }
+                    }
+                }
+            }
+        } catch {
+            print("[\(timestamp())] EDID enrichment failed: \(error)")
+        }
+    }
+    
+    /// Clean system_profiler display type strings to human-readable format
+    /// Examples:
+    ///   "spdisplays_retinaLCD" → "Retina LCD"
+    ///   "spdisplays_built-in-liquid-retina-xdr" → "Built-in Liquid Retina XDR"
+    ///   "spdisplays_retina" → "Retina"
+    private func cleanDisplayType(_ raw: String) -> String {
+        // Remove the spdisplays_ prefix
+        let clean = raw.replacingOccurrences(of: "spdisplays_", with: "")
+        
+        // Handle specific known patterns first
+        if clean == "retinaLCD" { return "Retina LCD" }
+        if clean == "retina" { return "Retina" }
+        
+        // Handle hyphenated types like "built-in-liquid-retina-xdr"
+        // Split on hyphens, capitalize each word, handle known acronyms
+        let acronyms: Set<String> = ["xdr", "lcd", "oled", "hdr", "led"]
+        let words = clean.split(separator: "-").map { word -> String in
+            let lower = word.lowercased()
+            if acronyms.contains(lower) {
+                return lower.uppercased()
+            }
+            return lower.capitalized
+        }
+        
+        return words.joined(separator: " ")
     }
     
     /// Parse display firmware version from "Version X.Y (Build ZZ...)" to "X.Y.ZZ"
