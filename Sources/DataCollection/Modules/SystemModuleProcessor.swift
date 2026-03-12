@@ -693,7 +693,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                             [ -n "$items" ] && items="$items,"
                             items="$items$item"
                         fi
-                        upd_name=$(echo "$line" | sed 's/^[[:space:]]*\\*[[:space:]]*//' | cut -d',' -f1)
+                        upd_name=$(echo "$line" | sed 's/^[[:space:]]*\\*[[:space:]]*//' | sed 's/^Label:[[:space:]]*//' | cut -d',' -f1)
                         upd_version=""
                         upd_recommended="false"
                         upd_restart="false"
@@ -754,8 +754,10 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     offer_date=$(echo "$offer_dates" | grep "$key" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4}')
 
                     # Calculate deferred-until: firstOfferDate + delay_days
+                    offer_date_iso=""
                     deferred_until=""
                     if [ -n "$offer_date" ]; then
+                        offer_date_iso=$(python3 -c "from datetime import datetime; d=datetime.strptime('$offer_date','%Y-%m-%d %H:%M:%S %z'); print(d.strftime('%Y-%m-%dT%H:%M:%SZ'))" 2>/dev/null)
                         delay_days=$minor_delay
                         [ "$upd_type" = "major" ] && delay_days=$major_delay
                         if [ "$delay_days" -gt 0 ] 2>/dev/null; then
@@ -763,7 +765,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                         fi
                     fi
 
-                    esc_first=$(printf '%s' "$offer_date" | sed 's/\\\\/\\\\\\\\/g;s/"/\\\\"/g')
+                    esc_first=$(printf '%s' "$offer_date_iso" | sed 's/\\\\/\\\\\\\\/g;s/"/\\\\"/g')
                     esc_until=$(printf '%s' "$deferred_until" | sed 's/\\\\/\\\\\\\\/g;s/"/\\\\"/g')
                     item="{\\\"name\\\":\\\"macOS $version\\\",\\\"version\\\":\\\"$version\\\",\\\"buildVersion\\\":\\\"$build\\\",\\\"deferred\\\":true,\\\"updateType\\\":\\\"$upd_type\\\",\\\"recommended\\\":true,\\\"firstOfferedAt\\\":\\\"$esc_first\\\",\\\"deferredUntil\\\":\\\"$esc_until\\\"}"
                     [ -n "$items" ] && items="$items,"
