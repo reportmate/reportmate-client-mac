@@ -199,9 +199,8 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             // Get friendly model name (e.g., "Mac mini" or "Mac mini (2024)")
             let modelName = systemDict["model_name"] as? String ?? ""
             
-            // Check if model_name already includes a year (e.g., "Mac mini (2024)" or "iMac (24-inch, M1, 2021)")
-            // Match any 4-digit year in parentheses
-            let yearPattern = "\\((?:[^)]*,\\s*)?\\d{4}\\)"
+            // Check if model_name already includes a year (any 20xx year anywhere in the string)
+            let yearPattern = "\\b20\\d{2}\\b"
             let hasYearPattern = modelName.range(of: yearPattern, options: .regularExpression) != nil
             
             // Set model
