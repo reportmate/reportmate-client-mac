@@ -18,8 +18,12 @@ final class XPCClient: NSObject {
     var lastExitCode: Int32?
     var helperStatus: HelperStatus = .unknown
     var connectionError: String?
+    private(set) var helperAvailable = false
 
     private var connection: NSXPCConnection?
+    private var directProcess: Process?
+    private var connectionRetryCount = 0
+    private static let maxRetries = 2
 
     struct OutputLine: Identifiable {
         let id = UUID()
@@ -50,9 +54,7 @@ final class XPCClient: NSObject {
         if helperStatus == .notRegistered || helperStatus == .unknown {
             registerHelper()
         }
-        if helperStatus == .registered {
-            connect()
-        }
+        connect()
     }
 
     // MARK: - Connection Management
@@ -72,11 +74,15 @@ final class XPCClient: NSObject {
         connection = conn
         connectionError = nil
 
+        // Verify the connection is alive with a version handshake
         helperProxy { proxy in
-            proxy.getHelperVersion { [weak self] _ in
+            proxy.getHelperVersion { [weak self] version in
                 Task { @MainActor [weak self] in
-                    self?.helperStatus = .registered
-                    self?.connectionError = nil
+                    guard let self else { return }
+                    self.helperStatus = .registered
+                    self.helperAvailable = true
+                    self.connectionError = nil
+                    self.connectionRetryCount = 0
                 }
             }
         }
@@ -94,9 +100,16 @@ final class XPCClient: NSObject {
         do {
             try service.register()
             helperStatus = .registered
-        } catch {
-            helperStatus = .requiresApproval
-            connectionError = "Helper registration failed: \(error.localizedDescription)"
+            connectionError = nil
+        } catch let error as NSError {
+            switch service.status {
+            case .requiresApproval:
+                helperStatus = .requiresApproval
+                connectionError = "Helper requires approval in System Settings > Login Items"
+            default:
+                helperStatus = .notRegistered
+                connectionError = "Helper registration failed (\(error.code)): \(error.localizedDescription)"
+            }
         }
     }
 
@@ -124,41 +137,32 @@ final class XPCClient: NSObject {
         outputLines.removeAll()
         connectionError = nil
 
-        // Ensure helper is registered and connected
-        if helperStatus != .registered {
-            checkHelperStatus()
-            if helperStatus == .notRegistered || helperStatus == .unknown {
-                registerHelper()
-            }
-        }
-
-        if helperStatus != .registered {
-            isRunning = false
-            connectionError = "Helper is not registered. Install via the pkg installer."
-            outputLines.append(OutputLine(text: "[ERROR] Helper daemon is not available. Install ReportMate via the pkg installer.", level: .error))
-            return
-        }
-
-        var arguments = ["-vv"]
+        var arguments = ["-vvv"]
         if !modules.isEmpty {
             arguments.append(contentsOf: ["--run-modules", modules.joined(separator: ",")])
         }
 
-        connect()
-
-        guard connection != nil else {
-            isRunning = false
-            connectionError = "Failed to connect to helper daemon"
-            outputLines.append(OutputLine(text: "[ERROR] Cannot connect to helper daemon.", level: .error))
+        // Try XPC helper if available
+        if helperAvailable, connection != nil {
+            helperProxy { proxy in
+                proxy.runCollection(arguments: arguments)
+            }
             return
         }
 
-        helperProxy { proxy in
-            proxy.runCollection(arguments: arguments)
-        }
+        // Fallback: run CLI directly as current user
+        runCollectionDirect(arguments: arguments)
     }
 
     func stopCollection() {
+        if let proc = directProcess, proc.isRunning {
+            proc.terminate()
+            directProcess = nil
+            isRunning = false
+            outputLines.append(OutputLine(text: "[WARNING] Collection stopped by user.", level: .warning))
+            return
+        }
+
         helperProxy { proxy in
             proxy.stopCollection()
         }
@@ -167,41 +171,151 @@ final class XPCClient: NSObject {
         outputLines.append(OutputLine(text: "[WARNING] Collection stopped by user.", level: .warning))
     }
 
+    // MARK: - Direct Execution (fallback when helper unavailable)
+
+    private func runCollectionDirect(arguments: [String]) {
+        let cliPath = kReportMateCLIPath
+        guard FileManager.default.isExecutableFile(atPath: cliPath) else {
+            outputLines.append(OutputLine(text: "[ERROR] CLI binary not found at \(cliPath)", level: .error))
+            isRunning = false
+            return
+        }
+
+        outputLines.append(OutputLine(text: "[INFO] Running collection directly (helper unavailable)", level: .info))
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: cliPath)
+        task.arguments = arguments
+
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+
+        directProcess = task
+
+        let handle = pipe.fileHandleForReading
+        handle.readabilityHandler = { [weak self] fileHandle in
+            let data = fileHandle.availableData
+            guard !data.isEmpty else {
+                fileHandle.readabilityHandler = nil
+                return
+            }
+            if let text = String(data: data, encoding: .utf8) {
+                for line in text.components(separatedBy: .newlines) where !line.isEmpty {
+                    let level = Self.parseLogLevel(line)
+                    Task { @MainActor [weak self] in
+                        self?.outputLines.append(OutputLine(text: line, level: level))
+                    }
+                }
+            }
+        }
+
+        task.terminationHandler = { [weak self] proc in
+            handle.readabilityHandler = nil
+            let remaining = handle.readDataToEndOfFile()
+            if !remaining.isEmpty, let text = String(data: remaining, encoding: .utf8) {
+                for line in text.components(separatedBy: .newlines) where !line.isEmpty {
+                    let level = Self.parseLogLevel(line)
+                    Task { @MainActor [weak self] in
+                        self?.outputLines.append(OutputLine(text: line, level: level))
+                    }
+                }
+            }
+            let exitCode = proc.terminationStatus
+            Task { @MainActor [weak self] in
+                self?.isRunning = false
+                self?.lastExitCode = exitCode
+                self?.directProcess = nil
+            }
+        }
+
+        do {
+            try task.run()
+        } catch {
+            outputLines.append(OutputLine(text: "[ERROR] Failed to launch CLI: \(error.localizedDescription)", level: .error))
+            isRunning = false
+            directProcess = nil
+        }
+    }
+
     // MARK: - Preference Management
 
     func setStringPreference(key: String, value: String) {
-        connect()
-        helperProxy { proxy in
-            proxy.setPreference(key: key, stringValue: value, domain: kReportMatePreferenceDomain) { _ in }
+        if helperAvailable {
+            connect()
+            helperProxy { proxy in
+                proxy.setPreference(key: key, stringValue: value, domain: kReportMatePreferenceDomain) { _ in }
+            }
+        } else {
+            writePreferenceDirect(key: key, value: value)
         }
     }
 
     func setBoolPreference(key: String, value: Bool) {
-        connect()
-        helperProxy { proxy in
-            proxy.setBoolPreference(key: key, boolValue: value, domain: kReportMatePreferenceDomain) { _ in }
+        if helperAvailable {
+            connect()
+            helperProxy { proxy in
+                proxy.setBoolPreference(key: key, boolValue: value, domain: kReportMatePreferenceDomain) { _ in }
+            }
+        } else {
+            writePreferenceDirect(key: key, value: value ? "true" : "false", type: "-bool")
         }
     }
 
     func setIntPreference(key: String, value: Int) {
-        connect()
-        helperProxy { proxy in
-            proxy.setIntPreference(key: key, intValue: value, domain: kReportMatePreferenceDomain) { _ in }
+        if helperAvailable {
+            connect()
+            helperProxy { proxy in
+                proxy.setIntPreference(key: key, intValue: value, domain: kReportMatePreferenceDomain) { _ in }
+            }
+        } else {
+            writePreferenceDirect(key: key, value: String(value), type: "-int")
         }
     }
 
     func setArrayPreference(key: String, value: [String]) {
-        connect()
-        helperProxy { proxy in
-            proxy.setArrayPreference(key: key, arrayValue: value, domain: kReportMatePreferenceDomain) { _ in }
+        if helperAvailable {
+            connect()
+            helperProxy { proxy in
+                proxy.setArrayPreference(key: key, arrayValue: value, domain: kReportMatePreferenceDomain) { _ in }
+            }
+        } else {
+            writeArrayPreferenceDirect(key: key, value: value)
         }
     }
 
     func removePreference(key: String) {
-        connect()
-        helperProxy { proxy in
-            proxy.removePreference(key: key, domain: kReportMatePreferenceDomain) { _ in }
+        if helperAvailable {
+            connect()
+            helperProxy { proxy in
+                proxy.removePreference(key: key, domain: kReportMatePreferenceDomain) { _ in }
+            }
+        } else {
+            deletePreferenceDirect(key: key)
         }
+    }
+
+    // MARK: - Direct Preference Writes (user-level fallback)
+
+    private func writePreferenceDirect(key: String, value: String, type: String = "-string") {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        task.arguments = ["write", kReportMatePreferenceDomain, key, type, value]
+        try? task.run()
+    }
+
+    private func writeArrayPreferenceDirect(key: String, value: [String]) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        task.arguments = ["write", kReportMatePreferenceDomain, key, "-array"] + value
+        try? task.run()
+    }
+
+    private func deletePreferenceDirect(key: String) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        task.arguments = ["delete", kReportMatePreferenceDomain, key]
+        try? task.run()
     }
 
     // MARK: - Private
@@ -209,8 +323,16 @@ final class XPCClient: NSObject {
     private nonisolated func makeInvalidationHandler() -> @Sendable () -> Void {
         { [weak self] in
             Task { @MainActor [weak self] in
-                self?.connection = nil
-                self?.connectionError = "Connection to helper was invalidated"
+                guard let self else { return }
+                self.connection = nil
+                self.helperAvailable = false
+                if self.connectionRetryCount < Self.maxRetries {
+                    self.connectionRetryCount += 1
+                    try? await Task.sleep(for: .seconds(1))
+                    self.connect()
+                } else {
+                    self.connectionError = "Helper unavailable. Collection will run directly."
+                }
             }
         }
     }
@@ -218,6 +340,7 @@ final class XPCClient: NSObject {
     private nonisolated func makeInterruptionHandler() -> @Sendable () -> Void {
         { [weak self] in
             Task { @MainActor [weak self] in
+                self?.helperAvailable = false
                 self?.connectionError = "Connection to helper was interrupted"
                 self?.isRunning = false
             }
@@ -227,6 +350,7 @@ final class XPCClient: NSObject {
     private nonisolated func makeErrorHandler() -> @Sendable (any Error) -> Void {
         { [weak self] error in
             Task { @MainActor [weak self] in
+                self?.helperAvailable = false
                 self?.connectionError = error.localizedDescription
                 self?.isRunning = false
             }
