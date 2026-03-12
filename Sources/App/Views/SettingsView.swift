@@ -9,9 +9,30 @@
 
 import SwiftUI
 
+struct ScheduleDefinition {
+    let label: String
+    let interval: String
+    let modules: String
+    let plistName: String
+
+    var systemPlistPath: String {
+        "/Library/LaunchDaemons/\(plistName)"
+    }
+
+    static let all: [ScheduleDefinition] = [
+        .init(label: "Hourly", interval: "Every 60 min", modules: "security, network, management", plistName: "com.github.reportmate.hourly.plist"),
+        .init(label: "Fourhourly", interval: "Every 4 hrs", modules: "applications, inventory, system, identity", plistName: "com.github.reportmate.fourhourly.plist"),
+        .init(label: "Daily", interval: "9:00 AM", modules: "hardware, peripherals", plistName: "com.github.reportmate.daily.plist"),
+        .init(label: "Full", interval: "Every 12 hrs", modules: "All modules", plistName: "com.github.reportmate.allmodules.plist"),
+    ]
+}
+
 struct SettingsView: View {
     @Bindable var viewModel: SettingsViewModel
     @Environment(XPCClient.self) private var xpcClient
+
+    @State private var plistPopoverSchedule: String?
+    @State private var plistContent: String = ""
 
     private var marketingVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "–"
@@ -24,9 +45,28 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                appInfoHeader
-
-                Divider()
+                // App info header
+                VStack(spacing: 6) {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 56, height: 56)
+                    Text("ReportMate")
+                        .font(.title2.bold())
+                    Text("Device telemetry collection & reporting")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("v\(marketingVersion) (\(buildNumber))")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    HStack(spacing: 12) {
+                        Link("Documentation", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/wiki")!)
+                        Link("Report Issue", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/issues")!)
+                    }
+                    .font(.caption)
+                }
+                .padding(.top, 4)
+                .padding(.bottom, 12)
 
                 // Two-column layout — boxes stack within each column
                 HStack(alignment: .top, spacing: 16) {
@@ -37,10 +77,10 @@ struct SettingsView: View {
                     }
                     .frame(maxWidth: .infinity)
 
-                    // Right column: Collection Schedules + Modules
+                    // Right column: Modules + Collection Schedules
                     VStack(spacing: 16) {
-                        collectionSection
                         modulesSection
+                        collectionSection
                     }
                     .frame(maxWidth: .infinity)
                 }
@@ -57,38 +97,6 @@ struct SettingsView: View {
             viewModel.configure(client: xpcClient)
             viewModel.load()
         }
-    }
-
-    // MARK: - App Info Header
-
-    @ViewBuilder
-    private var appInfoHeader: some View {
-        VStack(spacing: 8) {
-            Image(nsImage: NSApp.applicationIconImage)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 72, height: 72)
-
-            Text("ReportMate")
-                .font(.largeTitle.bold())
-
-            Text("Device telemetry collection and reporting for macOS endpoints.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
-            HStack(spacing: 12) {
-                Text("v\(marketingVersion) (\(buildNumber))")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-
-                Link("Documentation", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/wiki")!)
-                    .font(.caption)
-                Link("Report Issue", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/issues")!)
-                    .font(.caption)
-            }
-        }
-        .padding(.top, 8)
     }
 
     // MARK: - Auto-Save Status
@@ -150,52 +158,43 @@ struct SettingsView: View {
     @ViewBuilder
     private var collectionSection: some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
-                scheduleRow(
-                    label: "Hourly",
-                    interval: "Every 60 min",
-                    modules: "security, network, management"
-                )
-                Divider()
-                scheduleRow(
-                    label: "Fourhourly",
-                    interval: "Every 4 hrs",
-                    modules: "applications, inventory, system, identity"
-                )
-                Divider()
-                scheduleRow(
-                    label: "Daily",
-                    interval: "9:00 AM",
-                    modules: "hardware, peripherals"
-                )
-                Divider()
-                scheduleRow(
-                    label: "Full",
-                    interval: "Every 12 hrs",
-                    modules: "All modules"
-                )
-                Divider()
-
-                settingRow("LogLevel", label: "Log Level") {
-                    Picker("", selection: $viewModel.logLevel) {
-                        Text("debug").tag("debug")
-                        Text("info").tag("info")
-                        Text("warning").tag("warning")
-                        Text("error").tag("error")
-                    }
-                    .labelsHidden()
-                    .frame(width: 120)
-                }
-
-                settingRow("Timeout", label: "Timeout (seconds)") {
-                    HStack {
-                        TextField("300", text: $viewModel.timeout)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 80)
-                        Text("seconds")
-                            .foregroundStyle(.secondary)
+            HStack(alignment: .top, spacing: 16) {
+                // Left: Daemon schedules
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(ScheduleDefinition.all.enumerated()), id: \.element.label) { index, schedule in
+                        if index > 0 { Divider() }
+                        scheduleRow(schedule: schedule)
                     }
                 }
+                .frame(maxWidth: .infinity)
+
+                Divider()
+
+                // Right: Log level + Timeout
+                VStack(alignment: .leading, spacing: 12) {
+                    settingRow("LogLevel", label: "Log Level") {
+                        Picker("", selection: $viewModel.logLevel) {
+                            Text("debug").tag("debug")
+                            Text("info").tag("info")
+                            Text("warning").tag("warning")
+                            Text("error").tag("error")
+                        }
+                        .labelsHidden()
+                        .frame(width: 120)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    settingRow("Timeout", label: "Timeout (seconds)") {
+                        HStack {
+                            TextField("300", text: $viewModel.timeout)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 80)
+                            Text("seconds")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.vertical, 8)
         } label: {
@@ -205,20 +204,78 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private func scheduleRow(label: String, interval: String, modules: String) -> some View {
+    private func scheduleRow(schedule: ScheduleDefinition) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
-                Text(label)
+                Text(schedule.label)
                     .font(.callout.bold())
                 Spacer()
-                Text(interval)
+
+                Text(schedule.interval)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                Button {
+                    loadPlist(for: schedule)
+                } label: {
+                    Image(systemName: "eye")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("View LaunchDaemon plist")
+                .popover(isPresented: Binding(
+                    get: { plistPopoverSchedule == schedule.label },
+                    set: { if !$0 { plistPopoverSchedule = nil } }
+                )) {
+                    plistPopoverContent(schedule: schedule)
+                }
             }
-            Text(modules)
+            Text(schedule.modules)
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }
+    }
+
+    @ViewBuilder
+    private func plistPopoverContent(schedule: ScheduleDefinition) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(schedule.plistName, systemImage: "doc.text")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(plistContent, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .help("Copy to clipboard")
+            }
+
+            Divider()
+
+            ScrollView {
+                Text(plistContent)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(width: 480, height: 320)
+        }
+        .padding()
+    }
+
+    private func loadPlist(for schedule: ScheduleDefinition) {
+        let path = schedule.systemPlistPath
+        if let data = FileManager.default.contents(atPath: path),
+           let content = String(data: data, encoding: .utf8) {
+            plistContent = content
+        } else {
+            plistContent = "Plist not found at \(path)"
+        }
+        plistPopoverSchedule = schedule.label
     }
 
     // MARK: - osquery Section
@@ -252,19 +309,20 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Modules Section
+    // MARK: - Modules Section (5x2 Grid)
+
+    private let moduleColumns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 5)
 
     @ViewBuilder
     private var modulesSection: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
                 let managed = viewModel.isManaged("EnabledModules")
-                ForEach(ModuleDefinition.all) { module in
-                    Toggle(isOn: moduleBinding(module.id)) {
-                        Label(module.displayName, systemImage: module.systemImage)
+
+                LazyVGrid(columns: moduleColumns, spacing: 8) {
+                    ForEach(ModuleDefinition.all) { module in
+                        moduleCard(module: module, managed: managed)
                     }
-                    .toggleStyle(.checkbox)
-                    .disabled(managed)
                 }
 
                 if managed {
@@ -275,9 +333,41 @@ struct SettingsView: View {
             }
             .padding(.vertical, 8)
         } label: {
-            Label("Default Enabled Modules", systemImage: "square.grid.2x2")
+            Label("Enabled Modules", systemImage: "square.grid.2x2")
                 .font(.headline)
         }
+    }
+
+    @ViewBuilder
+    private func moduleCard(module: ModuleDefinition, managed: Bool) -> some View {
+        let isEnabled = viewModel.enabledModules.contains(module.id)
+        VStack(spacing: 4) {
+            Image(systemName: module.systemImage)
+                .font(.title3)
+                .frame(height: 20)
+            Text(module.displayName)
+                .font(.caption2)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isEnabled ? Color.accentColor.opacity(0.12) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isEnabled ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: 1)
+        )
+        .foregroundStyle(isEnabled ? .primary : .secondary)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard !managed else { return }
+            if isEnabled { viewModel.enabledModules.remove(module.id) }
+            else { viewModel.enabledModules.insert(module.id) }
+        }
+        .opacity(managed ? 0.5 : 1.0)
     }
 
     // MARK: - Managed Setting Row
@@ -303,15 +393,5 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
-    }
-
-    private func moduleBinding(_ id: String) -> Binding<Bool> {
-        Binding(
-            get: { viewModel.enabledModules.contains(id) },
-            set: { isOn in
-                if isOn { viewModel.enabledModules.insert(id) }
-                else { viewModel.enabledModules.remove(id) }
-            }
-        )
     }
 }

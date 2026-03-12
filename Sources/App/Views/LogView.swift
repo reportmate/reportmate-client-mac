@@ -3,42 +3,14 @@
 //  ReportMate
 //
 //  Displays historical log files from /Library/Managed Reports/logs/.
-//  Lists available log sessions and shows the selected log's contents.
+//  Uses a shared LogFileStore that is pre-loaded at app launch.
 //
 
 import SwiftUI
 
 struct LogView: View {
-    @State private var logFiles: [LogFile] = []
-    @State private var selectedLog: LogFile?
-    @State private var logContent: String = ""
+    @Bindable var store: LogFileStore
     @State private var filterText: String = ""
-    @State private var isLoading = false
-
-    private let logDirectory = "/Library/Managed Reports/logs"
-
-    nonisolated private static let displayDateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .short
-        return f
-    }()
-
-    struct LogFile: Identifiable, Hashable {
-        let id: String
-        let name: String
-        let path: String
-        let date: Date?
-        let size: String
-
-        var displayDate: String {
-            guard let date else { return name }
-            return LogView.displayDateFormatter.string(from: date)
-        }
-
-        func hash(into hasher: inout Hasher) { hasher.combine(id) }
-        static func == (lhs: LogFile, rhs: LogFile) -> Bool { lhs.id == rhs.id }
-    }
 
     var body: some View {
         HSplitView {
@@ -47,7 +19,6 @@ struct LogView: View {
 
             logDetailView
         }
-        .onAppear { refreshLogFiles() }
     }
 
     // MARK: - Log File List
@@ -62,12 +33,12 @@ struct LogView: View {
                 sidebarButton(icon: "arrow.up.forward.square", help: "Open in default editor") {
                     openSelectedLog()
                 }
-                .disabled(selectedLog == nil)
+                .disabled(store.selectedLog == nil)
                 sidebarButton(icon: "folder", help: "Open log folder in Finder") {
                     openLogFolder()
                 }
                 sidebarButton(icon: "arrow.clockwise", help: "Refresh log list") {
-                    refreshLogFiles()
+                    store.refresh()
                 }
             }
             .padding(.horizontal)
@@ -75,14 +46,14 @@ struct LogView: View {
 
             Divider()
 
-            List(logFiles, selection: $selectedLog) { file in
+            List(store.logFiles, selection: $store.selectedLog) { file in
                 VStack(alignment: .leading, spacing: 2) {
                     Text(file.name)
                         .font(.system(.body, design: .monospaced))
                         .lineLimit(1)
                     HStack {
                         if let date = file.date {
-                            Text(LogView.displayDateFormatter.string(from: date))
+                            Text(LogFileStore.LogFile.displayDateFormatter.string(from: date))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -96,9 +67,9 @@ struct LogView: View {
             }
             .listStyle(.sidebar)
         }
-        .onChange(of: selectedLog) { _, newValue in
+        .onChange(of: store.selectedLog) { _, newValue in
             if let log = newValue {
-                loadLogContent(log)
+                store.loadContent(log)
             }
         }
     }
@@ -118,7 +89,7 @@ struct LogView: View {
     @ViewBuilder
     private var logDetailView: some View {
         VStack(spacing: 0) {
-            if selectedLog != nil {
+            if store.selectedLog != nil {
                 HStack {
                     Image(systemName: "line.3.horizontal.decrease")
                         .foregroundStyle(.secondary)
@@ -156,58 +127,28 @@ struct LogView: View {
     // MARK: - Filtered Lines
 
     private var filteredLines: [String] {
-        let lines = logContent.components(separatedBy: "\n")
+        let lines = store.logContent.components(separatedBy: "\n")
         guard !filterText.isEmpty else { return lines }
         return lines.filter { $0.localizedCaseInsensitiveContains(filterText) }
     }
 
-    // MARK: - File Operations
-
-    private func refreshLogFiles() {
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(atPath: logDirectory) else {
-            logFiles = []
-            return
-        }
-
-        logFiles = files
-            .filter { $0.hasSuffix(".log") }
-            .sorted(by: >)
-            .compactMap { name -> LogFile? in
-                let path = (logDirectory as NSString).appendingPathComponent(name)
-                let attrs = try? fm.attributesOfItem(atPath: path)
-                let date = attrs?[.modificationDate] as? Date
-                let bytes = attrs?[.size] as? Int64 ?? 0
-                let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-                return LogFile(id: name, name: name, path: path, date: date, size: size)
-            }
-
-        if selectedLog == nil, let first = logFiles.first {
-            selectedLog = first
-        }
-    }
-
-    private func loadLogContent(_ file: LogFile) {
-        isLoading = true
-        logContent = (try? String(contentsOfFile: file.path, encoding: .utf8)) ?? "Unable to read log file."
-        isLoading = false
-    }
+    // MARK: - Actions
 
     private func openSelectedLog() {
-        guard let log = selectedLog else { return }
+        guard let log = store.selectedLog else { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: log.path))
     }
 
     private func openLogFolder() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: logDirectory))
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/Library/Managed Reports/logs"))
     }
 
     // MARK: - Log Line Coloring
 
     private func colorForLogLine(_ line: String) -> Color {
-        if line.contains("[ERROR]") || line.contains("✗") { return .red }
-        if line.contains("[WARNING]") || line.contains("⚠") { return .orange }
-        if line.contains("[SUCCESS]") || line.contains("✓") { return .green }
+        if line.contains("[ERROR]") { return .red }
+        if line.contains("[WARNING]") { return .orange }
+        if line.contains("[SUCCESS]") { return .green }
         if line.contains("[DEBUG]") { return .gray }
         if line.hasPrefix("===") { return .cyan }
         return .white

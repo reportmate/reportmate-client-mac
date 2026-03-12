@@ -24,7 +24,8 @@ struct RunView: View {
             Divider()
 
             runControlBar
-                .padding()
+                .padding(.horizontal)
+                .padding(.vertical, 8)
 
             Divider()
 
@@ -57,26 +58,42 @@ struct RunView: View {
 
             LazyVGrid(columns: gridColumns, spacing: 8) {
                 ForEach(ModuleDefinition.all) { module in
-                    Toggle(isOn: moduleBinding(module.id)) {
-                        Label {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(module.displayName)
-                                    .lineLimit(1)
-                                Text(module.description)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                        } icon: {
-                            Image(systemName: module.systemImage)
-                                .frame(width: 16)
-                        }
-                    }
-                    .toggleStyle(.checkbox)
-                    .disabled(xpcClient.isRunning)
+                    runModuleCard(module: module)
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func runModuleCard(module: ModuleDefinition) -> some View {
+        let isSelected = selectedModules.contains(module.id)
+        VStack(spacing: 4) {
+            Image(systemName: module.systemImage)
+                .font(.title3)
+                .frame(height: 20)
+            Text(module.displayName)
+                .font(.caption2)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? Color.primary.opacity(0.1) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isSelected ? Color.primary.opacity(0.4) : Color.secondary.opacity(0.2), lineWidth: 1)
+        )
+        .foregroundStyle(isSelected ? .primary : .secondary)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard !xpcClient.isRunning else { return }
+            if isSelected { selectedModules.remove(module.id) }
+            else { selectedModules.insert(module.id) }
+        }
+        .opacity(xpcClient.isRunning ? 0.5 : 1.0)
     }
 
     // MARK: - Run Control Bar
@@ -165,32 +182,18 @@ struct RunView: View {
             }
         }
 
-        if xpcClient.helperStatus == .notRegistered && !xpcClient.isRunning {
-            Label("Helper not installed — install via pkg", systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .font(.caption)
-        } else if xpcClient.helperStatus == .requiresApproval && !xpcClient.isRunning {
-            Label("Approve helper in System Settings → Login Items", systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .font(.caption)
-        }
-
-        if let error = xpcClient.connectionError, !xpcClient.isRunning {
-            Label(error, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
-                .font(.caption)
+        if !xpcClient.helperAvailable && !xpcClient.isRunning {
+            if xpcClient.helperStatus == .requiresApproval {
+                Label("Approve helper in System Settings > Login Items", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.caption)
+            } else {
+                Label("Running without helper (no root)", systemImage: "info.circle")
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+            }
         }
     }
 
     // MARK: - Helpers
-
-    private func moduleBinding(_ id: String) -> Binding<Bool> {
-        Binding(
-            get: { selectedModules.contains(id) },
-            set: { isOn in
-                if isOn { selectedModules.insert(id) }
-                else { selectedModules.remove(id) }
-            }
-        )
-    }
 }
