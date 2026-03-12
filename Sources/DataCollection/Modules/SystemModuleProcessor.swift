@@ -698,10 +698,13 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                         upd_recommended="false"
                         upd_restart="false"
                     elif echo "$line" | grep -qi "Version:"; then
-                        upd_version=$(echo "$line" | sed 's/.*Version:[[:space:]]*//' | tr -d '\\r')
+                        upd_version=$(echo "$line" | sed 's/.*Version:[[:space:]]*//' | cut -d',' -f1 | tr -d '\\r')
+                        # Also check inline fields on the same line
+                        echo "$line" | grep -qi "Recommended:.*YES" && upd_recommended="true"
+                        echo "$line" | grep -qiE "Restart:.*YES|Action:.*restart" && upd_restart="true"
                     elif echo "$line" | grep -qi "Recommended:.*YES"; then
                         upd_recommended="true"
-                    elif echo "$line" | grep -qi "Restart:.*YES"; then
+                    elif echo "$line" | grep -qiE "Restart:.*YES|Action:.*restart"; then
                         upd_restart="true"
                     fi
                 done <<< "$updates_output"
@@ -836,6 +839,31 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 
                 return normalized
             }
+        }
+        
+        // Deduplicate: when the same version appears from both softwareupdate -l (Part 1)
+        // and the MDM plist (Part 2), keep the richer Part 2 entry which has deferred metadata
+        var seenVersions: [String: Int] = [:]
+        var indicesToRemove: Set<Int> = []
+        for (index, update) in updates.enumerated() {
+            let version = update["version"] as? String ?? ""
+            if version.isEmpty { continue }
+            if let existingIndex = seenVersions[version] {
+                let existingDeferred = updates[existingIndex]["deferred"] as? Bool ?? false
+                let currentDeferred = update["deferred"] as? Bool ?? false
+                // Prefer deferred entry (has buildVersion, firstOfferedAt, etc.)
+                if currentDeferred && !existingDeferred {
+                    indicesToRemove.insert(existingIndex)
+                    seenVersions[version] = index
+                } else {
+                    indicesToRemove.insert(index)
+                }
+            } else {
+                seenVersions[version] = index
+            }
+        }
+        if !indicesToRemove.isEmpty {
+            updates = updates.enumerated().compactMap { indicesToRemove.contains($0.offset) ? nil : $0.element }
         }
         
         return updates
