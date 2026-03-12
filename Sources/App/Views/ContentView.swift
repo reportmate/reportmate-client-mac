@@ -2,7 +2,8 @@
 //  ContentView.swift
 //  ReportMate
 //
-//  Main window with three tabs: Main, Run, and Logs.
+//  Native TabView with liquid glass tabs.
+//  Tab order: Run, Logs, Prefs.
 //
 
 import SwiftUI
@@ -10,34 +11,24 @@ import SwiftUI
 struct ContentView: View {
     @Environment(XPCClient.self) private var xpcClient
     @State private var viewModel = SettingsViewModel()
-    @State private var selectedTab: ContentTab = .main
-
-    enum ContentTab: Hashable {
-        case main, run, logs
-    }
+    @State private var logStore = LogFileStore()
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            SettingsView(viewModel: viewModel)
-                .environment(xpcClient)
-                .tabItem { Text("Main") }
-                .tag(ContentTab.main)
-
+        TabView {
             RunView(viewModel: viewModel)
                 .environment(xpcClient)
-                .tabItem { Text("Run") }
-                .tag(ContentTab.run)
+                .tabItem { Label("Run", systemImage: "play.fill") }
 
-            LogView()
-                .tabItem { Text("Logs") }
-                .tag(ContentTab.logs)
+            LogView(store: logStore)
+                .tabItem { Label("Logs", systemImage: "doc.text") }
+
+            SettingsView(viewModel: viewModel)
+                .environment(xpcClient)
+                .tabItem { Label("Prefs", systemImage: "gearshape") }
         }
         .onAppear {
-            xpcClient.checkHelperStatus()
-            if xpcClient.helperStatus != .registered {
-                xpcClient.registerHelper()
-            }
-            xpcClient.connect()
+            xpcClient.setup()
+            logStore.refresh()
         }
     }
 }
