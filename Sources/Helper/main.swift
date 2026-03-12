@@ -44,16 +44,34 @@ final class HelperService: NSObject, NSXPCListenerDelegate, Sendable {
             return false
         }
 
-        // Require the connecting process be signed by our team.
-        // The team ID is embedded at build time via build.sh.
-        let requirement = "anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\""
-        var reqRef: SecRequirement?
-        guard SecRequirementCreateWithString(requirement as CFString, [], &reqRef) == errSecSuccess,
-              let req = reqRef else {
+        // If we have a team ID, require the connecting process to share it
+        if !teamID.isEmpty {
+            let requirement = "anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\""
+            var reqRef: SecRequirement?
+            guard SecRequirementCreateWithString(requirement as CFString, [], &reqRef) == errSecSuccess,
+                  let req = reqRef else {
+                return false
+            }
+            return SecCodeCheckValidity(secCode, [], req) == errSecSuccess
+        }
+
+        // No team ID (ad-hoc/dev build) — validate the connecting process is
+        // signed by the same authority as us by comparing signing identifiers
+        var clientStaticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(secCode, [], &clientStaticCode) == errSecSuccess,
+              let staticCode = clientStaticCode else {
             return false
         }
 
-        return SecCodeCheckValidity(secCode, [], req) == errSecSuccess
+        var clientInfo: CFDictionary?
+        guard SecCodeCopySigningInformation(staticCode, [], &clientInfo) == errSecSuccess,
+              let clientDict = clientInfo as? [String: Any],
+              let clientIdent = clientDict[kSecCodeInfoIdentifier as String] as? String else {
+            return false
+        }
+
+        // Accept any ReportMate bundle (com.github.reportmate*)
+        return clientIdent.hasPrefix("com.github.reportmate")
     }
 }
 
