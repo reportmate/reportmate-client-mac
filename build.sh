@@ -1042,8 +1042,8 @@ EOF
             log_success "Icon compiled: ReportMate.icns (legacy fallback)"
         fi
     else
-        log_error "Icon bundle not found at: ${ICON_SOURCE}"
-        exit 1
+        log_warn "Icon bundle not found at: ${ICON_SOURCE}"
+        log_warn "Build will continue without an app icon. Create build/resources/ReportMate.icon to add one."
     fi
 
     # NOTE: The preference plist is NOT included in the package payload.
