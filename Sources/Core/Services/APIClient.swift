@@ -16,7 +16,7 @@ public class APIClient {
             throw APIError.invalidConfiguration("API URL not configured")
         }
         
-        var request = URLRequest(url: url.appendingPathComponent("health"))
+        var request = URLRequest(url: url.appendingPathComponent("api/health"))
         request.httpMethod = "GET"
         request.timeoutInterval = TimeInterval(configuration.timeout)
         
