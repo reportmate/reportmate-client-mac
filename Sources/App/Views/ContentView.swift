@@ -3,7 +3,7 @@
 //  ReportMate
 //
 //  Native TabView with liquid glass tabs.
-//  Tab order: Run, Logs, Prefs.
+//  Tab order: Prefs, Run, Logs.
 //
 
 import SwiftUI
@@ -15,16 +15,16 @@ struct ContentView: View {
 
     var body: some View {
         TabView {
+            SettingsView(viewModel: viewModel)
+                .environment(xpcClient)
+                .tabItem { Label("Prefs", systemImage: "gearshape") }
+
             RunView(viewModel: viewModel)
                 .environment(xpcClient)
                 .tabItem { Label("Run", systemImage: "play.fill") }
 
             LogView(store: logStore)
                 .tabItem { Label("Logs", systemImage: "doc.text") }
-
-            SettingsView(viewModel: viewModel)
-                .environment(xpcClient)
-                .tabItem { Label("Prefs", systemImage: "gearshape") }
         }
         .onAppear {
             xpcClient.setup()
