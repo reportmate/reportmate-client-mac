@@ -70,34 +70,25 @@ public class ConfigurationManager {
         
         // 1. Load defaults (already set in init)
         
-        // 2. Load user plist (~/<user>/Library/Managed Reports/reportmate.plist)
+        // 2. Load user plist
         if let userConfig = loadUserPlist() {
             config.merge(with: userConfig)
         }
         
-        // 3. Load system plist (/Library/Managed Reports/reportmate.plist)
+        // 3. Load system plist  
         if let systemConfig = loadSystemPlist() {
             config.merge(with: systemConfig)
         }
         
-        // 4. Load global preferences plist (/Library/Preferences/com.github.reportmate.plist)
-        // Read directly as a file — UserDefaults(suiteName:) maps to the CURRENT USER's home
-        // domain (/var/root/Library/Preferences/ when running as root/daemon), not this global
-        // file. Direct file I/O is the correct approach for daemon-context admin tools.
-        if let globalConfig = loadGlobalPreferencesPlist() {
-            config.merge(with: globalConfig)
-        }
-        
-        // 5. Load MDM-managed Configuration Profiles (highest external authority)
-        // UserDefaults correctly surfaces managed preferences regardless of user context.
+        // 4. Load Configuration Profiles
         if let profileConfig = loadConfigurationProfiles() {
             config.merge(with: profileConfig)
         }
         
-        // 6. Load environment variables
+        // 5. Load environment variables
         config.merge(with: loadEnvironmentVariables())
         
-        // 7. Apply runtime overrides
+        // 6. Apply runtime overrides
         config.merge(with: overrides)
         
         return config
@@ -114,34 +105,32 @@ public class ConfigurationManager {
         let systemConfigPath = URL(fileURLWithPath: "/Library/Managed Reports/reportmate.plist")
         return loadPlist(at: systemConfigPath)
     }
-
-    private static func loadGlobalPreferencesPlist() -> [String: Any]? {
-        // /Library/Preferences/com.github.reportmate.plist is written by the postinstall
-        // script and by `defaults write /Library/Preferences/com.github.reportmate ...`.
-        // It must be read as a raw file because UserDefaults(suiteName:) maps to the current
-        // user's HOME preferences domain — which is /var/root/Library/Preferences/ for root/
-        // daemon processes, not this global path.
-        let globalPrefsPath = URL(fileURLWithPath: "/Library/Preferences/com.github.reportmate.plist")
-        return loadPlist(at: globalPrefsPath)
-    }
     
     private static func loadConfigurationProfiles() -> [String: Any]? {
-        // Use CFPreferencesCopyAppValue instead of UserDefaults(suiteName:).
-        // UserDefaults(suiteName: bundleID) triggers an OS warning ("does not make
-        // sense and will not work") when the suite name matches the process's own
-        // bundle identifier. CFPreferences reads the same MDM-managed preferences
-        // domain without that restriction.
-        let appID = "com.github.reportmate" as CFString
-
-        let keys = ["ApiUrl", "DeviceId", "Passphrase", "CollectionInterval", "LogLevel", "EnabledModules"]
+        // Check for Configuration Profile managed preferences
+        let profileDefaults = UserDefaults(suiteName: "com.github.reportmate")
+        
+        guard let profileDefaults = profileDefaults else { return nil }
+        
         var config: [String: Any] = [:]
-
-        for key in keys {
-            if let value = CFPreferencesCopyAppValue(key as CFString, appID) {
-                config[key] = value
+        
+        // Map Configuration Profile keys to internal configuration
+        // Passphrase is for device-to-api authentication
+        let keyMappings: [String: String] = [
+            "ApiUrl": "ApiUrl",
+            "DeviceId": "DeviceId", 
+            "Passphrase": "Passphrase",
+            "CollectionInterval": "CollectionInterval",
+            "LogLevel": "LogLevel",
+            "EnabledModules": "EnabledModules"
+        ]
+        
+        for (profileKey, configKey) in keyMappings {
+            if let value = profileDefaults.object(forKey: profileKey) {
+                config[configKey] = value
             }
         }
-
+        
         return config.isEmpty ? nil : config
     }
     
@@ -195,21 +184,20 @@ public class ConfigurationManager {
     }
 }
 
-/// ReportMate configuration structure
-/// Storage analysis depth for hardware module
+/// Controls how storage deep analysis is executed
 public enum StorageMode: String {
-    case quick  // Drive totals only (fast)
-    case deep   // Full directory analysis (slow)
-    case auto   // Deep first run, use cache on subsequent runs
+    case quick
+    case deep
+    case auto
 }
 
+/// ReportMate configuration structure
 public struct ReportMateConfiguration {
     public var apiUrl: String?
     public var deviceId: String?
     /// Client passphrase for API authentication (X-Client-Passphrase header)
     /// Configured via REPORTMATE_PASSPHRASE environment variable or Passphrase plist key
     public var passphrase: String?
-    public var storageMode: StorageMode = .auto
     public var collectionInterval: Int = 3600 // 1 hour default
     public var logLevel: String = "info"
     public var enabledModules: [String] = [
@@ -233,7 +221,10 @@ public struct ReportMateConfiguration {
     
     public var validateSSL: Bool = true
     public var timeout: Int = 300 // 5 minutes
-    
+
+    /// Controls whether deep storage directory analysis runs on each collection cycle
+    public var storageMode: StorageMode = .auto
+
     /// Merge configuration with another dictionary
     mutating func merge(with other: [String: Any]) {
         if let apiUrl = other["ApiUrl"] as? String { self.apiUrl = apiUrl }
@@ -249,8 +240,6 @@ public struct ReportMateConfiguration {
         if let validateSSL = other["ValidateSSL"] as? Bool { self.validateSSL = validateSSL }
         if let timeout = other["Timeout"] as? Int { self.timeout = timeout }
         if let storageModeStr = other["StorageMode"] as? String,
-           let mode = StorageMode(rawValue: storageModeStr.lowercased()) {
-            self.storageMode = mode
-        }
+           let mode = StorageMode(rawValue: storageModeStr) { self.storageMode = mode }
     }
 }

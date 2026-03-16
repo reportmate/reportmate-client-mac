@@ -811,9 +811,9 @@ EOF
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-4hourly.log</string>
+    <string>/Library/Managed Reports/logs/reportmate-fourhourly.log</string>
     <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-4hourly.error.log</string>
+    <string>/Library/Managed Reports/logs/reportmate-fourhourly.error.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
