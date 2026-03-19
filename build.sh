@@ -765,7 +765,9 @@ EOF
     <array>
         <string>/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
         <string>--run-modules</string>
-        <string>security,network,management</string>
+        <string>security,network,management,hardware</string>
+        <string>--storage-mode</string>
+        <string>quick</string>
     </array>
     <key>StartInterval</key>
     <integer>3600</integer>
@@ -804,7 +806,7 @@ EOF
     <array>
         <string>/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
         <string>--run-modules</string>
-        <string>applications,inventory,system,identity</string>
+        <string>applications,inventory,system,identity,peripherals</string>
     </array>
     <key>StartInterval</key>
     <integer>14400</integer>
@@ -843,7 +845,9 @@ EOF
     <array>
         <string>/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
         <string>--run-modules</string>
-        <string>hardware,peripherals</string>
+        <string>hardware</string>
+        <string>--storage-mode</string>
+        <string>deep</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
@@ -958,22 +962,24 @@ EOF
 {
   "schedules": {
     "hourly": {
-      "modules": ["security", "network", "management"],
+      "modules": ["security", "network", "management", "hardware"],
+      "args": "--storage-mode quick",
       "interval_seconds": 3600,
       "launchd_label": "com.github.reportmate.hourly",
-      "description": "Modules that need frequent updates for security monitoring"
+      "description": "Security monitoring + quick hardware snapshot (drive totals only)"
     },
     "fourhourly": {
-      "modules": ["applications", "inventory", "system", "identity"],
+      "modules": ["applications", "inventory", "system", "identity", "peripherals"],
       "interval_seconds": 14400,
       "launchd_label": "com.github.reportmate.fourhourly",
-      "description": "Modules that change moderately - software and device info"
+      "description": "Modules that change moderately - software, device info, and peripheral devices"
     },
     "daily": {
-      "modules": ["hardware", "peripherals"],
+      "modules": ["hardware"],
+      "args": "--storage-mode deep",
       "calendar_interval": {"hour": 9, "minute": 0},
       "launchd_label": "com.github.reportmate.daily",
-      "description": "Modules that rarely change - physical hardware"
+      "description": "Full hardware deep-scan including directory-level storage analysis"
     },
     "allmodules": {
       "modules": "all",
