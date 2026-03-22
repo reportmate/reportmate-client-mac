@@ -210,7 +210,7 @@ public struct EventMetadata: Codable, Sendable {
 }
 
 /// Unified payload structure matching Windows UnifiedDevicePayload
-/// This is the format expected by the /api/events endpoint
+/// This is the format expected by the /api/v1/events endpoint
 public struct UnifiedDevicePayload: Codable, Sendable {
     public let metadata: EventMetadata
     public let events: [ReportMateEvent]

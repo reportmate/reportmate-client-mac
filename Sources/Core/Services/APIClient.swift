@@ -16,7 +16,7 @@ public class APIClient {
             throw APIError.invalidConfiguration("API URL not configured")
         }
         
-        var request = URLRequest(url: url.appendingPathComponent("api/health"))
+        var request = URLRequest(url: url.appendingPathComponent("api/v1/health"))
         request.httpMethod = "GET"
         request.timeoutInterval = TimeInterval(configuration.timeout)
         
@@ -40,7 +40,7 @@ public class APIClient {
             return .failure(.invalidConfiguration("API URL not configured"))
         }
         
-        var request = URLRequest(url: url.appendingPathComponent("api/events"))
+        var request = URLRequest(url: url.appendingPathComponent("api/v1/events"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = TimeInterval(configuration.timeout)
