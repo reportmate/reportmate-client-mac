@@ -28,7 +28,7 @@ public class ConfigurationManager {
         apiKey: String? = nil
     ) throws {
         
-        let systemConfigPath = "/Library/Managed Reports/reportmate.plist"
+        let systemConfigPath = "/Library/Preferences/com.github.reportmate.plist"
         
         // Ensure directory exists
         let systemConfigDir = URL(fileURLWithPath: systemConfigPath).deletingLastPathComponent()
@@ -102,7 +102,7 @@ public class ConfigurationManager {
     }
     
     private static func loadSystemPlist() -> [String: Any]? {
-        let systemConfigPath = URL(fileURLWithPath: "/Library/Managed Reports/reportmate.plist")
+        let systemConfigPath = URL(fileURLWithPath: "/Library/Preferences/com.github.reportmate.plist")
         return loadPlist(at: systemConfigPath)
     }
     
