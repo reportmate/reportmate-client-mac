@@ -423,6 +423,10 @@ struct ReportMateClient: AsyncParsableCommand {
                 events.append(osUpdateEvent)
                 logger.info("OS version change detected")
             }
+            if let rebootEvent = detectReboot(systemData: systemData, logger: logger) {
+                events.append(rebootEvent)
+                logger.info("System reboot detected")
+            }
         }
         
         // Generate Munki/Installs events with actual error/warning messages
@@ -563,6 +567,9 @@ struct ReportMateClient: AsyncParsableCommand {
     
     /// Path to the persistent OS version state file (in base cache directory, not timestamped)
     private static let previousOSVersionPath = "/Library/Managed Reports/cache/previous_os_version.json"
+
+    /// Path to the persistent boot time state file for reboot detection
+    private static let previousBootTimePath = "/Library/Managed Reports/cache/previous_boot_time.json"
     
     /// Detects OS version changes by comparing current system data against stored previous version.
     /// Returns a system event if the version changed, nil otherwise.
@@ -627,7 +634,71 @@ struct ReportMateClient: AsyncParsableCommand {
             ]
         )
     }
-    
+
+    // MARK: - Reboot Detection
+
+    /// Detects system reboots by comparing current uptime/boot time against stored previous boot time.
+    /// Returns a system event if a reboot occurred, nil otherwise.
+    private func detectReboot(systemData: [String: Any], logger: Logger) -> ReportMateEvent? {
+        // Calculate boot time from uptime seconds
+        let uptimeSeconds = systemData["uptime"] as? Int ?? 0
+        guard uptimeSeconds > 0 else { return nil }
+
+        let currentBootTime = Date().addingTimeInterval(-Double(uptimeSeconds))
+        let currentBootTimeStr = ISO8601DateFormatter().string(from: currentBootTime)
+        let uptimeString = systemData["uptimeString"] as? String ?? ""
+
+        // Read previous boot time state
+        let fileURL = URL(fileURLWithPath: Self.previousBootTimePath)
+        var previousBootTime: Date?
+
+        if FileManager.default.fileExists(atPath: Self.previousBootTimePath),
+           let data = try? Data(contentsOf: fileURL),
+           let stored = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let storedBootTime = stored["boot_time"] as? String {
+            let formatter = ISO8601DateFormatter()
+            previousBootTime = formatter.date(from: storedBootTime)
+        }
+
+        // Always write current boot time for next comparison
+        let stateDict: [String: Any] = [
+            "boot_time": currentBootTimeStr,
+            "uptime": uptimeString,
+            "platform": "macOS",
+            "recorded_at": ISO8601DateFormatter().string(from: Date())
+        ]
+        if let jsonData = try? JSONSerialization.data(withJSONObject: stateDict, options: [.prettyPrinted, .sortedKeys]) {
+            try? jsonData.write(to: fileURL)
+        }
+
+        // No previous boot time stored (first run) — no event
+        guard let oldBootTime = previousBootTime else {
+            logger.info("No previous boot time recorded, storing \(currentBootTimeStr)")
+            return nil
+        }
+
+        // Boot time unchanged (within 60 second tolerance for clock drift)
+        guard abs(currentBootTime.timeIntervalSince(oldBootTime)) >= 60 else { return nil }
+
+        // Boot time changed — system was rebooted
+        let message = "System reboot detected"
+        logger.info(Logger.Message(stringLiteral: message))
+
+        let previousBootTimeStr = ISO8601DateFormatter().string(from: oldBootTime)
+
+        return ReportMateEvent(
+            moduleId: "system",
+            eventType: "system",
+            message: message,
+            timestamp: Date(),
+            stringDetails: [
+                "previous_boot_time": previousBootTimeStr,
+                "current_boot_time": currentBootTimeStr,
+                "uptime": uptimeString
+            ]
+        )
+    }
+
     // MARK: - Munki Event Generation
 
     /// Generates ReportMate events from Munki data using InstallResults/RemovalResults
