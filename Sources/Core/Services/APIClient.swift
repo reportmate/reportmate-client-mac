@@ -256,12 +256,47 @@ public class CacheService {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         let timestamp = formatter.string(from: now)
-        
+
         let timestampedDir = baseCacheDirectory.appendingPathComponent(timestamp)
         try? FileManager.default.createDirectory(at: timestampedDir, withIntermediateDirectories: true)
-        
+
         self.currentCacheDirectory = timestampedDir
+
+        pruneOldCacheDirectories(keep: 24)
+
         return timestampedDir
+    }
+
+    /// Delete all but the N most recent timestamped cache directories.
+    /// Runs opportunistically at the start of each collection. Without this the cache
+    /// grows unbounded (observed 700+ dirs / 800+ MB on long-running hosts).
+    public func pruneOldCacheDirectories(keep: Int) {
+        guard keep > 0 else { return }
+        do {
+            let contents = try FileManager.default.contentsOfDirectory(
+                at: baseCacheDirectory,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+
+            let timestampDirs = contents.filter { url in
+                var isDirectory: ObjCBool = false
+                FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+                guard isDirectory.boolValue else { return false }
+                return url.lastPathComponent.range(of: #"^\d{4}-\d{2}-\d{2}-\d{6}$"#,
+                                                   options: .regularExpression) != nil
+            }
+
+            let stale = timestampDirs
+                .sorted { $0.lastPathComponent > $1.lastPathComponent }
+                .dropFirst(keep)
+
+            for dir in stale {
+                try? FileManager.default.removeItem(at: dir)
+            }
+        } catch {
+            print("Warning: Could not prune old cache directories: \(error)")
+        }
     }
     
     /// Get the current timestamped cache directory, creating one if needed
