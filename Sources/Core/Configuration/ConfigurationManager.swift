@@ -40,8 +40,9 @@ public class ConfigurationManager {
             "CollectionInterval": 3600,
             "LogLevel": "info",
             "EnabledModules": [
-                "hardware", "system", "network", "security", 
-                "applications", "management", "inventory"
+                "hardware", "system", "network", "security",
+                "applications", "management", "inventory",
+                "identity", "peripherals", "installs"
             ]
         ]
         
@@ -201,8 +202,9 @@ public struct ReportMateConfiguration {
     public var collectionInterval: Int = 3600 // 1 hour default
     public var logLevel: String = "info"
     public var enabledModules: [String] = [
-        "hardware", "system", "network", "security", 
-        "applications", "management", "inventory"
+        "hardware", "system", "network", "security",
+        "applications", "management", "inventory",
+        "identity", "peripherals", "installs"
     ]
     public var osqueryPath: String = "/usr/local/bin/osqueryi"
     
