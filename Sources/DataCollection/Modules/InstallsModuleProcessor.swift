@@ -23,17 +23,17 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         ConsoleFormatter.writeQueryProgress(queryName: "homebrew_packages", current: 2, total: totalSteps)
         let homebrew = try await collectHomebrewPackages()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "munki_info", current: 3, total: totalSteps)
-        let info = try await collectMunkiInfo()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "munki_installs", current: 4, total: totalSteps)
-        var installs = try await collectMunkiManagedInstalls()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "pending_updates", current: 5, total: totalSteps)
-        let pending = try await collectPendingUpdates()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "munki_log", current: 6, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "munki_log", current: 3, total: totalSteps)
         let runLog = try await collectMunkiRunLog()
+
+        ConsoleFormatter.writeQueryProgress(queryName: "munki_info", current: 4, total: totalSteps)
+        let info = try await collectMunkiInfo(runLog: runLog)
+
+        ConsoleFormatter.writeQueryProgress(queryName: "munki_installs", current: 5, total: totalSteps)
+        var installs = try await collectMunkiManagedInstalls()
+
+        ConsoleFormatter.writeQueryProgress(queryName: "pending_updates", current: 6, total: totalSteps)
+        let pending = try await collectPendingUpdates()
         
         ConsoleFormatter.writeQueryProgress(queryName: "catalog_metadata", current: 7, total: totalSteps)
         let catalogData = try await collectCatalogMetadata()
@@ -359,11 +359,43 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         return ""
     }
     
+    // MARK: - Run Log Parsing
+
+    private static let runLogTimestampRegex: NSRegularExpression = {
+        // ISO-ish timestamp prefix Munki writes, e.g. "2026-04-14 16:29:43.081-07:00 "
+        let pattern = #"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+\-]\d{2}:?\d{2})?\s+"#
+        return try! NSRegularExpression(pattern: pattern, options: [])
+    }()
+
+    /// Extracts `ERROR:` and `WARNING:` lines from a collected Munki run log and returns them
+    /// with timestamp and level prefix stripped — matching the shape of plist-stripped values.
+    private func parseRunLogMessages(_ runLog: String) -> (errors: [String], warnings: [String]) {
+        guard !runLog.isEmpty else { return ([], []) }
+        var errors: [String] = []
+        var warnings: [String] = []
+        for rawLine in runLog.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            let line = String(rawLine)
+            let range = NSRange(line.startIndex..., in: line)
+            let stripped = Self.runLogTimestampRegex.stringByReplacingMatches(
+                in: line, options: [], range: range, withTemplate: ""
+            ).trimmingCharacters(in: .whitespaces)
+            if stripped.hasPrefix("ERROR: ") {
+                errors.append(String(stripped.dropFirst(7)))
+            } else if stripped.hasPrefix("WARNING: ") {
+                warnings.append(String(stripped.dropFirst(9)))
+            }
+        }
+        return (errors, warnings)
+    }
+
     // MARK: - Munki Info (native Swift plist reading — no osquery extension delay)
-    
+
     /// Reads Munki metadata directly from ManagedInstallReport.plist and ManagedInstalls.plist
     /// using native PropertyListSerialization — zero shell spawning, instant.
-    private func collectMunkiInfo() async throws -> [String: Any] {
+    /// `runLog` (if non-empty) is scanned for `ERROR:`/`WARNING:` lines and merged into
+    /// `errors`/`warnings` to surface catalog-retrieval failures that Munki doesn't always
+    /// persist to ManagedInstallReport.plist's Errors key.
+    private func collectMunkiInfo(runLog: String = "") async throws -> [String: Any] {
         var info: [String: Any] = [:]
         
         let munkiDir = "/Library/Managed Installs"
@@ -424,23 +456,49 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             info["endTime"] = isoFormatter.string(from: endTime)
         }
         
-        // Errors array — keep raw array AND joined string for API compatibility
-        // Strip "ERROR: " prefix from joined string so it matches per-item lastError values
-        if let errors = report["Errors"] as? [String], !errors.isEmpty {
-            let stripped = errors.map { $0.hasPrefix("ERROR: ") ? String($0.dropFirst(7)) : $0 }
-            info["errors"] = stripped.joined(separator: "; ")
-            info["errorsArray"] = errors  // raw array retained for attachMessagesToItems (which strips prefix itself)
+        // Errors / Warnings — merge plist Errors/Warnings with ERROR:/WARNING: lines from the
+        // run log. Munki doesn't always persist early failures (e.g. catalog 404) to the plist
+        // Errors key; those lines live only in ManagedSoftwareUpdate.log. Dedupe by exact
+        // stripped-string equality so we never double-report.
+        let plistErrorsRaw = (report["Errors"] as? [String]) ?? []
+        let plistWarningsRaw = (report["Warnings"] as? [String]) ?? []
+        let plistErrorsStripped = plistErrorsRaw.map {
+            $0.hasPrefix("ERROR: ") ? String($0.dropFirst(7)) : $0
+        }
+        let plistWarningsStripped = plistWarningsRaw.map {
+            $0.hasPrefix("WARNING: ") ? String($0.dropFirst(9)) : $0
+        }
+
+        let (logErrors, logWarnings) = parseRunLogMessages(runLog)
+
+        func mergeOrderPreserving(_ plist: [String], _ log: [String]) -> [String] {
+            var seen = Set<String>()
+            var merged: [String] = []
+            for item in plist + log {
+                let key = item.trimmingCharacters(in: .whitespacesAndNewlines)
+                if key.isEmpty { continue }
+                if seen.insert(key).inserted {
+                    merged.append(item)
+                }
+            }
+            return merged
+        }
+
+        let mergedErrors = mergeOrderPreserving(plistErrorsStripped, logErrors)
+        let mergedWarnings = mergeOrderPreserving(plistWarningsStripped, logWarnings)
+
+        if !mergedErrors.isEmpty {
+            info["errors"] = mergedErrors.joined(separator: "; ")
+            // Re-prefix for attachMessagesToItems, which expects raw "ERROR: ..." lines
+            info["errorsArray"] = mergedErrors.map { "ERROR: \($0)" }
             info["success"] = "false"
         } else {
             info["success"] = "true"
         }
-        
-        // Warnings array — keep raw array AND joined string for API compatibility
-        // Strip "WARNING: " prefix from joined string so it matches per-item lastWarning values
-        if let warnings = report["Warnings"] as? [String], !warnings.isEmpty {
-            let stripped = warnings.map { $0.hasPrefix("WARNING: ") ? String($0.dropFirst(9)) : $0 }
-            info["warnings"] = stripped.joined(separator: "; ")
-            info["warningsArray"] = warnings  // raw array retained for attachMessagesToItems
+
+        if !mergedWarnings.isEmpty {
+            info["warnings"] = mergedWarnings.joined(separator: "; ")
+            info["warningsArray"] = mergedWarnings.map { "WARNING: \($0)" }
         }
         
         // Problem installs — ProblemInstalls is [[String: Any]] (array of dicts), not [String]
