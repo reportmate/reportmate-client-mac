@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CoreGraphics
 import Logging
 
 /// Application usage watcher that monitors app launches and terminations
@@ -12,6 +13,17 @@ public final class AppUsageWatcher: @unchecked Sendable {
     private let logger: Logger
     private var isRunning = false
     private var observers: [NSObjectProtocol] = []
+
+    // Idle-time tracking: a periodic tick attributes elapsed seconds to the
+    // currently-foreground app's session as foreground time, and additionally
+    // as active time when system input has occurred within the prior 300s.
+    private var tickTimer: DispatchSourceTimer?
+    private var lastTickAt: Date?
+    private static let tickInterval: TimeInterval = 30   // seconds between ticks
+    private static let idleThreshold: TimeInterval = 300 // seconds without input -> inactive
+    // Clamp on per-tick elapsed to defend against sleep/wake gaps (otherwise a
+    // single tick after a 4-hour laptop sleep would charge 4 hours of fg time).
+    private static let maxTickElapsed: TimeInterval = 90
     
     // MARK: - Initialization
     
@@ -47,24 +59,32 @@ public final class AppUsageWatcher: @unchecked Sendable {
         
         // Set up workspace notifications
         setupNotificationObservers()
-        
+
+        // Start idle/foreground polling tick
+        startTickTimer()
+
         isRunning = true
         logger.info("Application usage watcher started successfully")
     }
-    
+
     /// Stop watching for application events
     public func stop() {
         guard isRunning else { return }
-        
+
         logger.info("Stopping application usage watcher")
-        
+
+        // Cancel idle/foreground tick
+        tickTimer?.cancel()
+        tickTimer = nil
+        lastTickAt = nil
+
         // Remove all observers
         let center = NSWorkspace.shared.notificationCenter
         for observer in observers {
             center.removeObserver(observer)
         }
         observers.removeAll()
-        
+
         isRunning = false
         logger.info("Application usage watcher stopped")
     }
@@ -167,16 +187,73 @@ public final class AppUsageWatcher: @unchecked Sendable {
     }
     
     private func handleAppActivation(_ notification: Notification) {
-        // For future: track foreground/focus time
-        // Currently just log for debugging
+        // Activation transitions are handled by the periodic tick reading
+        // NSWorkspace.shared.frontmostApplication directly — that avoids any
+        // race where a fast activate→deactivate pair could be missed.
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
               let bundleURL = app.bundleURL,
               isTrackableApplication(bundleURL: bundleURL) else {
             return
         }
-        
+
         let appName = app.localizedName ?? bundleURL.deletingPathExtension().lastPathComponent
         logger.trace("App activated: \(appName)")
+    }
+
+    // MARK: - Idle/Foreground Tick
+
+    /// Start a periodic timer that attributes foreground + active seconds to
+    /// the currently-foreground tracked app's session.
+    private func startTickTimer() {
+        let queue = DispatchQueue(label: "com.reportmate.appusage.tick", qos: .utility)
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + Self.tickInterval, repeating: Self.tickInterval)
+        timer.setEventHandler { [weak self] in
+            self?.handleTick()
+        }
+        tickTimer = timer
+        lastTickAt = Date()
+        timer.resume()
+        logger.info("Idle/foreground tick timer started (interval=\(Self.tickInterval)s, idleThreshold=\(Self.idleThreshold)s)")
+    }
+
+    private func handleTick() {
+        let now = Date()
+
+        // Compute elapsed since last tick. Clamp to defend against sleep/wake
+        // gaps — if the laptop slept for 4h, we don't want to charge 4h of fg
+        // time. We also lose the time *during* sleep, which is correct (no
+        // user was using the machine).
+        let elapsedRaw = lastTickAt.map { now.timeIntervalSince($0) } ?? Self.tickInterval
+        let elapsed = min(max(elapsedRaw, 0), Self.maxTickElapsed)
+        lastTickAt = now
+
+        // Identify the foreground app via NSWorkspace (more robust than
+        // tracking activation events, no missed deactivations).
+        guard let frontApp = NSWorkspace.shared.frontmostApplication,
+              let bundleURL = frontApp.bundleURL,
+              isTrackableApplication(bundleURL: bundleURL) else {
+            return
+        }
+        let pid = Int(frontApp.processIdentifier)
+
+        // System-wide idle seconds (kCGAnyInputEventType = rawValue UInt32.max).
+        // CGEventSourceStateID.combinedSessionState merges HID + posted events.
+        let anyInput = CGEventType(rawValue: ~UInt32(0)) ?? .null
+        let idleSecs = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput)
+
+        let foregroundDelta = Int64(elapsed.rounded())
+        let activeDelta: Int64 = idleSecs < Self.idleThreshold ? foregroundDelta : 0
+
+        do {
+            try database.accumulateActiveTime(
+                pid: pid,
+                foregroundDelta: foregroundDelta,
+                activeDelta: activeDelta
+            )
+        } catch {
+            logger.error("Failed to accumulate active time for pid \(pid): \(error.localizedDescription)")
+        }
     }
     
     // MARK: - Reconciliation
