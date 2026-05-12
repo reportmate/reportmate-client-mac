@@ -19,6 +19,12 @@ public final class AppUsageDatabase: @unchecked Sendable {
     private let startTime = Expression<String>("start_time")  // ISO8601
     private let endTime = Expression<String?>("end_time")      // ISO8601, null if still running
     private let durationSeconds = Expression<Int64>("duration_seconds")
+    // Idle-time tracking — populated by the watcher's periodic tick.
+    //   foregroundSeconds: time the app held OS focus (regardless of input)
+    //   activeSeconds:     time foreground AND system input within the prior 300s
+    // Both accumulate per session for the lifetime of the process.
+    private let foregroundSeconds = Expression<Int64>("foreground_seconds")
+    private let activeSeconds = Expression<Int64>("active_seconds")
     private let transmitted = Expression<Bool>("transmitted")  // Mark as transmitted for two-phase delete
     
     // MARK: - Properties
@@ -59,9 +65,17 @@ public final class AppUsageDatabase: @unchecked Sendable {
             t.column(startTime)
             t.column(endTime)
             t.column(durationSeconds, defaultValue: 0)
+            t.column(foregroundSeconds, defaultValue: 0)
+            t.column(activeSeconds, defaultValue: 0)
             t.column(transmitted, defaultValue: false)
         })
-        
+
+        // Migrations for existing databases — SQLite's ALTER TABLE ADD COLUMN
+        // doesn't support "IF NOT EXISTS", so we swallow the duplicate-column
+        // error. Safe to run on every initialize().
+        _ = try? db?.execute("ALTER TABLE app_sessions ADD COLUMN foreground_seconds INTEGER NOT NULL DEFAULT 0")
+        _ = try? db?.execute("ALTER TABLE app_sessions ADD COLUMN active_seconds INTEGER NOT NULL DEFAULT 0")
+
         // Create indexes for common queries
         try db?.run(sessions.createIndex(bundleId, ifNotExists: true))
         try db?.run(sessions.createIndex(startTime, ifNotExists: true))
@@ -96,10 +110,36 @@ public final class AppUsageDatabase: @unchecked Sendable {
             startTime <- now,
             endTime <- nil as String?,
             durationSeconds <- 0,
+            foregroundSeconds <- 0,
+            activeSeconds <- 0,
             transmitted <- false
         )
-        
+
         return try db.run(insert)
+    }
+
+    /// Accumulate foreground/active time into the most recent active session
+    /// for a given PID. Called by the watcher's periodic tick.
+    /// No-op if no active session exists for that PID (app already terminated).
+    public func accumulateActiveTime(pid: Int, foregroundDelta: Int64, activeDelta: Int64) throws {
+        guard let db = db else {
+            throw AppUsageDatabaseError.notInitialized
+        }
+        guard foregroundDelta > 0 || activeDelta > 0 else { return }
+
+        let query = sessions
+            .filter(self.pid == Int64(pid))
+            .filter(endTime == nil)
+            .order(startTime.desc)
+            .limit(1)
+
+        if let row = try db.pluck(query) {
+            let session = sessions.filter(id == row[id])
+            try db.run(session.update(
+                foregroundSeconds <- foregroundSeconds + foregroundDelta,
+                activeSeconds <- activeSeconds + activeDelta
+            ))
+        }
     }
     
     /// Record an application termination (end of session)
@@ -179,6 +219,8 @@ public final class AppUsageDatabase: @unchecked Sendable {
                     startTime <- formatter.string(from: app.startTime),
                     endTime <- nil as String?,
                     durationSeconds <- 0,
+                    foregroundSeconds <- 0,
+                    activeSeconds <- 0,
                     transmitted <- false
                 )
                 _ = try db.run(insert)
@@ -213,14 +255,16 @@ public final class AppUsageDatabase: @unchecked Sendable {
                 startTime: formatter.date(from: row[startTime]) ?? Date(),
                 endTime: row[endTime].flatMap { formatter.date(from: $0) },
                 durationSeconds: row[durationSeconds],
+                foregroundSeconds: row[foregroundSeconds],
+                activeSeconds: row[activeSeconds],
                 transmitted: row[transmitted]
             )
             records.append(record)
         }
-        
+
         return records
     }
-    
+
     /// Get active sessions (currently running apps)
     public func getActiveSessions() throws -> [AppUsageSessionRecord] {
         guard let db = db else {
@@ -249,14 +293,16 @@ public final class AppUsageDatabase: @unchecked Sendable {
                 startTime: startDate,
                 endTime: nil,
                 durationSeconds: currentDuration,
+                foregroundSeconds: row[foregroundSeconds],
+                activeSeconds: row[activeSeconds],
                 transmitted: false
             )
             records.append(record)
         }
-        
+
         return records
     }
-    
+
     /// Get aggregated usage stats by app
     public func getUsageStats() throws -> [AppUsageStats] {
         guard let db = db else {
@@ -365,8 +411,10 @@ public struct AppUsageSessionRecord: Sendable {
     public let startTime: Date
     public let endTime: Date?
     public let durationSeconds: Int64
+    public let foregroundSeconds: Int64
+    public let activeSeconds: Int64
     public let transmitted: Bool
-    
+
     public var isActive: Bool { endTime == nil }
     public var isUnknownDuration: Bool { durationSeconds == -1 }
 }

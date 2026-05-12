@@ -53,8 +53,12 @@ public struct ApplicationUsageSession: Sendable {
     public var startTime: Date = Date()
     public var endTime: Date? = nil
     public var durationSeconds: Double = 0
+    // Idle-time split: foreground = time app held OS focus; active = foreground
+    // AND user input within prior 300s. Populated by AppUsageWatcher's tick.
+    public var foregroundSeconds: Double = 0
+    public var activeSeconds: Double = 0
     public var isActive: Bool = false
-    
+
     public func toDictionary() -> [String: Any] {
         let formatter = ISO8601DateFormatter()
         var dict: [String: Any] = [
@@ -65,6 +69,8 @@ public struct ApplicationUsageSession: Sendable {
             "user": user,
             "startTime": formatter.string(from: startTime),
             "durationSeconds": Int64(durationSeconds),
+            "foregroundSeconds": Int64(foregroundSeconds),
+            "activeSeconds": Int64(activeSeconds),
             "isActive": isActive
         ]
         if let end = endTime {
@@ -179,6 +185,8 @@ public class ApplicationUsageService: @unchecked Sendable {
         let startTimeCol = Expression<String>("start_time")
         let endTimeCol = Expression<String?>("end_time")
         let durationCol = Expression<Int64>("duration_seconds")
+        let foregroundCol = Expression<Int64>("foreground_seconds")
+        let activeCol = Expression<Int64>("active_seconds")
         let transmittedCol = Expression<Bool>("transmitted")
         
         // Query untransmitted completed sessions + active sessions
@@ -222,6 +230,11 @@ public class ApplicationUsageService: @unchecked Sendable {
             session.startTime = startDate
             session.endTime = row[endTimeCol].flatMap { formatter.date(from: $0) }
             session.durationSeconds = duration
+            // Foreground/active counters are missing on rows written before the
+            // schema migration; SQLite returns 0 in that case, which is the
+            // correct neutral value.
+            session.foregroundSeconds = Double((try? row.get(foregroundCol)) ?? 0)
+            session.activeSeconds = Double((try? row.get(activeCol)) ?? 0)
             session.isActive = isActive
             
             result.append(session)
@@ -389,6 +402,8 @@ public class ApplicationUsageService: @unchecked Sendable {
                 "publisher": "",
                 "launches": grouped.count,
                 "totalSeconds": grouped.reduce(0.0) { $0 + $1.durationSeconds },
+                "foregroundSeconds": grouped.reduce(0.0) { $0 + $1.foregroundSeconds },
+                "activeSeconds": grouped.reduce(0.0) { $0 + $1.activeSeconds },
                 "users": users
             ])
         }
