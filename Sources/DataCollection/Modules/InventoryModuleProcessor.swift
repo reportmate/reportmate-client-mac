@@ -48,9 +48,8 @@ public class InventoryModuleProcessor: BaseModuleProcessor, @unchecked Sendable 
         let deviceName = (finalData["computer_name"] as? String) ?? (finalData["hostname"] as? String) ?? ""
         
         let rawFleet = fileInfo["fleet"] ?? ""
-        let fleet = rawFleet.trimmingCharacters(in: .whitespaces)
-                            .trimmingCharacters(in: CharacterSet(charactersIn: ","))
-                            .trimmingCharacters(in: .whitespaces)
+        let trimmedFleet = rawFleet.trimmingCharacters(in: .whitespaces)
+        let fleet = trimmedFleet.trimmingCharacters(in: CharacterSet(charactersIn: ",")).isEmpty ? "" : trimmedFleet
 
         return InventoryData(
             deviceName: deviceName,
