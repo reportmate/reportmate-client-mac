@@ -23,8 +23,22 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         let mdmInfo = try await collectMDMClientInfo()
         
         ConsoleFormatter.writeQueryProgress(queryName: "mdm_certificate", current: 3, total: totalSteps)
-        let mdmCert = try await collectMDMCertificateDetails()
-        
+        var mdmCert = try await collectMDMCertificateDetails()
+
+        // Re-resolve mdm_provider from the active enrollment URL. The provider
+        // derived in collectMDMCertificateDetails() comes from the MDM identity
+        // certificate, which goes stale when a device migrates between MDMs: the
+        // old identity certificate lingers in the System keychain for years. The
+        // live server/check-in URL is the source of truth for the current MDM.
+        let resolvedProvider = resolveMDMProvider(
+            serverURL: (mdm["server_url"] as? String) ?? "",
+            checkinURL: (mdm["checkin_url"] as? String) ?? "",
+            certIssuer: (mdmCert["certificate_issuer"] as? String) ?? ""
+        )
+        if !resolvedProvider.isEmpty {
+            mdmCert["mdm_provider"] = resolvedProvider
+        }
+
         ConsoleFormatter.writeQueryProgress(queryName: "ade_config", current: 4, total: totalSteps)
         let ade = try await collectADEConfiguration()
         
@@ -383,7 +397,38 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             bash: bashScript
         )
     }
-    
+
+    // MARK: - MDM Provider Resolution
+
+    /// Resolves the MDM provider for the device's *current* enrollment.
+    ///
+    /// The active MDM server/check-in URL is authoritative: it is the endpoint
+    /// the device talks to right now. The MDM identity certificate is only a
+    /// fallback - after a device migrates between MDMs the old identity
+    /// certificate stays in the System keychain (often valid for years), so its
+    /// issuer can name a provider the device left long ago.
+    private func resolveMDMProvider(serverURL: String, checkinURL: String, certIssuer: String) -> String {
+        let url = "\(serverURL) \(checkinURL)".lowercased()
+        if url.contains("manage.microsoft.com") || url.contains("intune") { return "Microsoft Intune" }
+        if url.contains("jamfcloud") || url.contains("jamf") { return "Jamf Pro" }
+        if url.contains("mosyle") { return "Mosyle" }
+        if url.contains("kandji") { return "Kandji" }
+        if url.contains("addigy") { return "Addigy" }
+        if url.contains("simplemdm") { return "SimpleMDM" }
+        if url.contains("micromdm") { return "MicroMDM" }
+        if url.contains("nanomdm") { return "NanoMDM" }
+
+        // URL unrecognized - fall back to the certificate issuer.
+        let issuer = certIssuer.lowercased()
+        if issuer.contains("micromdm") { return "MicroMDM" }
+        if issuer.contains("nanomdm") { return "NanoMDM" }
+        if issuer.contains("jamf") { return "Jamf Pro" }
+        if issuer.contains("microsoft") || issuer.contains("intune") { return "Microsoft Intune" }
+        if issuer.contains("mosyle") { return "Mosyle" }
+        if issuer.contains("kandji") { return "Kandji" }
+        return certIssuer
+    }
+
     // MARK: - ADE Configuration (Automated Device Enrollment, formerly DEP)
 
     private func collectADEConfiguration() async throws -> [String: Any] {
