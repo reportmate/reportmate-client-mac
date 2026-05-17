@@ -196,15 +196,21 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let activeConnectionInfo = try await getActiveConnectionInfo()
         let activeInterfaceName = activeConnectionInfo["interface"] as? String
         let gateway = activeConnectionInfo["gateway"] as? String
-        
+
+        // Determine which interfaces are Wi-Fi by asking CoreWLAN directly.
+        // Interface naming is NOT a reliable signal: en0 is Wi-Fi on laptops but
+        // Ethernet on desktop Macs (iMac/Mac mini/Studio), where Wi-Fi is en1+.
+        // CoreWLAN enumerates Wi-Fi hardware without needing Location Services.
+        let wifiInterfaceNames = Set(CWWiFiClient.shared().interfaces()?.compactMap { $0.interfaceName } ?? [])
+
         // Map RawNetworkInterface to global NetworkInterface
         let interfaces = filteredRawInterfaces.map { raw -> NetworkInterface in
             // Determine if this is the active interface
             let isActive = raw.name == activeInterfaceName
-            
-            // Determine interface type - en0 is typically WiFi on Mac
+
+            // Determine interface type from CoreWLAN, not the interface name
             let type: NetworkInterfaceType
-            if raw.name == "en0" {
+            if wifiInterfaceNames.contains(raw.name) {
                 type = .wifi
             } else if raw.name.hasPrefix("en") {
                 type = .ethernet
@@ -251,7 +257,7 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             // Find the first IPv4 address for the active interface
             let activeIfaceData = filteredRawInterfaces.first { $0.name == physicalIface && $0.address?.contains(".") == true }
             
-            let connType = physicalIface == "en0" ? "WiFi" : "Ethernet"
+            let connType = wifiInterfaceNames.contains(physicalIface) ? "WiFi" : "Ethernet"
             
             activeConnection = ActiveConnection(
                 interface: physicalIface,
