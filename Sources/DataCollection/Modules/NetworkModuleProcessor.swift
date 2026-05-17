@@ -208,15 +208,10 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             // Determine if this is the active interface
             let isActive = raw.name == activeInterfaceName
 
-            // Determine interface type from CoreWLAN, not the interface name
-            let type: NetworkInterfaceType
-            if wifiInterfaceNames.contains(raw.name) {
-                type = .wifi
-            } else if raw.name.hasPrefix("en") {
-                type = .ethernet
-            } else {
-                type = .other
-            }
+            // Determine interface type from CoreWLAN, not the interface name.
+            // filteredRawInterfaces is already restricted to en* above, so any
+            // interface that is not Wi-Fi here is Ethernet.
+            let type: NetworkInterfaceType = wifiInterfaceNames.contains(raw.name) ? .wifi : .ethernet
             
             var addresses: [NetworkAddress] = []
             if let addr = raw.address {
