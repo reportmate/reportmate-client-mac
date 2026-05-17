@@ -126,6 +126,43 @@ jobs:
           }
           EOF
 
+      - name: Generate ModuleVersions.swift
+        run: |
+          mkdir -p Sources/Generated
+          FALLBACK_VERSION="$(date -u +%Y.%m.%d.%H%M)"
+          MODULES="applications|Sources/DataCollection/Modules/ApplicationsModuleProcessor.swift Sources/Models/Modules/AnalyticsModels.swift
+          hardware|Sources/DataCollection/Modules/HardwareModuleProcessor.swift Sources/Models/Modules/HardwareModels.swift
+          identity|Sources/DataCollection/Modules/IdentityModuleProcessor.swift Sources/Models/Modules/IdentityModels.swift
+          installs|Sources/DataCollection/Modules/InstallsModuleProcessor.swift Sources/Models/Modules/InstallsModels.swift
+          inventory|Sources/DataCollection/Modules/InventoryModuleProcessor.swift Sources/Models/Modules/InventoryModels.swift
+          management|Sources/DataCollection/Modules/ManagementModuleProcessor.swift Sources/Models/Modules/ManagementModels.swift
+          network|Sources/DataCollection/Modules/NetworkModuleProcessor.swift Sources/Models/Modules/NetworkModels.swift
+          peripherals|Sources/DataCollection/Modules/PeripheralsModuleProcessor.swift Sources/Models/Modules/PeripheralsModels.swift
+          security|Sources/DataCollection/Modules/SecurityModuleProcessor.swift Sources/Models/Modules/SecurityModels.swift
+          system|Sources/DataCollection/Modules/SystemModuleProcessor.swift Sources/Models/Modules/SystemModels.swift"
+          {
+            echo "import Foundation"
+            echo ""
+            echo "/// Per-module versions derived from git commit history"
+            echo "/// Format: YYYY.MM.DD.HHMM — reflects last change to each module's source files"
+            echo "/// This file is auto-generated at build time — do not edit manually"
+            echo "public enum ModuleVersions {"
+            echo "    public static func version(for moduleId: String) -> String {"
+            echo "        switch moduleId.lowercased() {"
+            while IFS='|' read -r module_id files; do
+              [ -z "$module_id" ] && continue
+              module_version="$FALLBACK_VERSION"
+              git_date=$(git log --format=%cd --date=format:%Y.%m.%d.%H%M -1 -- $files 2>/dev/null)
+              [ -n "$git_date" ] && module_version="$git_date"
+              echo "        case \"$module_id\": return \"$module_version\""
+            done <<< "$MODULES"
+            echo "        default: return \"0.0.0.0000\""
+            echo "        }"
+            echo "    }"
+            echo "}"
+          } > Sources/Generated/ModuleVersions.swift
+          cat Sources/Generated/ModuleVersions.swift
+
       - name: Build Swift package
         run: |
           CONFIGURATION="${{ github.event.inputs.configuration || 'release' }}"

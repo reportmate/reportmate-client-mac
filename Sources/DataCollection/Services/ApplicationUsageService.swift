@@ -1,6 +1,11 @@
 import Foundation
 import SQLite
 
+/// SQLite.swift's `Expression` collides with `Foundation.Expression` on recent
+/// SDKs, making bare `Expression<...>` ambiguous. Alias to the SQLite type so
+/// the column declarations below stay unambiguous.
+private typealias Expression<Datatype> = SQLite.Expression<Datatype>
+
 // MARK: - Application Usage Models
 
 /// Snapshot of application usage data - matches Windows ApplicationUsageSnapshot
