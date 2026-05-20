@@ -28,7 +28,8 @@ public class DataCollectionService {
     /// Collect data from all enabled modules
     public func collectAllModules() async throws -> [String: Any] {
         var moduleResults: [String: ModuleData] = [:]
-        
+        let timeout = configuration.moduleTimeoutSeconds
+
         // Execute data collection concurrently across all enabled modules
         await withTaskGroup(of: (String, ModuleData?).self) { group in
             for moduleId in configuration.enabledModules {
@@ -36,54 +37,54 @@ public class DataCollectionService {
                     print("Warning: No processor found for module '\(moduleId)'")
                     continue
                 }
-                
+
                 group.addTask { @Sendable [processor] in
-                    do {
-                        let data = try await processor.collectData()
-                        return (moduleId, data)
-                    } catch {
-                        print("Error collecting data from module '\(moduleId)': \(error)")
-                        return (moduleId, nil)
-                    }
+                    let data = await Self.collectModuleWithTimeout(
+                        moduleId: moduleId,
+                        processor: processor,
+                        timeoutSeconds: timeout
+                    )
+                    return (moduleId, data)
                 }
             }
-            
+
             for await (moduleId, moduleData) in group {
                 if let moduleData = moduleData {
                     moduleResults[moduleId] = moduleData
                 }
             }
         }
-        
+
         // Create device identification
         let deviceInfo = try await collectDeviceInfo()
-        
+
         // Build unified payload structure matching Windows client format
         return buildUnifiedPayload(deviceInfo: deviceInfo, moduleResults: moduleResults)
     }
-    
+
     /// Collect data from specific modules
     public func collectSpecificModules(_ moduleIds: [String]) async throws -> [String: Any] {
         var moduleResults: [String: ModuleData] = [:]
-        
+        let timeout = configuration.moduleTimeoutSeconds
+
         for moduleId in moduleIds {
             guard let processor = moduleProcessors[moduleId] else {
                 print("Warning: Module '\(moduleId)' not found, skipping...")
                 continue
             }
-            
-            do {
-                let moduleData = try await processor.collectData()
+
+            if let moduleData = await Self.collectModuleWithTimeout(
+                moduleId: moduleId,
+                processor: processor,
+                timeoutSeconds: timeout
+            ) {
                 moduleResults[moduleId] = moduleData
-            } catch {
-                print("Warning: Failed to collect data from module '\(moduleId)': \(error.localizedDescription)")
-                // Continue with other modules instead of failing completely
             }
         }
-        
+
         // Create device identification
         let deviceInfo = try await collectDeviceInfo()
-        
+
         // Build unified payload structure matching Windows client format
         return buildUnifiedPayload(deviceInfo: deviceInfo, moduleResults: moduleResults)
     }
@@ -93,8 +94,50 @@ public class DataCollectionService {
         guard let processor = moduleProcessors[moduleId] else {
             throw DataCollectionError.moduleNotFound(moduleId)
         }
-        
-        return try await processor.collectData()
+
+        return await Self.collectModuleWithTimeout(
+            moduleId: moduleId,
+            processor: processor,
+            timeoutSeconds: configuration.moduleTimeoutSeconds
+        )
+    }
+
+    /// Race a module's collectData() against a wall-clock budget. Defensive
+    /// layer on top of the per-query timeout in OSQueryService: even if the
+    /// individual queries respect their bounds, the sum of bash fallbacks,
+    /// I/O, and processing must still fit in a useful window. On timeout,
+    /// the module is skipped — every other module still transmits.
+    private static func collectModuleWithTimeout(
+        moduleId: String,
+        processor: ModuleProcessor,
+        timeoutSeconds: Double
+    ) async -> ModuleData? {
+        let start = Date()
+        do {
+            let result: ModuleData? = try await withThrowingTaskGroup(of: ModuleData?.self) { group in
+                group.addTask { @Sendable [processor] in
+                    return try await processor.collectData()
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
+                    throw ModuleTimeoutError.timedOut(moduleId, timeoutSeconds)
+                }
+                defer { group.cancelAll() }
+                let first = try await group.next()
+                return first ?? nil
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            ConsoleFormatter.writeInfo("module \(moduleId) status=ok elapsed=\(String(format: "%.1fs", elapsed))")
+            return result
+        } catch let error as ModuleTimeoutError {
+            let elapsed = Date().timeIntervalSince(start)
+            ConsoleFormatter.writeWarning("module \(moduleId) status=timeout budget=\(String(format: "%.0fs", error.seconds)) elapsed=\(String(format: "%.1fs", elapsed)) -- skipping, other modules will still transmit")
+            return nil
+        } catch {
+            let elapsed = Date().timeIntervalSince(start)
+            ConsoleFormatter.writeWarning("module \(moduleId) status=failed elapsed=\(String(format: "%.1fs", elapsed)) error=\(error.localizedDescription)")
+            return nil
+        }
     }
     
     // MARK: - Private Methods
@@ -253,6 +296,16 @@ public class DataCollectionService {
 }
 
 // MARK: - Error Types
+
+enum ModuleTimeoutError: Error {
+    case timedOut(String, Double)
+
+    var seconds: Double {
+        switch self {
+        case .timedOut(_, let seconds): return seconds
+        }
+    }
+}
 
 public enum DataCollectionError: Error, LocalizedError {
     case moduleNotFound(String)
