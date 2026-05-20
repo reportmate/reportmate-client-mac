@@ -145,9 +145,12 @@ public class ConfigurationManager {
             "REPORTMATE_DEVICE_ID": "DeviceId",
             "REPORTMATE_PASSPHRASE": "Passphrase",
             "REPORTMATE_COLLECTION_INTERVAL": "CollectionInterval",
-            "REPORTMATE_LOG_LEVEL": "LogLevel"
+            "REPORTMATE_LOG_LEVEL": "LogLevel",
+            "REPORTMATE_QUERY_TIMEOUT": "QueryTimeoutSeconds",
+            "REPORTMATE_EXTENSION_QUERY_TIMEOUT": "ExtensionQueryTimeoutSeconds",
+            "REPORTMATE_MODULE_TIMEOUT": "ModuleTimeoutSeconds"
         ]
-        
+
         for (envKey, configKey) in envMappings {
             if let value = environment[envKey] {
                 // Convert string values to appropriate types
@@ -155,6 +158,10 @@ public class ConfigurationManager {
                 case "CollectionInterval":
                     if let intValue = Int(value) {
                         config[configKey] = intValue
+                    }
+                case "QueryTimeoutSeconds", "ExtensionQueryTimeoutSeconds", "ModuleTimeoutSeconds":
+                    if let doubleValue = Double(value) {
+                        config[configKey] = doubleValue
                     }
                 case "EnabledModules":
                     config[configKey] = value.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
@@ -224,6 +231,22 @@ public struct ReportMateConfiguration {
     public var validateSSL: Bool = true
     public var timeout: Int = 300 // 5 minutes
 
+    /// Per-query timeout for built-in osquery tables. Kills the osqueryi process
+    /// if it does not return within this bound, so a single misbehaving table
+    /// cannot block the rest of a module's collection.
+    public var queryTimeoutSeconds: Double = 30
+
+    /// Per-query timeout for macadmins extension tables. Higher than the built-in
+    /// bound because the extension path includes a 7s startup sleep plus the
+    /// extension's own registration time. Tables that do online I/O (e.g.
+    /// sofa_unpatched_cves fetching the SOFA feed) are the usual offenders.
+    public var extensionQueryTimeoutSeconds: Double = 60
+
+    /// Per-module wall-clock timeout. Defensive layer in case the sum of a
+    /// module's queries exceeds a useful budget; the module returns whatever
+    /// partial data it has and the runner moves on to the next module.
+    public var moduleTimeoutSeconds: Double = 120
+
     /// Controls whether deep storage directory analysis runs on each collection cycle
     public var storageMode: StorageMode = .auto
 
@@ -241,6 +264,12 @@ public struct ReportMateConfiguration {
         if let useAltSystemInfo = other["UseAltSystemInfo"] as? Bool { self.useAltSystemInfo = useAltSystemInfo }
         if let validateSSL = other["ValidateSSL"] as? Bool { self.validateSSL = validateSSL }
         if let timeout = other["Timeout"] as? Int { self.timeout = timeout }
+        if let queryTimeout = other["QueryTimeoutSeconds"] as? Double { self.queryTimeoutSeconds = queryTimeout }
+        else if let queryTimeoutInt = other["QueryTimeoutSeconds"] as? Int { self.queryTimeoutSeconds = Double(queryTimeoutInt) }
+        if let extQueryTimeout = other["ExtensionQueryTimeoutSeconds"] as? Double { self.extensionQueryTimeoutSeconds = extQueryTimeout }
+        else if let extQueryTimeoutInt = other["ExtensionQueryTimeoutSeconds"] as? Int { self.extensionQueryTimeoutSeconds = Double(extQueryTimeoutInt) }
+        if let moduleTimeout = other["ModuleTimeoutSeconds"] as? Double { self.moduleTimeoutSeconds = moduleTimeout }
+        else if let moduleTimeoutInt = other["ModuleTimeoutSeconds"] as? Int { self.moduleTimeoutSeconds = Double(moduleTimeoutInt) }
         if let storageModeStr = other["StorageMode"] as? String,
            let mode = StorageMode(rawValue: storageModeStr) { self.storageMode = mode }
     }

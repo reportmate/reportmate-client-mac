@@ -150,196 +150,290 @@ public class OSQueryService {
     /// For extension tables, uses the --extension flag which starts extension as a child process
     /// The extension takes ~3 seconds to register, so for extension tables we use a two-phase approach
     /// Built-in table queries always use the fast path (no extension loading)
+    ///
+    /// Both code paths are wrapped in a hard timeout: if osqueryi does not return
+    /// within the configured budget, the child process is killed (SIGTERM, then
+    /// SIGKILL after a 2s grace period) and `OSQueryError.timeout` is thrown. This
+    /// prevents a single misbehaving table — most commonly extension tables that
+    /// do online I/O like `sofa_unpatched_cves` fetching the SOFA feed — from
+    /// blocking the rest of a module's collection indefinitely.
     public func executeQuery(_ query: String) async throws -> [[String: Any]] {
-        // Route built-in table queries to the fast path — no extension overhead
-        if extensionPath == nil || !Self.queryUsesExtensionTables(query) {
-            return try await executeSimpleQuery(query)
+        let useExtension = extensionPath != nil && Self.queryUsesExtensionTables(query)
+        let timeout = useExtension
+            ? configuration.extensionQueryTimeoutSeconds
+            : configuration.queryTimeoutSeconds
+
+        // Snapshot the values the detached query runner needs so the task
+        // closures don't capture `self` (avoids Swift 6 sending-closure data
+        // race diagnostics for this non-Sendable class).
+        let osqueryPath = self.osqueryPath
+        let extensionPath = self.extensionPath
+
+        return try await withThrowingTaskGroup(of: QueryRunResult.self) { group in
+            let processBox = ProcessBox()
+
+            group.addTask {
+                let rows: [[String: Any]]
+                if useExtension, let extensionPath = extensionPath {
+                    rows = try await Self.runExtensionQuery(
+                        query,
+                        osqueryPath: osqueryPath,
+                        extensionPath: extensionPath,
+                        processBox: processBox
+                    )
+                } else {
+                    rows = try await Self.runSimpleQuery(
+                        query,
+                        osqueryPath: osqueryPath,
+                        processBox: processBox
+                    )
+                }
+                return .completed(rows)
+            }
+
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                return .timedOut
+            }
+
+            defer { group.cancelAll() }
+
+            while let outcome = try await group.next() {
+                switch outcome {
+                case .completed(let rows):
+                    return rows
+                case .timedOut:
+                    processBox.terminate()
+                    // Grace period, then SIGKILL if still alive.
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    processBox.forceKill()
+                    throw OSQueryError.timeout(timeout)
+                }
+            }
+            return []
         }
-        
-        // Extension tables: use osqueryi's --extension flag with sleep delay
-        return try await executeQueryWithExtension(query)
+    }
+
+    /// Outcome of one query race participant.
+    /// `@unchecked Sendable` is sound here because each case payload is
+    /// produced inside a single Task and only read after that Task ends;
+    /// there is no concurrent mutation of the dictionary contents.
+    private enum QueryRunResult: @unchecked Sendable {
+        case completed([[String: Any]])
+        case timedOut
+    }
+
+    /// Sendable wrapper for the JSON rows crossing Task boundaries. Same
+    /// soundness argument as `QueryRunResult`: the rows are produced in one
+    /// Task, never shared concurrently.
+    private struct QueryRows: @unchecked Sendable {
+        let rows: [[String: Any]]
+    }
+
+    /// Shared handle to the running osqueryi/bash Process so the timeout watcher
+    /// can kill it from outside the running Task. Process itself is not Sendable
+    /// across Swift Concurrency boundaries; we wrap it in a small class with
+    /// just terminate/kill so the timeout path is self-contained.
+    private final class ProcessBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+
+        func attach(_ process: Process) {
+            lock.lock(); defer { lock.unlock() }
+            self.process = process
+        }
+
+        func terminate() {
+            lock.lock(); defer { lock.unlock() }
+            guard let process = process, process.isRunning else { return }
+            process.terminate()
+        }
+
+        func forceKill() {
+            lock.lock(); defer { lock.unlock() }
+            guard let process = process, process.isRunning else { return }
+            kill(process.processIdentifier, SIGKILL)
+        }
     }
     
-    /// Execute a simple osquery query without extension support
-    private func executeSimpleQuery(_ query: String) async throws -> [[String: Any]] {
-        return try await withCheckedThrowingContinuation { continuation in
+    /// Execute a simple osquery query without extension support.
+    /// Runs on a detached Task so the blocking pipe reads release the cooperative
+    /// thread pool; on timeout, the parent will terminate the Process and the
+    /// pipe will EOF, unblocking the read here.
+    private static func runSimpleQuery(_ query: String, osqueryPath: String, processBox: ProcessBox) async throws -> [[String: Any]] {
+        let box = try await Task.detached(priority: .userInitiated) { () throws -> QueryRows in
             let task = Process()
             task.executableURL = URL(fileURLWithPath: osqueryPath)
             task.arguments = ["--json", query]
-            
+
             let outputPipe = Pipe()
             let errorPipe = Pipe()
             task.standardOutput = outputPipe
             task.standardError = errorPipe
-            
+
             do {
                 try task.run()
-                
-                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                
-                task.waitUntilExit()
-                
-                if task.terminationStatus != 0 {
-                    let errorMessage = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-                    continuation.resume(throwing: OSQueryError.executionFailed(errorMessage))
-                    return
-                }
-                
-                guard let jsonString = String(data: outputData, encoding: .utf8),
-                      let jsonData = jsonString.data(using: .utf8) else {
-                    continuation.resume(throwing: OSQueryError.invalidOutput("Could not decode output as UTF-8"))
-                    return
-                }
-                
-                do {
-                    if let jsonArray = try JSONSerialization.jsonObject(with: jsonData) as? [[String: Any]] {
-                        continuation.resume(returning: jsonArray)
-                    } else {
-                        continuation.resume(throwing: OSQueryError.invalidOutput("Output is not a JSON array"))
-                    }
-                } catch {
-                    continuation.resume(throwing: OSQueryError.jsonDecodingFailed(error))
-                }
-                
             } catch {
-                continuation.resume(throwing: OSQueryError.processLaunchFailed(error))
+                throw OSQueryError.processLaunchFailed(error)
             }
-        }
+            processBox.attach(task)
+
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit()
+
+            // If the process was killed (e.g. timeout), surface a clean error so
+            // the parent's race resolution stays deterministic. The parent has
+            // already thrown OSQueryError.timeout in that case; this throw just
+            // unblocks the group cleanly.
+            if task.terminationReason == .uncaughtSignal {
+                throw OSQueryError.executionFailed("osqueryi terminated by signal")
+            }
+
+            if task.terminationStatus != 0 {
+                let errorMessage = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+                throw OSQueryError.executionFailed(errorMessage)
+            }
+
+            guard let jsonString = String(data: outputData, encoding: .utf8),
+                  let jsonData = jsonString.data(using: .utf8) else {
+                throw OSQueryError.invalidOutput("Could not decode output as UTF-8")
+            }
+
+            do {
+                if let jsonArray = try JSONSerialization.jsonObject(with: jsonData) as? [[String: Any]] {
+                    return QueryRows(rows: jsonArray)
+                } else {
+                    throw OSQueryError.invalidOutput("Output is not a JSON array")
+                }
+            } catch let error as OSQueryError {
+                throw error
+            } catch {
+                throw OSQueryError.jsonDecodingFailed(error)
+            }
+        }.value
+        return box.rows
     }
     
-    /// Execute an osquery query with extension support
-    /// Uses delayed stdin approach to ensure extension has time to register before query runs
-    /// The extension takes ~6 seconds to fully register its tables
-    private func executeQueryWithExtension(_ query: String) async throws -> [[String: Any]] {
-        return try await withCheckedThrowingContinuation { continuation in
-            // WORKAROUND: osquery extension loading is asynchronous.
-            // When using --extension flag, the extension process starts but tables
-            // aren't immediately available. If we send the query too soon, it fails
-            // with "no such table" error.
-            //
-            // Solution: Use bash to delay query input until extension has registered.
-            // We pipe the query via a subshell that sleeps first.
-            
+    /// Execute an osquery query with extension support.
+    /// Uses a bash subshell that sleeps 7s before sending the query, giving the
+    /// macadmins extension time to register its tables. The bash process is the
+    /// one we kill on timeout — terminating it brings down the osqueryi child
+    /// and unblocks the pipe reads here.
+    private static func runExtensionQuery(_ query: String, osqueryPath: String, extensionPath: String, processBox: ProcessBox) async throws -> [[String: Any]] {
+        let box = try await Task.detached(priority: .userInitiated) { () throws -> QueryRows in
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/bin/bash")
-            
-            // Escape the query for shell
+
             let escapedQuery = query.replacingOccurrences(of: "'", with: "'\"'\"'")
-            
-            // Use bash -c with a subshell that:
-            // 1. Sleeps 7 seconds to let extension register
-            // 2. Sends the query
-            // 3. Sends .exit to close osqueryi
-            // The pipe to osqueryi waits for input, giving extension time to load
+
             let script = """
-            (sleep 7 && echo '\(escapedQuery)' && echo '.exit') | "\(osqueryPath)" --json --extension "\(extensionPath!)" --extensions_timeout 15
+            (sleep 7 && echo '\(escapedQuery)' && echo '.exit') | "\(osqueryPath)" --json --extension "\(extensionPath)" --extensions_timeout 15
             """
-            
+
             task.arguments = ["-c", script]
-            
+
             let outputPipe = Pipe()
             let errorPipe = Pipe()
             task.standardOutput = outputPipe
             task.standardError = errorPipe
-            
+
             do {
                 try task.run()
-                
-                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                
-                task.waitUntilExit()
-                
-                guard let outputString = String(data: outputData, encoding: .utf8) else {
-                    continuation.resume(throwing: OSQueryError.invalidOutput("Could not decode output as UTF-8"))
-                    return
-                }
-                
-                // Debug: log output for extension debugging (only when verbose)
-                let errorString = String(data: errorData, encoding: .utf8) ?? ""
-                if ConsoleFormatter.verboseLevel >= 3 {
-                    if !errorString.isEmpty && (errorString.contains("error") || errorString.contains("Error")) {
-                        ConsoleFormatter.writeDebug("OSQuery stderr: \(errorString.prefix(200))...")
-                    }
-                }
-                ConsoleFormatter.writeDebug("OSQuery output length: \(outputString.count) chars")
-                
-                // Find the JSON array in the output (starts with [ and ends with ])
-                if let jsonStart = outputString.firstIndex(of: "["),
-                   let jsonEnd = outputString.lastIndex(of: "]") {
-                    let jsonString = String(outputString[jsonStart...jsonEnd])
-                    
-                    if let jsonData = jsonString.data(using: .utf8) {
-                        do {
-                            if let jsonArray = try JSONSerialization.jsonObject(with: jsonData) as? [[String: Any]] {
-                                continuation.resume(returning: jsonArray)
-                                return
-                            }
-                        } catch {
-                            // JSON parsing failed, check if it's an error response
-                        }
-                    }
-                }
-                
-                // Check for errors in stderr or output
-                if outputString.contains("no such table") || errorString.contains("no such table") {
-                    continuation.resume(throwing: OSQueryError.executionFailed("no such table"))
-                    return
-                }
-                
-                // If task failed with non-zero exit code
-                if task.terminationStatus != 0 {
-                    let errorMessage = errorString.isEmpty ? "osquery exited with code \(task.terminationStatus)" : errorString
-                    continuation.resume(throwing: OSQueryError.executionFailed(errorMessage))
-                    return
-                }
-                
-                // If we got here with no JSON, return empty array
-                if outputString.isEmpty {
-                    let errorMessage = errorString.isEmpty ? "No output from osquery" : errorString
-                    continuation.resume(throwing: OSQueryError.executionFailed(errorMessage))
-                } else {
-                    // No valid JSON found but also no error - might be an empty result
-                    continuation.resume(returning: [])
-                }
-                
             } catch {
-                continuation.resume(throwing: OSQueryError.processLaunchFailed(error))
+                throw OSQueryError.processLaunchFailed(error)
             }
-        }
+            processBox.attach(task)
+
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit()
+
+            guard let outputString = String(data: outputData, encoding: .utf8) else {
+                throw OSQueryError.invalidOutput("Could not decode output as UTF-8")
+            }
+
+            let errorString = String(data: errorData, encoding: .utf8) ?? ""
+
+            if task.terminationReason == .uncaughtSignal {
+                throw OSQueryError.executionFailed("osqueryi (extension) terminated by signal")
+            }
+
+            if ConsoleFormatter.verboseLevel >= 3 {
+                if !errorString.isEmpty && (errorString.contains("error") || errorString.contains("Error")) {
+                    ConsoleFormatter.writeDebug("OSQuery stderr: \(errorString.prefix(200))...")
+                }
+            }
+            ConsoleFormatter.writeDebug("OSQuery output length: \(outputString.count) chars")
+
+            if let jsonStart = outputString.firstIndex(of: "["),
+               let jsonEnd = outputString.lastIndex(of: "]") {
+                let jsonString = String(outputString[jsonStart...jsonEnd])
+
+                if let jsonData = jsonString.data(using: .utf8),
+                   let jsonArray = (try? JSONSerialization.jsonObject(with: jsonData)) as? [[String: Any]] {
+                    return QueryRows(rows: jsonArray)
+                }
+            }
+
+            if outputString.contains("no such table") || errorString.contains("no such table") {
+                throw OSQueryError.executionFailed("no such table")
+            }
+
+            if task.terminationStatus != 0 {
+                let errorMessage = errorString.isEmpty ? "osquery exited with code \(task.terminationStatus)" : errorString
+                throw OSQueryError.executionFailed(errorMessage)
+            }
+
+            if outputString.isEmpty {
+                let errorMessage = errorString.isEmpty ? "No output from osquery" : errorString
+                throw OSQueryError.executionFailed(errorMessage)
+            }
+
+            return QueryRows(rows: [])
+        }.value
+        return box.rows
     }
     
-    /// Execute multiple queries from a module configuration with progress display
+    /// Execute multiple queries from a module configuration with progress display.
+    /// Each query emits started / ok / timeout lines under -v so a hung table is
+    /// self-diagnosing. A timed-out or failed query yields an empty result and
+    /// the module continues with the remaining queries — never let one bad
+    /// table take down the whole module's transmit.
     public func executeModuleQueries(_ queries: [String: String], showProgress: Bool = true) async -> [String: [[String: Any]]] {
         var results: [String: [[String: Any]]] = [:]
-        
+
         let queryArray = Array(queries)
         let totalQueries = queryArray.count
-        
-        // Show header for osquery execution
+
         if showProgress && totalQueries > 0 && ConsoleFormatter.isVerbose {
             ConsoleFormatter.writeInfo("Executing \(totalQueries) osquery queries")
         }
-        
-        // Execute queries sequentially with progress tracking
+
         for (index, (key, query)) in queryArray.enumerated() {
-            // Show progress bar for each query
             if showProgress {
                 ConsoleFormatter.writeQueryProgress(queryName: key, current: index + 1, total: totalQueries)
             }
-            
+
+            ConsoleFormatter.writeInfo("query \(key) status=started")
+            let start = Date()
+
             do {
                 let result = try await executeQuery(query)
+                let elapsed = Date().timeIntervalSince(start)
+                ConsoleFormatter.writeInfo("query \(key) status=ok rows=\(result.count) elapsed=\(String(format: "%.1fs", elapsed))")
                 results[key] = result
+            } catch let OSQueryError.timeout(seconds) {
+                let elapsed = Date().timeIntervalSince(start)
+                ConsoleFormatter.writeWarning("query \(key) status=timeout budget=\(String(format: "%.0fs", seconds)) elapsed=\(String(format: "%.1fs", elapsed)) -- skipping")
+                results[key] = []
             } catch {
-                if ConsoleFormatter.isVerbose {
-                    ConsoleFormatter.writeWarning("Query '\(key)' failed: \(error)")
-                }
+                let elapsed = Date().timeIntervalSince(start)
+                ConsoleFormatter.writeWarning("query \(key) status=failed elapsed=\(String(format: "%.1fs", elapsed)) error=\(error)")
                 results[key] = []
             }
         }
-        
+
         return results
     }
     
@@ -383,7 +477,8 @@ public enum OSQueryError: Error, LocalizedError {
     case processLaunchFailed(Error)
     case invalidOutput(String)
     case jsonDecodingFailed(Error)
-    
+    case timeout(TimeInterval)
+
     public var errorDescription: String? {
         switch self {
         case .executionFailed(let message):
@@ -394,6 +489,8 @@ public enum OSQueryError: Error, LocalizedError {
             return "Invalid osquery output: \(message)"
         case .jsonDecodingFailed(let error):
             return "Failed to decode JSON output: \(error.localizedDescription)"
+        case .timeout(let seconds):
+            return "OSQuery exceeded timeout of \(String(format: "%.0fs", seconds))"
         }
     }
 }

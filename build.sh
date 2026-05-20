@@ -710,6 +710,23 @@ WRAPPER
         log_info "Download from: https://github.com/macadmins/osquery-extension/releases"
     fi
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PPPC PROFILE TEMPLATE
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Vendor-neutral sample profile granting FDA + SysAdminFiles to the three
+    # binaries in the collection chain (runner, osqueryi, macadmins extension).
+    # Shipped so admins can grab it from /Applications/Utilities/ReportMate.app/
+    # Contents/Resources/profiles/ and adapt for their MDM.
+
+    PPPC_SOURCE="${SCRIPT_DIR}/Sources/Resources/profiles/ReportMate-FullDiskAccess.mobileconfig"
+    if [ -f "$PPPC_SOURCE" ]; then
+        mkdir -p "$APP_RESOURCES/profiles"
+        cp "$PPPC_SOURCE" "$APP_RESOURCES/profiles/ReportMate-FullDiskAccess.mobileconfig"
+        log_success "PPPC profile template bundled: Contents/Resources/profiles/ReportMate-FullDiskAccess.mobileconfig"
+    else
+        log_warn "PPPC profile template not found at: $PPPC_SOURCE"
+    fi
+
     # Create Info.plist for app bundle
     cat > "$APP_CONTENTS/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
