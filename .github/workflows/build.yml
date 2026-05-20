@@ -543,7 +543,7 @@ jobs:
                   <key>BundleOverwriteAction</key>
                   <string>upgrade</string>
                   <key>RootRelativeBundlePath</key>
-                  <string>usr/local/reportmate/ReportMate.app</string>
+                  <string>Applications/Utilities/ReportMate.app</string>
               </dict>
           </array>
           </plist>
