@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ReportMate macOS Client — Privacy Preferences Policy Control (PPPC) template
+
+  Bundled sample profile. Grants the TCC permissions ReportMate needs to collect
+  full system telemetry on managed Macs. Deploy via your MDM (Intune, Jamf, Kandji,
+  Mosyle, etc.) or vendor it through Munki — TCC entries delivered by an MDM
+  profile do not prompt the user.
+
+  Why three identifiers, not one:
+    TCC permissions do NOT inherit to child processes. The runner shells out to
+    osqueryi, and osqueryi loads the macadmins extension as its own process. All
+    three need their own grants or the management module will hang in a sandbox
+    check that has no UI to resolve.
+
+  Before deploying:
+    1. Replace PayloadOrganization with your organization name.
+    2. Replace the top-level PayloadIdentifier with your reverse-DNS prefix
+       (e.g. "com.example.it.ReportMatePrefs").
+    3. Regenerate the two PayloadUUIDs (`uuidgen`).
+    4. Verify the CodeRequirements still match your shipping binaries
+       (`codesign -d -r-` on each). The Team IDs in this template are the
+       upstream ReportMate / osquery / macadmins signing identities; if you
+       ship resigned builds, update accordingly.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadIdentifier</key>
+			<string>com.github.reportmate.pppc</string>
+			<key>PayloadType</key>
+			<string>com.apple.TCC.configuration-profile-policy</string>
+			<key>PayloadUUID</key>
+			<string>CCBE058F-D082-4C40-8A04-4443E15BCDFD</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>Services</key>
+			<dict>
+				<key>AppleEvents</key>
+				<array>
+					<dict>
+						<key>AEReceiverCodeRequirement</key>
+						<string>identifier "com.apple.systemevents" and anchor apple</string>
+						<key>AEReceiverIdentifier</key>
+						<string>com.apple.systemevents</string>
+						<key>AEReceiverIdentifierType</key>
+						<string>bundleID</string>
+						<key>Authorization</key>
+						<string>Allow</string>
+						<key>CodeRequirement</key>
+						<string>identifier "com.github.reportmate.managedreportsrunner" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "7TF6CSP83S"</string>
+						<key>Comment</key>
+						<string>ReportMate macOS Client - System Events automation</string>
+						<key>Identifier</key>
+						<string>com.github.reportmate.managedreportsrunner</string>
+						<key>IdentifierType</key>
+						<string>bundleID</string>
+					</dict>
+				</array>
+				<key>SystemPolicyAllFiles</key>
+				<array>
+					<dict>
+						<key>Allowed</key>
+						<true/>
+						<key>CodeRequirement</key>
+						<string>identifier "com.github.reportmate.managedreportsrunner" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "7TF6CSP83S"</string>
+						<key>Comment</key>
+						<string>ReportMate macOS Client - Full Disk Access for system telemetry collection</string>
+						<key>Identifier</key>
+						<string>com.github.reportmate.managedreportsrunner</string>
+						<key>IdentifierType</key>
+						<string>bundleID</string>
+					</dict>
+					<dict>
+						<key>Allowed</key>
+						<true/>
+						<key>CodeRequirement</key>
+						<string>identifier "io.osquery.agent" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "3522FA9PXF"</string>
+						<key>Comment</key>
+						<string>osquery (shelled out by ReportMate) - Full Disk Access for the managed_policies table, which reads TCC-protected /Library/Managed Preferences/ plists. Without this grant, osqueryi hangs in a TCC check that has no UI to resolve, and the management module never completes.</string>
+						<key>Identifier</key>
+						<string>io.osquery.agent</string>
+						<key>IdentifierType</key>
+						<string>bundleID</string>
+					</dict>
+					<dict>
+						<key>Allowed</key>
+						<true/>
+						<key>CodeRequirement</key>
+						<string>identifier "macadmins_extension" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "T4SK8ZXCXG"</string>
+						<key>Comment</key>
+						<string>macadmins osquery extension (loaded by managedreportsrunner via --extension). Runs as its own process with its own TCC identity; without an independent FDA grant the extension hangs in a sandbox check and osqueryi blocks waiting on its socket.</string>
+						<key>Identifier</key>
+						<string>macadmins_extension</string>
+						<key>IdentifierType</key>
+						<string>bundleID</string>
+					</dict>
+				</array>
+				<key>SystemPolicySysAdminFiles</key>
+				<array>
+					<dict>
+						<key>Allowed</key>
+						<true/>
+						<key>CodeRequirement</key>
+						<string>identifier "com.github.reportmate.managedreportsrunner" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "7TF6CSP83S"</string>
+						<key>Comment</key>
+						<string>ReportMate macOS Client - System Admin Files for MDM and profile data</string>
+						<key>Identifier</key>
+						<string>com.github.reportmate.managedreportsrunner</string>
+						<key>IdentifierType</key>
+						<string>bundleID</string>
+					</dict>
+					<dict>
+						<key>Allowed</key>
+						<true/>
+						<key>CodeRequirement</key>
+						<string>identifier "io.osquery.agent" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "3522FA9PXF"</string>
+						<key>Comment</key>
+						<string>osquery (shelled out by ReportMate) - System Admin Files for MDM and profile data reads.</string>
+						<key>Identifier</key>
+						<string>io.osquery.agent</string>
+						<key>IdentifierType</key>
+						<string>bundleID</string>
+					</dict>
+					<dict>
+						<key>Allowed</key>
+						<true/>
+						<key>CodeRequirement</key>
+						<string>identifier "macadmins_extension" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "T4SK8ZXCXG"</string>
+						<key>Comment</key>
+						<string>macadmins osquery extension - System Admin Files for the MDM/profiles tables it adds to osquery.</string>
+						<key>Identifier</key>
+						<string>macadmins_extension</string>
+						<key>IdentifierType</key>
+						<string>bundleID</string>
+					</dict>
+				</array>
+			</dict>
+		</dict>
+	</array>
+	<key>PayloadDescription</key>
+	<string>Grants Full Disk Access and System Admin Files permissions to the ReportMate macOS client (managedreportsrunner), the osquery binary it shells out to, and the macadmins osquery extension it loads. Required for full system telemetry collection.</string>
+	<key>PayloadDisplayName</key>
+	<string>ReportMate Full Disk Access</string>
+	<key>PayloadIdentifier</key>
+	<string>com.github.reportmate.pppc.template</string>
+	<key>PayloadOrganization</key>
+	<string>ReportMate Contributors</string>
+	<key>PayloadScope</key>
+	<string>System</string>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadUUID</key>
+	<string>92B39484-F7D7-4D0B-B4E6-036F75491A46</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+</dict>
+</plist>
