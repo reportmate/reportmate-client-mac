@@ -1,0 +1,62 @@
+name: CI
+
+# Build-only validation for pushes and PRs to main. Compiles the Swift
+# client (release config) via build.sh; no packaging, signing, or release.
+# The tag-triggered release.yml produces the shippable unsigned pkg.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Sources/**'
+      - 'Package.swift'
+      - 'build.sh'
+      - '.github/workflows/ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Sources/**'
+      - 'Package.swift'
+      - 'build.sh'
+      - '.github/workflows/ci.yml'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # build.sh derives per-module versions from git history.
+          fetch-depth: 0
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-
+
+      # build.sh's shebang is #!/opt/homebrew/bin/bash (bash 5). The runner ships
+      # only system bash 3.2, so install the Homebrew bash the script expects.
+      - name: Install bash 5
+        run: brew list bash >/dev/null 2>&1 || brew install bash
+
+      - name: Build (compile only, unsigned)
+        run: ./build.sh --skip-pkg --skip-zip --skip-dmg
