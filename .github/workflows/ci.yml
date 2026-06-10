@@ -53,5 +53,10 @@ jobs:
           restore-keys: |
             swiftpm-${{ runner.os }}-
 
+      # build.sh's shebang is #!/opt/homebrew/bin/bash (bash 5). The runner ships
+      # only system bash 3.2, so install the Homebrew bash the script expects.
+      - name: Install bash 5
+        run: brew list bash >/dev/null 2>&1 || brew install bash
+
       - name: Build (compile only, unsigned)
         run: ./build.sh --skip-pkg --skip-zip --skip-dmg

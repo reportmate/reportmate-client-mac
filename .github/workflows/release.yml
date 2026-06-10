@@ -70,6 +70,11 @@ jobs:
             echo "arg=" >> "$GITHUB_OUTPUT"
           fi
 
+      # build.sh's shebang is #!/opt/homebrew/bin/bash (bash 5). The runner ships
+      # only system bash 3.2, so install the Homebrew bash the script expects.
+      - name: Install bash 5
+        run: brew list bash >/dev/null 2>&1 || brew install bash
+
       - name: Build unsigned pkg
         run: ./build.sh ${{ steps.resolve.outputs.arg }} --skip-zip --skip-dmg
 
