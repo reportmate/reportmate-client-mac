@@ -646,11 +646,18 @@ if [ "$SKIP_PKG" = false ]; then
         cp "$HELPER_EXECUTABLE" "$APP_MACOS/ReportMateHelper"
         log_success "Helper binary copied to app bundle"
         
-        # Copy helper LaunchDaemon plist into app bundle for SMAppService registration
+        # Copy helper LaunchDaemon plist into app bundle for SMAppService registration.
+        # The plist is optional and not produced by this build; guard the copy so a
+        # successfully built helper binary doesn't abort packaging when it's absent.
         HELPER_LD_DIR="${APP_CONTENTS}/Library/LaunchDaemons"
-        mkdir -p "$HELPER_LD_DIR"
-        cp "${BUILD_DIR}/launchdaemons/com.github.reportmate.helper.plist" "$HELPER_LD_DIR/"
-        log_success "Helper LaunchDaemon plist copied to app bundle"
+        HELPER_LD_PLIST="${BUILD_DIR}/launchdaemons/com.github.reportmate.helper.plist"
+        if [ -f "$HELPER_LD_PLIST" ]; then
+            mkdir -p "$HELPER_LD_DIR"
+            cp "$HELPER_LD_PLIST" "$HELPER_LD_DIR/"
+            log_success "Helper LaunchDaemon plist copied to app bundle"
+        else
+            log_warn "Helper LaunchDaemon plist not found at: $HELPER_LD_PLIST (SMAppService registration skipped)"
+        fi
     else
         log_warn "ReportMateHelper not found at: $HELPER_EXECUTABLE (privileged helper will not be available)"
     fi
