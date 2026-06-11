@@ -120,6 +120,7 @@ jobs:
 
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           AUTO_NOTES=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$TAG" --jq .body)
+          AUTO_NOTES=$(printf '%s\n' "$AUTO_NOTES" | sed -E -e 's/ by @[A-Za-z0-9_-]+ in / in /g' -e '/^#+ New Contributors/d' -e '/made their first contribution/d')
 
           # Assemble notes line-by-line. printf '%s\n' keeps each literal arg
           # verbatim (backticks/backslashes intact) and every line stays
