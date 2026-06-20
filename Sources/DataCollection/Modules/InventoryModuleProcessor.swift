@@ -47,6 +47,10 @@ public class InventoryModuleProcessor: BaseModuleProcessor, @unchecked Sendable 
         let uuid = (finalData["uuid"] as? String) ?? ""
         let deviceName = (finalData["computer_name"] as? String) ?? (finalData["hostname"] as? String) ?? ""
         
+        let rawFleet = fileInfo["fleet"] ?? ""
+        let trimmedFleet = rawFleet.trimmingCharacters(in: .whitespaces)
+        let fleet = trimmedFleet.trimmingCharacters(in: CharacterSet(charactersIn: ",")).isEmpty ? "" : trimmedFleet
+
         return InventoryData(
             deviceName: deviceName,
             serialNumber: serialNumber,
@@ -58,7 +62,8 @@ public class InventoryModuleProcessor: BaseModuleProcessor, @unchecked Sendable 
             purchaseDate: nil,
             warrantyExpiration: nil,
             catalog: fileInfo["catalog"] ?? "",
-            usage: fileInfo["usage"] ?? ""
+            usage: fileInfo["usage"] ?? "",
+            fleet: fleet
         )
     }
     
