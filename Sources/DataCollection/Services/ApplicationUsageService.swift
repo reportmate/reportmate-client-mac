@@ -151,25 +151,28 @@ public class ApplicationUsageService: @unchecked Sendable {
         return snapshot
     }
     
-    /// Mark transmitted data for deletion (called after successful API transmission)
+    /// Retire the sessions that were just delivered. Call only after the API has
+    /// confirmed success — until this runs, the same sessions are collected again
+    /// on the next cycle and the server adds their duration a second time.
     public func confirmTransmission() {
         guard !transmittedSessionIds.isEmpty else { return }
-        
+
         do {
             let db = try Connection(dbPath)
-            
-            // Two-phase delete: First mark as transmitted
+
+            // Marking before deleting keeps this safe to interrupt: a crash
+            // between the two statements leaves the batch flagged, which excludes
+            // it from the next collection and lets the following call clear it.
             let sessions = Table("app_sessions")
             let id = Expression<Int64>("id")
             let transmitted = Expression<Bool>("transmitted")
-            
+
             let toUpdate = sessions.filter(transmittedSessionIds.contains(id))
             try db.run(toUpdate.update(transmitted <- true))
-            
-            // Delete previously transmitted sessions (from last cycle)
+
             let toDelete = sessions.filter(transmitted == true)
             try db.run(toDelete.delete())
-            
+
             transmittedSessionIds = []
         } catch {
             print("Warning: Failed to mark sessions as transmitted: \(error)")
@@ -243,7 +246,12 @@ public class ApplicationUsageService: @unchecked Sendable {
             session.isActive = isActive
             
             result.append(session)
-            sessionIds.append(rowId)
+            // Only completed sessions are eligible for retirement. A running app
+            // is still accruing time, so it stays in the database until it exits
+            // and contributes its duration once, when it is final.
+            if !isActive {
+                sessionIds.append(rowId)
+            }
             totalLaunches += 1
         }
         
@@ -377,6 +385,13 @@ public class ApplicationUsageService: @unchecked Sendable {
     /// Build daily per-application usage summaries from sessions.
     /// Groups by (date, app name). Cumulative: last collection of the day wins (UPSERT on API).
     public func buildDailySummaries(sessions: [ApplicationUsageSession]) -> [[String: Any]] {
+        // The server accumulates these totals per (device, date, app), so every
+        // session must appear here exactly once, in the cycle it completes.
+        // Running apps are excluded: their duration grows between cycles, so
+        // sending them repeatedly would add the same app-open several times over.
+        // They are counted once they exit; `sessions` still carries them for the
+        // snapshot's live view.
+        let sessions = sessions.filter { !$0.isActive }
         guard !sessions.isEmpty else { return [] }
 
         let dateFormatter = DateFormatter()
