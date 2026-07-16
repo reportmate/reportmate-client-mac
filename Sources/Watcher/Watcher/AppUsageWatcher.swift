@@ -144,9 +144,9 @@ public final class AppUsageWatcher: @unchecked Sendable {
         let bundleId = app.bundleIdentifier
         let appName = app.localizedName ?? bundleURL.deletingPathExtension().lastPathComponent
         let path = bundleURL.path
-        let user = NSUserName()
         let pid = Int(app.processIdentifier)
-        
+        let user = processOwner(pid: pid) ?? NSUserName()
+
         logger.info("App launched: \(appName) (PID: \(pid))")
         
         do {
@@ -273,9 +273,9 @@ public final class AppUsageWatcher: @unchecked Sendable {
             let bundleId = app.bundleIdentifier
             let appName = app.localizedName ?? bundleURL.deletingPathExtension().lastPathComponent
             let path = bundleURL.path
-            let user = NSUserName()
             let pid = Int(app.processIdentifier)
-            
+            let user = processOwner(pid: pid) ?? NSUserName()
+
             // Try to get actual start time from process info
             let startTime = getProcessStartTime(pid: pid) ?? Date()
             
@@ -293,6 +293,42 @@ public final class AppUsageWatcher: @unchecked Sendable {
         logger.info("Reconciled \(appsToReconcile.count) running applications")
     }
     
+    /// The user a running process belongs to, or nil if it can't be determined.
+    ///
+    /// The watcher runs as a root LaunchDaemon, so `NSUserName()` reports the
+    /// daemon's own identity rather than the person at the keyboard. Reading the
+    /// owner from the observed process attributes each session to the right user
+    /// and stays correct across fast user switching. The uid is read rather than
+    /// `ps -o user=`, which truncates usernames past eight characters.
+    private func processOwner(pid: Int) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-o", "uid=", "-p", "\(pid)"]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+
+            guard let output = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  let uid = uid_t(output),
+                  let entry = getpwuid(uid) else {
+                return nil
+            }
+
+            let name = String(cString: entry.pointee.pw_name)
+            return name.isEmpty ? nil : name
+        } catch {
+            logger.debug("Could not resolve owner of PID \(pid): \(error)")
+            return nil
+        }
+    }
+
     /// Get process start time using ps command
     private func getProcessStartTime(pid: Int) -> Date? {
         let process = Process()
