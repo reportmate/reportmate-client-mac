@@ -45,7 +45,12 @@ public class APIClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = TimeInterval(configuration.timeout)
         
-        // Add authentication header
+        // Add authentication headers. Both are sent when configured: the API prefers
+        // the scoped API key and falls through to the passphrase if the key is absent
+        // or invalid, so a device can carry either or both during phase-2 rollout.
+        if let apiKey = configuration.apiKey {
+            request.setValue(apiKey, forHTTPHeaderField: "X-API-Key")
+        }
         if let passphrase = configuration.passphrase {
             request.setValue(passphrase, forHTTPHeaderField: "X-Client-Passphrase")
         }
