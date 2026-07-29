@@ -416,10 +416,19 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                             displayInfo["manufacture_week"] = Int(mfgWeek) ?? mfgWeek
                         }
                         
-                        // Display type (internal/external) - detect based on name, display_type, and connection
+                        // Display type (internal/external). spdisplays_connection_type is the
+                        // authoritative signal wherever system_profiler reports it: an all-in-one's
+                        // built-in panel says "spdisplays_internal" but is named after the machine
+                        // ("iMac"), so a name-only test types it external and it reaches inventory
+                        // as a standalone monitor. The key is absent on most external displays, so
+                        // the name and display_type heuristics stay as the fallback.
                         let displayName = displayInfo["name"] as? String ?? ""
                         let rawDisplayType = display["spdisplays_display_type"] as? String ?? ""
-                        if displayName.contains("Built-in") || displayName == "Color LCD" || rawDisplayType.contains("built-in") {
+                        let rawConnectionType = display["spdisplays_connection_type"] as? String ?? ""
+                        if rawConnectionType == "spdisplays_internal"
+                            || displayName.contains("Built-in")
+                            || displayName == "Color LCD"
+                            || rawDisplayType.contains("built-in") {
                             displayInfo["type"] = "internal"
                         } else {
                             displayInfo["type"] = "external"
