@@ -128,7 +128,7 @@ EXAMPLES:
     $0 --sign --install
 
     # Build specific version with API URL
-    $0 --version "2025.11.30" --api-url "https://reportmate.ecuad.ca"
+    $0 --version "2025.11.30" --api-url "https://reportmate.example.edu"
 
     # Create release
     $0 --notarize --create-tag --create-release
