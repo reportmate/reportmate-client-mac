@@ -903,7 +903,11 @@ EOF
 </plist>
 EOF
 
-    # All-modules daemon - full collection every 12 hours
+    # All-modules daemon - full collection once daily in the 04:00-06:00 window.
+    # Full collection is expensive, so it must not run on a rolling StartInterval
+    # that drifts into working hours. launchd has no native trigger jitter, so the
+    # job is wrapped in a short shell that sleeps a random slice of the window;
+    # that spreads the fleet instead of every device hitting the API at 04:00.
     cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.allmodules.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -913,10 +917,17 @@ EOF
     <string>com.github.reportmate.allmodules</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>sleep $(/usr/bin/jot -r 1 0 7200); exec /Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
     </array>
-    <key>StartInterval</key>
-    <integer>43200</integer>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
@@ -1007,9 +1018,10 @@ EOF
     },
     "allmodules": {
       "modules": "all",
-      "interval_seconds": 43200,
+      "calendar_interval": {"hour": 4, "minute": 0},
+      "random_delay_seconds": 7200,
       "launchd_label": "com.github.reportmate.allmodules",
-      "description": "Full collection of all modules every 12 hours"
+      "description": "Full collection of all modules once daily, spread randomly across the 04:00-06:00 maintenance window"
     }
   },
   "version": "1.0.0",
