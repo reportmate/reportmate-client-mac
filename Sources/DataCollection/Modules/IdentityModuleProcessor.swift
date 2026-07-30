@@ -3,17 +3,16 @@ import Foundation
 /// Identity module processor - collects user accounts, sessions, and identity management data
 /// Based on MunkiReport patterns for user/account collection
 /// Reference: https://github.com/munkireport/users, https://github.com/munkireport/user_sessions
-/// Collects: local users, group memberships, login sessions, Platform SSO user data,
-///           background task management database health (critical for shared Mac environments)
+/// Collects: local users, group memberships, login sessions, Platform SSO user data
 public class IdentityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
-    
+
     public init(configuration: ReportMateConfiguration) {
         super.init(moduleId: "identity", configuration: configuration)
     }
-    
+
     public override func collectData() async throws -> ModuleData {
         // Total collection steps for progress tracking
-        let totalSteps = 8
+        let totalSteps = 7
         
         // Collect identity data sequentially with progress tracking
         ConsoleFormatter.writeQueryProgress(queryName: "user_accounts", current: 1, total: totalSteps)
@@ -28,32 +27,27 @@ public class IdentityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         ConsoleFormatter.writeQueryProgress(queryName: "login_history", current: 4, total: totalSteps)
         let loginHistory = try await collectLoginHistory()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "btmdb_health", current: 5, total: totalSteps)
-        let btmdbHealth = try await collectBTMDBHealth()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "directory_services", current: 6, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "directory_services", current: 5, total: totalSteps)
         let directoryServices = try await collectDirectoryServices()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "secure_token_users", current: 7, total: totalSteps)
+
+        ConsoleFormatter.writeQueryProgress(queryName: "secure_token_users", current: 6, total: totalSteps)
         let secureTokenUsers = try await collectSecureTokenUsers()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "platform_sso_users", current: 8, total: totalSteps)
+
+        ConsoleFormatter.writeQueryProgress(queryName: "platform_sso_users", current: 7, total: totalSteps)
         let platformSSOUsers = try await collectPlatformSSOUsers()
-        
+
         // Build identity data dictionary
         let identityData: [String: Any] = [
             "users": userAccounts,
             "groups": groups,
             "loggedInUsers": loggedInUsers,
             "loginHistory": loginHistory,
-            "btmdbHealth": btmdbHealth,
             "directoryServices": directoryServices,
             "secureTokenUsers": secureTokenUsers,
             "platformSSOUsers": platformSSOUsers,
             "summary": buildSummary(
                 users: userAccounts,
-                loggedIn: loggedInUsers,
-                btmdb: btmdbHealth
+                loggedIn: loggedInUsers
             )
         ]
         
@@ -421,121 +415,6 @@ public class IdentityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         return []
     }
     
-    // MARK: - BTM Database Health (Critical for Shared Macs)
-    
-    /// Collects background task management database health metrics
-    /// Critical for shared Mac environments where BTMDB can exceed 4MB limit
-    /// causing loginwindow deadlocks and system freezes
-    private func collectBTMDBHealth() async throws -> [String: Any] {
-        let bashScript = """
-            # Background Task Management Database Health Check
-            # Critical for shared Mac environments (labs, classrooms)
-            # BTMDB can't exceed ~4MB as of macOS Tahoe - causes loginwindow deadlocks
-            
-            btmdb_path="/private/var/db/com.apple.backgroundtaskmanagement"
-            
-            # Get database size - the physical directory may be empty on modern macOS
-            # because the actual data is managed by the system. Use sfltool output
-            # size as a proxy for the effective database size.
-            db_size_bytes=0
-            db_size_mb="0.00"
-            db_exists=false
-            
-            if [ -d "$btmdb_path" ]; then
-                db_exists=true
-                
-                # First try file-based size (traditional approach)
-                raw_size=$(find "$btmdb_path" -type f -exec stat -f%z {} + 2>/dev/null | awk '{s+=$1} END {print s+0}')
-                file_size_bytes=$((${raw_size:-0} + 0))
-                
-                # If directory is empty, use sfltool dumpbtm output size as proxy
-                # This represents the actual data managed by the BTM service
-                if [ "$file_size_bytes" -eq 0 ]; then
-                    btm_dump_size=$(sfltool dumpbtm 2>/dev/null | wc -c | tr -d ' ')
-                    db_size_bytes=$((${btm_dump_size:-0} + 0))
-                else
-                    db_size_bytes=$file_size_bytes
-                fi
-                
-                # Calculate MB with awk for reliability (bc may not be available)
-                db_size_mb=$(awk "BEGIN {printf \\"%.2f\\", $db_size_bytes / 1048576}")
-            fi
-            
-            # Determine health status based on size thresholds
-            # Warning: 3MB, Critical: 3.5MB, Failure likely: 4MB+
-            status="healthy"
-            status_message="Database size within normal limits"
-            
-            if [ "$db_size_bytes" -gt 4194304 ] 2>/dev/null; then
-                status="critical"
-                status_message="Database exceeds 4MB - loginwindow deadlocks likely"
-            elif [ "$db_size_bytes" -gt 3670016 ] 2>/dev/null; then
-                status="critical"
-                status_message="Database exceeds 3.5MB - approaching failure threshold"
-            elif [ "$db_size_bytes" -gt 3145728 ] 2>/dev/null; then
-                status="warning"
-                status_message="Database exceeds 3MB - monitoring recommended"
-            fi
-            
-            # Count jetsam kills in last 7 days (backgroundtaskmanagementd memory limit exceeded)
-            jetsam_count=0
-            last_jetsam=""
-            
-            jetsam_output=$(log show --predicate 'eventMessage CONTAINS "backgroundtaskmanagementd" AND eventMessage CONTAINS "jetsam reason per-process-limit"' --style syslog --info --last 7d 2>/dev/null || echo "")
-            
-            if [ -n "$jetsam_output" ]; then
-                raw_jetsam_count=$(echo "$jetsam_output" | grep -c "jetsam reason per-process-limit" 2>/dev/null || echo "0")
-                # Ensure it's a valid integer
-                jetsam_count=$((raw_jetsam_count + 0))
-                last_jetsam=$(echo "$jetsam_output" | tail -1 | awk '{print $1, $2}' || echo "")
-            fi
-            
-            # If high jetsam count, escalate status
-            if [ "$jetsam_count" -gt 100 ] 2>/dev/null && [ "$status" = "healthy" ]; then
-                status="warning"
-                status_message="High backgroundtaskmanagementd jetsam kill rate ($jetsam_count in 7 days)"
-            elif [ "$jetsam_count" -gt 200 ] 2>/dev/null; then
-                status="critical"
-                status_message="Critical backgroundtaskmanagementd instability ($jetsam_count jetsam kills in 7 days)"
-            fi
-            
-            # Get number of registered background items
-            item_count=0
-            if [ -d "$btmdb_path" ]; then
-                raw_item_count=$(sfltool dumpbtm 2>/dev/null | grep -c "Name:" || echo "0")
-                item_count=$((raw_item_count + 0))
-            fi
-            
-            # Get number of local user accounts (correlates with BTM growth)
-            raw_user_count=$(dscl . -list /Users UniqueID 2>/dev/null | awk '$2 >= 500 && $2 < 65534' | wc -l | tr -d ' ')
-            user_count=$((raw_user_count + 0))
-            
-            # Output proper JSON with unquoted booleans and numbers
-            echo "{"
-            echo "  \\"exists\\": $db_exists,"
-            echo "  \\"path\\": \\"$btmdb_path\\","
-            echo "  \\"sizeBytes\\": $db_size_bytes,"
-            echo "  \\"sizeMB\\": $db_size_mb,"
-            echo "  \\"status\\": \\"$status\\","
-            echo "  \\"statusMessage\\": \\"$status_message\\","
-            echo "  \\"jetsamKillsLast7Days\\": $jetsam_count,"
-            echo "  \\"lastJetsamEvent\\": \\"$last_jetsam\\","
-            echo "  \\"registeredItemCount\\": $item_count,"
-            echo "  \\"localUserCount\\": $user_count,"
-            echo "  \\"thresholds\\": {"
-            echo "    \\"warningMB\\": 3.0,"
-            echo "    \\"criticalMB\\": 3.5,"
-            echo "    \\"failureMB\\": 4.0"
-            echo "  }"
-            echo "}"
-        """
-        
-        return try await executeWithFallback(
-            osquery: nil,
-            bash: bashScript
-        )
-    }
-    
     // MARK: - Directory Services
     
     private func collectDirectoryServices() async throws -> [String: Any] {
@@ -742,8 +621,7 @@ public class IdentityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     private func buildSummary(
         users: [[String: Any]],
-        loggedIn: [[String: Any]],
-        btmdb: [String: Any]
+        loggedIn: [[String: Any]]
     ) -> [String: Any] {
         let totalUsers = users.count
         let adminCount = users.filter { ($0["isAdmin"] as? Bool) == true || ($0["is_admin"] as? Bool) == true }.count
@@ -757,15 +635,12 @@ public class IdentityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             return nil
         })
         let loggedInCount = uniqueLoggedInUsers.count
-        
-        let btmdbStatus = btmdb["status"] as? String ?? "unknown"
-        
+
         return [
             "totalUsers": totalUsers,
             "adminUsers": adminCount,
             "disabledUsers": disabledCount,
-            "currentlyLoggedIn": loggedInCount,
-            "btmdbStatus": btmdbStatus
+            "currentlyLoggedIn": loggedInCount
         ]
     }
 }

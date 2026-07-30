@@ -8,7 +8,6 @@ public struct IdentityInfo: Codable, Sendable {
     public let groups: [UserGroup]
     public let loggedInUsers: [LoggedInUser]
     public let loginHistory: [LoginHistoryEntry]
-    public let btmdbHealth: BTMDBHealth
     public let directoryServices: DirectoryServicesInfo
     public let secureTokenUsers: SecureTokenInfo
     public let platformSSOUsers: PlatformSSOUsersInfo
@@ -19,7 +18,6 @@ public struct IdentityInfo: Codable, Sendable {
         groups: [UserGroup] = [],
         loggedInUsers: [LoggedInUser] = [],
         loginHistory: [LoginHistoryEntry] = [],
-        btmdbHealth: BTMDBHealth = BTMDBHealth(),
         directoryServices: DirectoryServicesInfo = DirectoryServicesInfo(),
         secureTokenUsers: SecureTokenInfo = SecureTokenInfo(),
         platformSSOUsers: PlatformSSOUsersInfo = PlatformSSOUsersInfo(),
@@ -29,7 +27,6 @@ public struct IdentityInfo: Codable, Sendable {
         self.groups = groups
         self.loggedInUsers = loggedInUsers
         self.loginHistory = loginHistory
-        self.btmdbHealth = btmdbHealth
         self.directoryServices = directoryServices
         self.secureTokenUsers = secureTokenUsers
         self.platformSSOUsers = platformSSOUsers
@@ -196,73 +193,6 @@ public struct LoginHistoryEntry: Codable, Sendable, Identifiable {
     }
 }
 
-// MARK: - BTMDB Health
-
-/// Background Task Management Database health status
-/// Critical for shared Mac environments where BTMDB corruption causes loginwindow deadlocks
-public struct BTMDBHealth: Codable, Sendable {
-    public let exists: Bool
-    public let path: String
-    public let sizeBytes: Int64
-    public let sizeMB: Double
-    public let status: BTMDBStatus
-    public let statusMessage: String
-    public let jetsamKillsLast7Days: Int
-    public let lastJetsamEvent: String?
-    public let registeredItemCount: Int
-    public let localUserCount: Int
-    public let thresholds: BTMDBThresholds
-    
-    public init(
-        exists: Bool = false,
-        path: String = "/private/var/db/com.apple.backgroundtaskmanagement",
-        sizeBytes: Int64 = 0,
-        sizeMB: Double = 0.0,
-        status: BTMDBStatus = .healthy,
-        statusMessage: String = "Database not found or not accessible",
-        jetsamKillsLast7Days: Int = 0,
-        lastJetsamEvent: String? = nil,
-        registeredItemCount: Int = 0,
-        localUserCount: Int = 0,
-        thresholds: BTMDBThresholds = BTMDBThresholds()
-    ) {
-        self.exists = exists
-        self.path = path
-        self.sizeBytes = sizeBytes
-        self.sizeMB = sizeMB
-        self.status = status
-        self.statusMessage = statusMessage
-        self.jetsamKillsLast7Days = jetsamKillsLast7Days
-        self.lastJetsamEvent = lastJetsamEvent
-        self.registeredItemCount = registeredItemCount
-        self.localUserCount = localUserCount
-        self.thresholds = thresholds
-    }
-}
-
-public enum BTMDBStatus: String, Codable, Sendable {
-    case healthy = "healthy"
-    case warning = "warning"
-    case critical = "critical"
-    case unknown = "unknown"
-}
-
-public struct BTMDBThresholds: Codable, Sendable {
-    public let warningMB: Double
-    public let criticalMB: Double
-    public let failureMB: Double
-    
-    public init(
-        warningMB: Double = 3.0,
-        criticalMB: Double = 3.5,
-        failureMB: Double = 4.0
-    ) {
-        self.warningMB = warningMB
-        self.criticalMB = criticalMB
-        self.failureMB = failureMB
-    }
-}
-
 // MARK: - Directory Services
 
 /// Directory service binding information
@@ -379,19 +309,16 @@ public struct IdentitySummary: Codable, Sendable {
     public let adminUsers: Int
     public let disabledUsers: Int
     public let currentlyLoggedIn: Int
-    public let btmdbStatus: String
-    
+
     public init(
         totalUsers: Int = 0,
         adminUsers: Int = 0,
         disabledUsers: Int = 0,
-        currentlyLoggedIn: Int = 0,
-        btmdbStatus: String = "unknown"
+        currentlyLoggedIn: Int = 0
     ) {
         self.totalUsers = totalUsers
         self.adminUsers = adminUsers
         self.disabledUsers = disabledUsers
         self.currentlyLoggedIn = currentlyLoggedIn
-        self.btmdbStatus = btmdbStatus
     }
 }
