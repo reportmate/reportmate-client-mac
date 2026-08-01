@@ -234,15 +234,14 @@ struct ReportMateClient: AsyncParsableCommand {
         return "macOS \(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
     }
     
-    private func createProcessor(for module: String, config: ReportMateConfiguration) -> ModuleProcessor? {
+    private func createProcessor(for module: String, config: ReportMateConfiguration, usageService: ApplicationUsageService) -> ModuleProcessor? {
         switch module.lowercased() {
         case "hardware": return HardwareModuleProcessor(configuration: config)
         case "system": return SystemModuleProcessor(configuration: config)
         case "network": return NetworkModuleProcessor(configuration: config)
         case "security": return SecurityModuleProcessor(configuration: config)
-        case "applications": 
+        case "applications":
             // Application usage service for usage tracking from SQLite database
-            let usageService = ApplicationUsageService()
             return ApplicationsModuleProcessor(configuration: config, applicationUsageService: usageService)
         case "management": return ManagementModuleProcessor(configuration: config)
         case "inventory": return InventoryModuleProcessor(configuration: config)
@@ -255,12 +254,12 @@ struct ReportMateClient: AsyncParsableCommand {
         }
     }
     
-    private func executeModule(module: String, config: ReportMateConfiguration, logger: Logger, current: Int = 1, total: Int = 1) async throws -> (String, Any)? {
+    private func executeModule(module: String, config: ReportMateConfiguration, logger: Logger, usageService: ApplicationUsageService, current: Int = 1, total: Int = 1) async throws -> (String, Any)? {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "HH:mm:ss"
         let timestamp = dateFormatter.string(from: Date())
-        
-        guard let processor = createProcessor(for: module, config: config) else {
+
+        guard let processor = createProcessor(for: module, config: config, usageService: usageService) else {
             logger.warning("Unknown module: \(module)")
             ConsoleFormatter.writeWarning("Unknown module: \(module)")
             return nil
@@ -355,9 +354,13 @@ struct ReportMateClient: AsyncParsableCommand {
         // But for now, we just run what's requested. 
         // Ideally, we should ensure 'inventory' is run if we plan to transmit, to build the DeviceInfo.
         
+        // Owned here rather than per-module: the sessions it collects can only be
+        // retired once the API confirms delivery, which happens after this loop.
+        let usageService = ApplicationUsageService()
+
         let totalModules = modulesToRun.count
         for (index, module) in modulesToRun.enumerated() {
-            if let (moduleName, data) = try await executeModule(module: module, config: config, logger: logger, current: index + 1, total: totalModules) {
+            if let (moduleName, data) = try await executeModule(module: module, config: config, logger: logger, usageService: usageService, current: index + 1, total: totalModules) {
                 collectedData[moduleName] = data
             }
         }
@@ -510,6 +513,7 @@ struct ReportMateClient: AsyncParsableCommand {
                 case .success(let response):
                     print("[\(completionTimestamp)] INFO  Transmission successful: \(response.message ?? "No message")")
                     logger.info("Transmission successful. Records processed: \(response.recordsProcessed)")
+                    usageService.confirmTransmission()
                 case .failure(let error):
                     print("[\(completionTimestamp)] ERROR Transmission failed: \(error.localizedDescription)")
                     logger.error("Transmission failed: \(error)")
