@@ -161,7 +161,7 @@ Available modules: `hardware`, `system`, `network`, `security`, `applications`, 
 
 - `build.sh` generates `AppVersion.swift` with the version at build time and restores placeholder on exit
 - Signing requires `.env` file with `SIGNING_IDENTITY_APP` and `SIGNING_IDENTITY_INSTALLER`
-- PKG installer creates an app bundle at `/Applications/Utilities/ReportMate.app`
+- PKG installer creates an app bundle at `/Applications/Utilities/Managed Reports Runner.app`
 - CLI binary and GUI binary both live in `Contents/MacOS/`
 - A wrapper at `/usr/local/reportmate/managedreportsrunner` forwards to the app bundle CLI
 - LaunchDaemons are embedded in the app bundle and installed by postinstall script

@@ -19,6 +19,7 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 
 PROJECT_NAME="ReportMate"
+APP_NAME="Managed Reports Runner"
 PRODUCT_NAME="managedreportsrunner"
 BUNDLE_ID="com.github.reportmate"
 PKG_IDENTIFIER="com.github.reportmate"
@@ -612,7 +613,7 @@ if [ "$SKIP_PKG" = false ]; then
     rm -rf "$PACKAGE_ROOT"
     
     # App bundle structure — installed to /Applications/Utilities/
-    APP_BUNDLE="${PACKAGE_ROOT}/Applications/Utilities/ReportMate.app"
+    APP_BUNDLE="${PACKAGE_ROOT}/Applications/Utilities/${APP_NAME}.app"
     APP_CONTENTS="${APP_BUNDLE}/Contents"
     APP_MACOS="${APP_CONTENTS}/MacOS"
     APP_RESOURCES="${APP_CONTENTS}/Resources"
@@ -666,7 +667,7 @@ if [ "$SKIP_PKG" = false ]; then
     cat > "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner" << 'WRAPPER'
 #!/bin/sh
 # ReportMate CLI wrapper — forwards to app bundle in /Applications/Utilities/
-/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner "${@}"
+exec "/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner" "$@"
 WRAPPER
     chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner"
 
@@ -722,7 +723,7 @@ WRAPPER
     # ═══════════════════════════════════════════════════════════════════════════
     # Vendor-neutral sample profile granting FDA + SysAdminFiles to the three
     # binaries in the collection chain (runner, osqueryi, macadmins extension).
-    # Shipped so admins can grab it from /Applications/Utilities/ReportMate.app/
+    # Shipped so admins can grab it from /Applications/Utilities/Managed Reports Runner.app/
     # Contents/Resources/profiles/ and adapt for their MDM.
 
     PPPC_SOURCE="${SCRIPT_DIR}/Sources/Resources/profiles/ReportMate-FullDiskAccess.mobileconfig"
@@ -753,7 +754,9 @@ WRAPPER
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>ReportMate</string>
+    <string>Managed Reports Runner</string>
+    <key>CFBundleDisplayName</key>
+    <string>Managed Reports Runner</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -787,7 +790,7 @@ EOF
     <string>com.github.reportmate.hourly</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner</string>
         <string>--run-modules</string>
         <string>security,network,management,hardware</string>
         <string>--storage-mode</string>
@@ -828,7 +831,7 @@ EOF
     <string>com.github.reportmate.fourhourly</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner</string>
         <string>--run-modules</string>
         <string>applications,inventory,system,identity,peripherals</string>
     </array>
@@ -867,7 +870,7 @@ EOF
     <string>com.github.reportmate.daily</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner</string>
         <string>--run-modules</string>
         <string>hardware</string>
         <string>--storage-mode</string>
@@ -913,7 +916,7 @@ EOF
     <string>com.github.reportmate.allmodules</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner</string>
+        <string>/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner</string>
     </array>
     <key>StartInterval</key>
     <integer>43200</integer>
@@ -1183,7 +1186,7 @@ EOF
 #!/bin/zsh
 # ReportMate Postinstall
 LD_ROOT="/Library/LaunchDaemons"
-APP_PATH="/Applications/Utilities/ReportMate.app"
+APP_PATH="/Applications/Utilities/Managed Reports Runner.app"
 APP_ROOT="${APP_PATH}/Contents"
 LOG_DIR="/Library/Managed Reports/logs"
 
@@ -1245,6 +1248,12 @@ OLD_APP="/usr/local/reportmate/ReportMate.app"
 if [ -d "$OLD_APP" ]; then
     log_message "Removing old app bundle at ${OLD_APP}"
     rm -rf "$OLD_APP"
+fi
+
+# Remove the pre-rename bundle from /Applications/Utilities
+if [ -d "/Applications/Utilities/ReportMate.app" ]; then
+    log_message "Removing old app bundle at /Applications/Utilities/ReportMate.app"
+    rm -rf "/Applications/Utilities/ReportMate.app"
 fi
 
 # Remove numbered duplicates created by macOS Installer relocation
@@ -1461,6 +1470,12 @@ if [ -d "$OLD_APP" ]; then
     log_message "Removing old app bundle at ${OLD_APP}"
     rm -rf "$OLD_APP"
 fi
+
+# Remove the pre-rename bundle from /Applications/Utilities
+if [ -d "/Applications/Utilities/ReportMate.app" ]; then
+    log_message "Removing old app bundle at /Applications/Utilities/ReportMate.app"
+    rm -rf "/Applications/Utilities/ReportMate.app"
+fi
 setopt NULL_GLOB 2>/dev/null
 for dup in /usr/local/reportmate/ReportMate-*.localized; do
     [ -e "$dup" ] && { log_message "Removing duplicate: $dup"; rm -rf "$dup"; }
@@ -1490,7 +1505,7 @@ PREINSTALL_SCRIPT
         <key>BundleOverwriteAction</key>
         <string>upgrade</string>
         <key>RootRelativeBundlePath</key>
-        <string>Applications/Utilities/ReportMate.app</string>
+        <string>Applications/Utilities/Managed Reports Runner.app</string>
     </dict>
 </array>
 </plist>

@@ -15,7 +15,7 @@ public let kHelperMachServiceName = "com.github.reportmate.helper"
 public let kReportMatePreferenceDomain = "com.github.reportmate"
 
 /// Path to the CLI binary inside the app bundle
-public let kReportMateCLIPath = "/Applications/Utilities/ReportMate.app/Contents/MacOS/managedreportsrunner"
+public let kReportMateCLIPath = "/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner"
 
 /// Helper LaunchDaemon plist name (used by SMAppService)
 public let kHelperPlistName = "com.github.reportmate.helper.plist"
