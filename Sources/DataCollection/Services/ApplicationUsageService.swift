@@ -167,8 +167,18 @@ public class ApplicationUsageService: @unchecked Sendable {
             let id = Expression<Int64>("id")
             let transmitted = Expression<Bool>("transmitted")
 
-            let toUpdate = sessions.filter(transmittedSessionIds.contains(id))
-            try db.run(toUpdate.update(transmitted <- true))
+            // The first confirmation after a long backlog can carry tens of
+            // thousands of ids; a single IN-list that size exceeds SQLite's
+            // bound-variable limit and would abort the whole batch. Mark in
+            // chunks so the machines with the worst backlogs still converge.
+            let chunkSize = 500
+            var start = 0
+            while start < transmittedSessionIds.count {
+                let end = min(start + chunkSize, transmittedSessionIds.count)
+                let chunk = Array(transmittedSessionIds[start..<end])
+                try db.run(sessions.filter(chunk.contains(id)).update(transmitted <- true))
+                start = end
+            }
 
             let toDelete = sessions.filter(transmitted == true)
             try db.run(toDelete.delete())
