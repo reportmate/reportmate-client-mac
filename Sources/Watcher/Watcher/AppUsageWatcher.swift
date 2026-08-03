@@ -24,6 +24,11 @@ public final class AppUsageWatcher: @unchecked Sendable {
     // Clamp on per-tick elapsed to defend against sleep/wake gaps (otherwise a
     // single tick after a 4-hour laptop sleep would charge 4 hours of fg time).
     private static let maxTickElapsed: TimeInterval = 90
+
+    // Retention sweep: a coarse daily timer prunes completed sessions older
+    // than the safety-net retention, independent of the transmit/confirm path.
+    private var pruneTimer: DispatchSourceTimer?
+    private static let pruneInterval: TimeInterval = 86_400
     
     // MARK: - Initialization
     
@@ -53,7 +58,11 @@ public final class AppUsageWatcher: @unchecked Sendable {
         // Mark any orphaned sessions from previous run
         try database.markOrphanedSessions()
         logger.info("Marked orphaned sessions from previous run")
-        
+
+        // Prune expired sessions once at startup, then daily via timer
+        runRetentionSweep()
+        startPruneTimer()
+
         // Reconcile with currently running apps
         try reconcileRunningApps()
         
@@ -77,6 +86,10 @@ public final class AppUsageWatcher: @unchecked Sendable {
         tickTimer?.cancel()
         tickTimer = nil
         lastTickAt = nil
+
+        // Cancel retention sweep timer
+        pruneTimer?.cancel()
+        pruneTimer = nil
 
         // Remove all observers
         let center = NSWorkspace.shared.notificationCenter
@@ -256,6 +269,34 @@ public final class AppUsageWatcher: @unchecked Sendable {
         }
     }
     
+    // MARK: - Retention Sweep
+
+    /// Start a coarse daily timer that prunes expired sessions. This is a
+    /// safety net against unbounded database growth if the transmit/confirm
+    /// path ever breaks again.
+    private func startPruneTimer() {
+        let queue = DispatchQueue(label: "com.reportmate.appusage.prune", qos: .utility)
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + Self.pruneInterval, repeating: Self.pruneInterval)
+        timer.setEventHandler { [weak self] in
+            self?.runRetentionSweep()
+        }
+        pruneTimer = timer
+        timer.resume()
+        logger.info("Retention sweep timer started (interval=\(Self.pruneInterval)s, retention=\(AppUsageDatabase.retentionDays)d)")
+    }
+
+    private func runRetentionSweep() {
+        do {
+            let pruned = try database.pruneExpiredSessions()
+            if pruned > 0 {
+                logger.info("Pruned \(pruned) completed sessions older than \(AppUsageDatabase.retentionDays) days")
+            }
+        } catch {
+            logger.error("Failed to prune expired sessions: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Reconciliation
     
     /// Reconcile database with currently running applications
