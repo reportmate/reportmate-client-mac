@@ -392,6 +392,57 @@ public class ApplicationUsageService: @unchecked Sendable {
         return nil
     }
 
+    /// Running totals for one (date, app name) pair while summaries are built.
+    private struct DailyUsageBucket {
+        var launches = 0
+        var totalSeconds = 0.0
+        var foregroundSeconds = 0.0
+        var activeSeconds = 0.0
+        var users: Set<String> = []
+    }
+
+    /// The calendar days a session covers, each with the fraction of the
+    /// session's wall-clock span that fell on that day.
+    ///
+    /// A session is one continuous run of an application, so an app opened
+    /// before midnight and closed after it was in use on both days. Attributing
+    /// the whole run to the day it started — as this did previously — books a
+    /// week of uptime onto a single date and leaves the days it actually
+    /// covered empty, which makes any per-day or per-week series wrong.
+    ///
+    /// The foreground and active counters are accumulated across the whole
+    /// session rather than per day, so they are apportioned by the same
+    /// wall-clock share. That is an estimate; only per-day counters in the
+    /// watcher itself could make it exact.
+    private func daySpans(of session: ApplicationUsageSession,
+                          formatter: DateFormatter) -> [(String, Double)] {
+        let start = session.startTime
+        guard let end = session.endTime, end > start else {
+            return [(formatter.string(from: start), 1.0)]
+        }
+
+        let span = end.timeIntervalSince(start)
+        let calendar = Calendar.current
+        var spans: [(String, Double)] = []
+        var cursor = start
+
+        // Bounded by the watcher's 30-day retention; the cap only guards against
+        // a corrupt end_time far in the future turning this into a long loop.
+        while cursor < end, spans.count < 400 {
+            let dayStart = calendar.startOfDay(for: cursor)
+            guard let nextDay = calendar.date(byAdding: .day, value: 1, to: dayStart),
+                  nextDay > cursor else { break }
+            let segmentEnd = min(nextDay, end)
+            let seconds = segmentEnd.timeIntervalSince(cursor)
+            if seconds > 0 {
+                spans.append((formatter.string(from: cursor), seconds / span))
+            }
+            cursor = segmentEnd
+        }
+
+        return spans.isEmpty ? [(formatter.string(from: start), 1.0)] : spans
+    }
+
     /// Build daily per-application usage summaries from sessions.
     /// Groups by (date, app name). Cumulative: last collection of the day wins (UPSERT on API).
     public func buildDailySummaries(sessions: [ApplicationUsageSession]) -> [[String: Any]] {
@@ -409,37 +460,54 @@ public class ApplicationUsageService: @unchecked Sendable {
         dateFormatter.locale = Locale(identifier: "en_US_POSIX")
         dateFormatter.timeZone = TimeZone.current
 
-        // Group by (date string, app name)
-        var groups: [String: [ApplicationUsageSession]] = [:]
+        // Accumulate by (date string, app name). A session that runs past
+        // midnight belongs to every day it covers, not only the one it started
+        // on, so each session is split across the days it spans first.
+        var buckets: [String: DailyUsageBucket] = [:]
         for session in sessions {
-            let dateStr = dateFormatter.string(from: session.startTime)
-            let key = "\(dateStr)||\(session.name)"
-            groups[key, default: []].append(session)
-        }
-
-        var summaries: [[String: Any]] = []
-        for (key, grouped) in groups {
-            let parts = key.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
-            guard parts.count >= 3 else { continue }
-            let dateStr = String(parts[0])
-            let appName = String(parts[2])
-
-            let users = Array(Set(grouped.map { $0.user }.filter { !$0.isEmpty }))
-
             // A session interrupted by a watcher restart is stamped with the -1
             // unknown-duration sentinel (AppUsageDatabase.markOrphanedSessions).
             // It carries no measurable duration, so it contributes nothing here —
             // summing it raw would send a negative total to the server, which
             // reads these as real seconds and accumulates them.
+            let total = max(0, session.durationSeconds)
+            let foreground = max(0, session.foregroundSeconds)
+            let active = max(0, session.activeSeconds)
+            let startDate = dateFormatter.string(from: session.startTime)
+
+            for (dateStr, share) in daySpans(of: session, formatter: dateFormatter) {
+                let key = "\(dateStr)||\(session.name)"
+                var bucket = buckets[key] ?? DailyUsageBucket()
+                bucket.totalSeconds += total * share
+                bucket.foregroundSeconds += foreground * share
+                bucket.activeSeconds += active * share
+                if !session.user.isEmpty {
+                    bucket.users.insert(session.user)
+                }
+                // One app-open is one launch, counted on the day it happened —
+                // apportioning it too would multiply launch counts by the number
+                // of days a long-running app happened to stay open.
+                if dateStr == startDate {
+                    bucket.launches += 1
+                }
+                buckets[key] = bucket
+            }
+        }
+
+        var summaries: [[String: Any]] = []
+        for (key, bucket) in buckets {
+            let parts = key.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+            guard parts.count >= 3 else { continue }
+
             summaries.append([
-                "date": dateStr,
-                "appName": appName,
+                "date": String(parts[0]),
+                "appName": String(parts[2]),
                 "publisher": "",
-                "launches": grouped.count,
-                "totalSeconds": grouped.reduce(0.0) { $0 + max(0, $1.durationSeconds) },
-                "foregroundSeconds": grouped.reduce(0.0) { $0 + max(0, $1.foregroundSeconds) },
-                "activeSeconds": grouped.reduce(0.0) { $0 + max(0, $1.activeSeconds) },
-                "users": users
+                "launches": bucket.launches,
+                "totalSeconds": bucket.totalSeconds,
+                "foregroundSeconds": bucket.foregroundSeconds,
+                "activeSeconds": bucket.activeSeconds,
+                "users": Array(bucket.users)
             ])
         }
 
