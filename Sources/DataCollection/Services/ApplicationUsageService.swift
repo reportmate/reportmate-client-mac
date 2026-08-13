@@ -426,14 +426,19 @@ public class ApplicationUsageService: @unchecked Sendable {
 
             let users = Array(Set(grouped.map { $0.user }.filter { !$0.isEmpty }))
 
+            // A session interrupted by a watcher restart is stamped with the -1
+            // unknown-duration sentinel (AppUsageDatabase.markOrphanedSessions).
+            // It carries no measurable duration, so it contributes nothing here —
+            // summing it raw would send a negative total to the server, which
+            // reads these as real seconds and accumulates them.
             summaries.append([
                 "date": dateStr,
                 "appName": appName,
                 "publisher": "",
                 "launches": grouped.count,
-                "totalSeconds": grouped.reduce(0.0) { $0 + $1.durationSeconds },
-                "foregroundSeconds": grouped.reduce(0.0) { $0 + $1.foregroundSeconds },
-                "activeSeconds": grouped.reduce(0.0) { $0 + $1.activeSeconds },
+                "totalSeconds": grouped.reduce(0.0) { $0 + max(0, $1.durationSeconds) },
+                "foregroundSeconds": grouped.reduce(0.0) { $0 + max(0, $1.foregroundSeconds) },
+                "activeSeconds": grouped.reduce(0.0) { $0 + max(0, $1.activeSeconds) },
                 "users": users
             ])
         }
