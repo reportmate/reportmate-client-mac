@@ -381,7 +381,36 @@ public final class AppUsageDatabase: @unchecked Sendable {
     }
     
     // MARK: - Maintenance
-    
+
+    /// Safety-net retention for completed sessions, in days. Sized to be far
+    /// longer than any normal transmit cadence (collection runs multiple times
+    /// daily) so the sweep never races legitimate untransmitted data — it only
+    /// removes sessions the transmit/confirm path has failed to retire for a
+    /// month.
+    public static let retentionDays = 30
+
+    /// Delete completed sessions whose end time is older than the cutoff,
+    /// regardless of transmitted state. This is an independent bound on
+    /// database and payload growth: it must fire even when the transmit or
+    /// confirm path is broken, which is exactly when transmitted stays false.
+    /// In-progress sessions (no end time) are never touched.
+    /// Returns the number of rows deleted.
+    @discardableResult
+    public func pruneExpiredSessions(olderThanDays days: Int = AppUsageDatabase.retentionDays) throws -> Int {
+        guard let db = db else {
+            throw AppUsageDatabaseError.notInitialized
+        }
+
+        let formatter = ISO8601DateFormatter()
+        let cutoff = formatter.string(from: Date(timeIntervalSinceNow: -Double(days) * 86_400))
+
+        // ISO8601 timestamps compare correctly as strings.
+        let expired = sessions
+            .filter(endTime != nil)
+            .filter(endTime < cutoff)
+        return try db.run(expired.delete())
+    }
+
     /// Get database statistics
     public func getStats() throws -> (totalSessions: Int, activeSessions: Int, transmittedPending: Int) {
         guard let db = db else {
