@@ -638,100 +638,269 @@ public class IdentityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     // MARK: - Platform SSO Users (user-level SSO registration status)
     
-    /// Collects Platform SSO user registration status
-    /// This focuses on per-user SSO registration, complementing the device-level config in Security module
+    /// Collects Platform SSO per-user registration and token state.
+    ///
+    /// `app-sso platform -s` prints four sections: a device-level `Device Configuration`
+    /// block, a `Login Configuration` block, a per-user `User Configuration` block, and a
+    /// plain-text `SSO Tokens` trailer. Two properties of that output drive this collector:
+    ///
+    /// 1. `registrationCompleted` is device-level. It prints identically for every account,
+    ///    including accounts that have never registered, so it can never be used to decide
+    ///    whether a *user* is registered. Per-user truth is a populated `User Configuration`
+    ///    block, and the token state is the `SSO Tokens` trailer.
+    /// 2. Platform SSO state is only reachable inside the user's Aqua session. Probing a user
+    ///    with no GUI session blocks indefinitely, so every account is gated on an active
+    ///    `gui/<uid>` launchd domain and every invocation carries a hard timeout.
     private func collectPlatformSSOUsers() async throws -> [String: Any] {
         let bashScript = """
-            # Platform SSO user registration status (macOS 13+ Ventura)
-            # Focuses on per-user SSO registration for Identity module
-            
-            # Check macOS version (Platform SSO requires 13+)
-            os_version=$(sw_vers -productVersion | cut -d. -f1)
-            if [ "$os_version" -lt 13 ]; then
+            # Platform SSO per-user registration and token state (macOS 13+ Ventura)
+            set -m
+
+            APPSSO="/usr/bin/app-sso"
+
+            emit_unsupported() {
                 echo "{"
                 echo "  \\"supported\\": false,"
-                echo "  \\"users\\": []"
-                echo "}"
-                exit 0
-            fi
-            
-            # Get device SSO state to check if Platform SSO is configured
-            sso_state=$(app-sso platform -s 2>/dev/null || echo "")
-            registered="false"
-            
-            if [ -n "$sso_state" ]; then
-                if echo "$sso_state" | grep -q '"registrationCompleted" *: *true'; then
-                    registered="true"
-                fi
-            fi
-            
-            if [ "$registered" != "true" ]; then
-                echo "{"
-                echo "  \\"supported\\": true,"
                 echo "  \\"deviceRegistered\\": false,"
+                echo "  \\"registeredUserCount\\": 0,"
+                echo "  \\"unregisteredUserCount\\": 0,"
+                echo "  \\"tokenPresentCount\\": 0,"
+                echo "  \\"nonPlatformSSOAccounts\\": [],"
                 echo "  \\"users\\": []"
                 echo "}"
+            }
+
+            os_major=$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)
+            case "$os_major" in
+                ''|*[!0-9]*) emit_unsupported; exit 0 ;;
+            esac
+            if [ "$os_major" -lt 13 ] || [ ! -x "$APPSSO" ]; then
+                emit_unsupported
                 exit 0
             fi
-            
-            # Collect per-user SSO registration status
+
+            # Run a command under a hard wall-clock limit, killing its whole process group on
+            # expiry. app-sso blocks forever against a user with no GUI session, and output is
+            # staged through a temp file so a surviving grandchild can never hold our stdout
+            # pipe open.
+            run_with_timeout() {
+                _limit=$1
+                shift
+                _out=$(mktemp /tmp/reportmate-psso.XXXXXX) || return 1
+                "$@" >"$_out" 2>/dev/null &
+                _pid=$!
+                _waited=0
+                while kill -0 "$_pid" 2>/dev/null; do
+                    if [ "$_waited" -ge "$_limit" ]; then
+                        kill -9 -"$_pid" 2>/dev/null
+                        kill -9 "$_pid" 2>/dev/null
+                        wait "$_pid" 2>/dev/null
+                        rm -f "$_out"
+                        return 124
+                    fi
+                    sleep 1
+                    _waited=$((_waited + 1))
+                done
+                wait "$_pid" 2>/dev/null
+                cat "$_out"
+                rm -f "$_out"
+                return 0
+            }
+
+            # Values here are UPNs, UUIDs, ISO dates and enum strings. None legitimately
+            # contain a quote or backslash once unescaped, so dropping those keeps the
+            # hand-assembled JSON well formed.
+            json_scrub() {
+                printf '%s' "$1" | tr -d '\\\\"' | tr -d '\\r\\n\\t'
+            }
+
+            # First "key" : "value" pair in the text on stdin.
+            json_string() {
+                grep "\\"$1\\"" | head -1 | sed 's/.*: *"\\(.*\\)".*/\\1/'
+            }
+
+            running_uid=$(id -u)
+
+            # --- Device configuration ---------------------------------------------
+            device_state=$(run_with_timeout 20 "$APPSSO" platform -s)
+            device_section=$(printf '%s\\n' "$device_state" | awk '/^Device Configuration:/{f=1;next} f&&/^Login Configuration:/{f=0} f')
+
+            device_registered="false"
+            if printf '%s\\n' "$device_section" | grep -q '"registrationCompleted" *: *true'; then
+                device_registered="true"
+            fi
+
+            # Accounts the PSSO payload exempts by policy. Never probe these: they have no SSO
+            # agent, so app-sso would hang against them.
+            non_psso_accounts=$(printf '%s\\n' "$device_section" \\
+                | sed -n '/"nonPlatformSSOAccounts"/,/]/p' \\
+                | grep -v 'nonPlatformSSOAccounts' \\
+                | sed -n 's/.*"\\([^"]*\\)".*/\\1/p')
+
+            non_psso_json="["
+            first_np="true"
+            for acct in $non_psso_accounts; do
+                [ "$first_np" = "true" ] && first_np="false" || non_psso_json="$non_psso_json,"
+                non_psso_json="$non_psso_json\\"$(json_scrub "$acct")\\""
+            done
+            non_psso_json="$non_psso_json]"
+
+            is_non_psso_account() {
+                for acct in $non_psso_accounts; do
+                    [ "$acct" = "$1" ] && return 0
+                done
+                return 1
+            }
+
+            has_gui_session() {
+                if [ "$running_uid" = "$1" ]; then
+                    return 0
+                fi
+                launchctl print "gui/$1" >/dev/null 2>&1
+            }
+
+            appsso_for_user() {
+                if [ "$running_uid" = "0" ]; then
+                    run_with_timeout 20 launchctl asuser "$2" sudo -u "$1" "$APPSSO" platform -s
+                elif [ "$running_uid" = "$2" ]; then
+                    run_with_timeout 20 "$APPSSO" platform -s
+                else
+                    return 1
+                fi
+            }
+
             users_json="["
             first_user="true"
             registered_count=0
             unregistered_count=0
-            
-            # Get all human users
-            for user in $(dscl . -list /Users | grep -v "^_" | grep -v "daemon\\|nobody\\|root\\|Guest"); do
-                user_home=$(dscl . -read /Users/"$user" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || echo "")
-                if [ ! -d "$user_home" ] || [ "$user_home" = "/var/empty" ]; then
-                    continue
-                fi
-                
-                # Run app-sso as the user to get their SSO status
-                user_sso=$(sudo -u "$user" app-sso platform -s 2>/dev/null || echo "")
-                
-                user_registered="false"
-                user_upn=""
-                last_auth=""
-                
-                if [ -n "$user_sso" ]; then
-                    if echo "$user_sso" | grep -q '"registrationCompleted" *: *true'; then
-                        user_registered="true"
-                        registered_count=$((registered_count + 1))
+            token_count=0
+
+            for user in $(dscl . -list /Users UniqueID 2>/dev/null | awk '$2 >= 500 && $2 < 65534 {print $1}'); do
+                uid=$(dscl . -read "/Users/$user" UniqueID 2>/dev/null | awk '{print $2}')
+                [ -z "$uid" ] && continue
+
+                home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+                case "$home" in
+                    ''|/var/empty|/dev/null) continue ;;
+                esac
+
+                registered="false"
+                upn=""
+                login_user_name=""
+                unique_id=""
+                user_state=""
+                login_type=""
+                last_login=""
+                token_received=""
+                token_expiration=""
+                token_expired="null"
+                has_tokens="false"
+                probe_status="ok"
+
+                if is_non_psso_account "$user"; then
+                    probe_status="excluded"
+                elif [ "$device_registered" != "true" ]; then
+                    probe_status="device-not-registered"
+                elif ! has_gui_session "$uid"; then
+                    probe_status="no-session"
+                else
+                    user_output=$(appsso_for_user "$user" "$uid")
+                    if [ $? -ne 0 ] || [ -z "$user_output" ]; then
+                        probe_status="probe-failed"
                     else
-                        unregistered_count=$((unregistered_count + 1))
+                        user_section=$(printf '%s\\n' "$user_output" \\
+                            | awk '/^User Configuration:/{f=1;next} f&&/^SSO Tokens:/{f=0} f')
+                        token_section=$(printf '%s\\n' "$user_output" | sed -n '/^SSO Tokens:/,$p')
+
+                        unique_id=$(printf '%s\\n' "$user_section" | json_string uniqueIdentifier)
+                        user_state=$(printf '%s\\n' "$user_section" | json_string state)
+                        login_type=$(printf '%s\\n' "$user_section" | json_string loginType)
+                        last_login=$(printf '%s\\n' "$user_section" | json_string lastLoginDate)
+                        login_user_name=$(printf '%s\\n' "$user_section" | json_string loginUserName)
+
+                        # The real UPN lives in kerberosStatus, not in a userPrincipalName key
+                        # (no such key exists). Prefer the on-prem realm entry; the cloud entry
+                        # escapes the local part and appends the Kerberos realm, so unwrap it
+                        # as a fallback.
+                        upn=$(printf '%s\\n' "$user_section" | grep '"upn"' \\
+                            | grep -v 'KERBEROS.MICROSOFTONLINE.COM' | head -1 \\
+                            | sed 's/.*: *"\\(.*\\)".*/\\1/')
+                        if [ -z "$upn" ]; then
+                            upn=$(printf '%s\\n' "$user_section" | grep '"upn"' | head -1 \\
+                                | sed 's/.*: *"\\(.*\\)".*/\\1/' \\
+                                | sed 's/@KERBEROS\\.MICROSOFTONLINE\\.COM$//' \\
+                                | sed 's/\\\\@/@/g')
+                        fi
+
+                        # A populated User Configuration block is the only per-user proof of
+                        # registration.
+                        if [ -n "$unique_id" ] || [ -n "$login_user_name" ]; then
+                            registered="true"
+                        fi
+
+                        # SSO Tokens trailer is plain text, not JSON:
+                        #   SSO Tokens:
+                        #   Received:
+                        #   2026-08-14T00:18:46Z
+                        #   Expiration:
+                        #   2026-08-28T00:18:45Z (Not Expired)
+                        if printf '%s\\n' "$token_section" | grep -q '^Received:'; then
+                            token_received=$(printf '%s\\n' "$token_section" \\
+                                | awk '/^Received:/{getline; gsub(/^[ \\t]+|[ \\t]+$/,""); print; exit}')
+                            token_expiration_raw=$(printf '%s\\n' "$token_section" \\
+                                | awk '/^Expiration:/{getline; gsub(/^[ \\t]+|[ \\t]+$/,""); print; exit}')
+                            token_expiration=$(printf '%s' "$token_expiration_raw" | sed 's/ *(.*$//')
+                            case "$token_expiration_raw" in
+                                *"Not Expired"*) token_expired="false" ;;
+                                *"Expired"*)     token_expired="true" ;;
+                            esac
+                            if [ -n "$token_received" ]; then
+                                has_tokens="true"
+                            fi
+                        fi
                     fi
-                    
-                    # Try to extract user principal name
-                    user_upn=$(echo "$user_sso" | grep '"userPrincipalName"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
+                fi
+
+                if [ "$registered" = "true" ]; then
+                    registered_count=$((registered_count + 1))
                 else
                     unregistered_count=$((unregistered_count + 1))
                 fi
-                
-                if [ "$first_user" = "true" ]; then
-                    first_user="false"
-                else
-                    users_json="$users_json,"
+                if [ "$has_tokens" = "true" ]; then
+                    token_count=$((token_count + 1))
                 fi
-                
+
+                [ "$first_user" = "true" ] && first_user="false" || users_json="$users_json,"
                 users_json="$users_json{"
-                users_json="$users_json\\"username\\": \\"$user\\","
-                users_json="$users_json\\"registered\\": $user_registered,"
-                users_json="$users_json\\"userPrincipalName\\": \\"$user_upn\\""
+                users_json="$users_json\\"username\\": \\"$(json_scrub "$user")\\","
+                users_json="$users_json\\"uid\\": $uid,"
+                users_json="$users_json\\"registered\\": $registered,"
+                users_json="$users_json\\"userPrincipalName\\": \\"$(json_scrub "$upn")\\","
+                users_json="$users_json\\"loginUserName\\": \\"$(json_scrub "$login_user_name")\\","
+                users_json="$users_json\\"uniqueIdentifier\\": \\"$(json_scrub "$unique_id")\\","
+                users_json="$users_json\\"state\\": \\"$(json_scrub "$user_state")\\","
+                users_json="$users_json\\"loginType\\": \\"$(json_scrub "$login_type")\\","
+                users_json="$users_json\\"lastLoginDate\\": \\"$(json_scrub "$last_login")\\","
+                users_json="$users_json\\"tokensPresent\\": $has_tokens,"
+                users_json="$users_json\\"tokenReceived\\": \\"$(json_scrub "$token_received")\\","
+                users_json="$users_json\\"tokenExpiration\\": \\"$(json_scrub "$token_expiration")\\","
+                users_json="$users_json\\"tokenExpired\\": $token_expired,"
+                users_json="$users_json\\"probeStatus\\": \\"$probe_status\\""
                 users_json="$users_json}"
             done
-            
             users_json="$users_json]"
-            
+
             echo "{"
             echo "  \\"supported\\": true,"
-            echo "  \\"deviceRegistered\\": true,"
+            echo "  \\"deviceRegistered\\": $device_registered,"
             echo "  \\"registeredUserCount\\": $registered_count,"
             echo "  \\"unregisteredUserCount\\": $unregistered_count,"
+            echo "  \\"tokenPresentCount\\": $token_count,"
+            echo "  \\"nonPlatformSSOAccounts\\": $non_psso_json,"
             echo "  \\"users\\": $users_json"
             echo "}"
         """
-        
+
         return try await executeWithFallback(
             osquery: nil,
             bash: bashScript

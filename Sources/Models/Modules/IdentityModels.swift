@@ -335,39 +335,86 @@ public struct PlatformSSOUsersInfo: Codable, Sendable {
     public let deviceRegistered: Bool
     public let registeredUserCount: Int
     public let unregisteredUserCount: Int
+    public let tokenPresentCount: Int
+    /// Accounts the Platform SSO payload exempts from registration (`nonPlatformSSOAccounts`)
+    public let nonPlatformSSOAccounts: [String]
     public let users: [PlatformSSOUser]
-    
+
     public init(
         supported: Bool = false,
         deviceRegistered: Bool = false,
         registeredUserCount: Int = 0,
         unregisteredUserCount: Int = 0,
+        tokenPresentCount: Int = 0,
+        nonPlatformSSOAccounts: [String] = [],
         users: [PlatformSSOUser] = []
     ) {
         self.supported = supported
         self.deviceRegistered = deviceRegistered
         self.registeredUserCount = registeredUserCount
         self.unregisteredUserCount = unregisteredUserCount
+        self.tokenPresentCount = tokenPresentCount
+        self.nonPlatformSSOAccounts = nonPlatformSSOAccounts
         self.users = users
     }
 }
 
-/// Individual user's Platform SSO registration status
+/// Individual user's Platform SSO registration and token state
 public struct PlatformSSOUser: Codable, Sendable, Identifiable {
     public var id: String { username }
-    
+
     public let username: String
+    public let uid: Int?
     public let registered: Bool
+    /// Resolved from the Kerberos realm entry, e.g. `user@EXAMPLE.CA`
     public let userPrincipalName: String?
-    
+    /// Name shown by the SSO extension, masked by macOS as `u***r@example.ca`
+    public let loginUserName: String?
+    public let uniqueIdentifier: String?
+    /// Raw `POUserState*` value, e.g. `POUserStateNormal (0)`
+    public let state: String?
+    /// Raw `POLoginType*` value, e.g. `POLoginTypeUserSecureEnclaveKey (2)`
+    public let loginType: String?
+    public let lastLoginDate: String?
+    public let tokensPresent: Bool
+    public let tokenReceived: String?
+    public let tokenExpiration: String?
+    /// nil when no token is present, so "no token" stays distinct from "token valid"
+    public let tokenExpired: Bool?
+    /// Why the user was or was not probed: `ok`, `excluded`, `no-session`,
+    /// `device-not-registered`, `probe-failed`
+    public let probeStatus: String?
+
     public init(
         username: String,
+        uid: Int? = nil,
         registered: Bool = false,
-        userPrincipalName: String? = nil
+        userPrincipalName: String? = nil,
+        loginUserName: String? = nil,
+        uniqueIdentifier: String? = nil,
+        state: String? = nil,
+        loginType: String? = nil,
+        lastLoginDate: String? = nil,
+        tokensPresent: Bool = false,
+        tokenReceived: String? = nil,
+        tokenExpiration: String? = nil,
+        tokenExpired: Bool? = nil,
+        probeStatus: String? = nil
     ) {
         self.username = username
+        self.uid = uid
         self.registered = registered
         self.userPrincipalName = userPrincipalName
+        self.loginUserName = loginUserName
+        self.uniqueIdentifier = uniqueIdentifier
+        self.state = state
+        self.loginType = loginType
+        self.lastLoginDate = lastLoginDate
+        self.tokensPresent = tokensPresent
+        self.tokenReceived = tokenReceived
+        self.tokenExpiration = tokenExpiration
+        self.tokenExpired = tokenExpired
+        self.probeStatus = probeStatus
     }
 }
 

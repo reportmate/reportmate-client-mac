@@ -1145,7 +1145,57 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let bashScript = """
             # Platform SSO status check (macOS 13+ Ventura and later)
             # Collects device-level config and per-user SSO registration
-            
+            set -m
+
+            # Run a command under a hard wall-clock limit, killing its whole process group on
+            # expiry. app-sso blocks forever against a user with no GUI session, and output is
+            # staged through a temp file so a surviving grandchild can never hold our stdout
+            # pipe open.
+            run_with_timeout() {
+                _limit=$1
+                shift
+                _out=$(mktemp /tmp/reportmate-psso.XXXXXX) || return 1
+                "$@" >"$_out" 2>/dev/null &
+                _pid=$!
+                _waited=0
+                while kill -0 "$_pid" 2>/dev/null; do
+                    if [ "$_waited" -ge "$_limit" ]; then
+                        kill -9 -"$_pid" 2>/dev/null
+                        kill -9 "$_pid" 2>/dev/null
+                        wait "$_pid" 2>/dev/null
+                        rm -f "$_out"
+                        return 124
+                    fi
+                    sleep 1
+                    _waited=$((_waited + 1))
+                done
+                wait "$_pid" 2>/dev/null
+                cat "$_out"
+                rm -f "$_out"
+                return 0
+            }
+
+            running_uid=$(id -u)
+
+            # Platform SSO state is per-user and only reachable inside that user's Aqua
+            # session, so a user with no GUI session must never be probed.
+            has_gui_session() {
+                if [ "$running_uid" = "$1" ]; then
+                    return 0
+                fi
+                launchctl print "gui/$1" >/dev/null 2>&1
+            }
+
+            appsso_for_user() {
+                if [ "$running_uid" = "0" ]; then
+                    run_with_timeout 20 launchctl asuser "$2" sudo -u "$1" /usr/bin/app-sso platform -s
+                elif [ "$running_uid" = "$2" ]; then
+                    run_with_timeout 20 /usr/bin/app-sso platform -s
+                else
+                    return 1
+                fi
+            }
+
             # Check macOS version (Platform SSO requires 13+)
             os_version=$(sw_vers -productVersion | cut -d. -f1)
             if [ "$os_version" -lt 13 ]; then
@@ -1163,7 +1213,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             fi
             
             # First get device-level SSO state (can run as root)
-            sso_state=$(app-sso platform -s 2>/dev/null || echo "")
+            sso_state=$(run_with_timeout 20 /usr/bin/app-sso platform -s)
             
             # Initialize device-level variables
             registered="false"
@@ -1234,10 +1284,21 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     if [ ! -d "$user_home" ] || [ "$user_home" = "/var/empty" ]; then
                         continue
                     fi
-                    
+
+                    # Accounts the payload exempts from Platform SSO have no SSO agent and
+                    # would hang the probe, so skip them outright.
+                    if echo ",$non_psso_accounts," | grep -qF ",$user,"; then
+                        continue
+                    fi
+
+                    user_uid=$(dscl . -read /Users/"$user" UniqueID 2>/dev/null | awk '{print $2}' || echo "")
+                    if [ -z "$user_uid" ] || ! has_gui_session "$user_uid"; then
+                        continue
+                    fi
+
                     # Get SSO state for this user
-                    user_sso=$(sudo -u "$user" app-sso platform -s 2>/dev/null || echo "")
-                    
+                    user_sso=$(appsso_for_user "$user" "$user_uid")
+
                     user_registered="false"
                     user_upn=""
                     user_email=""
@@ -1248,17 +1309,22 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     token_expiration=""
                     
                     if [ -n "$user_sso" ]; then
-                        # Check User Configuration section for this user's SSO data
-                        if echo "$user_sso" | grep -q "User Configuration:"; then
+                        # Scope extraction to the per-user block. The Device and Login
+                        # Configuration blocks print for every account regardless of that
+                        # account's registration, so matching against the whole output
+                        # attributes device-level values to unregistered users.
+                        user_section=$(echo "$user_sso" | awk '/^User Configuration:/{f=1;next} f&&/^SSO Tokens:/{f=0} f')
+
+                        if [ -n "$user_section" ]; then
                             # Extract UPN (prefer clean one without KERBEROS suffix)
-                            user_upn=$(echo "$user_sso" | grep '"upn"' | grep -v "KERBEROS" | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
+                            user_upn=$(echo "$user_section" | grep '"upn"' | grep -v "KERBEROS" | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
                             if [ -z "$user_upn" ]; then
-                                user_upn=$(echo "$user_sso" | grep '"upn"' | head -1 | sed 's/.*: *"\\([^@]*@[^@]*\\)@.*/\\1/' | sed 's/\\\\\\\\@/@/' || echo "")
+                                user_upn=$(echo "$user_section" | grep '"upn"' | head -1 | sed 's/.*: *"\\([^@]*@[^@]*\\)@.*/\\1/' | sed 's/\\\\\\\\@/@/' || echo "")
                             fi
-                            
+
                             # Extract loginUserName (may be masked)
-                            user_email=$(echo "$user_sso" | grep '"loginUserName"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
-                            
+                            user_email=$(echo "$user_section" | grep '"loginUserName"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
+
                             # Prefer UPN if email is masked
                             if [ -n "$user_upn" ]; then
                                 if [ -z "$user_email" ] || echo "$user_email" | grep -q '\\*\\*\\*'; then
@@ -1272,10 +1338,10 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                             fi
                             
                             # Extract last login date
-                            user_last_login=$(echo "$user_sso" | grep '"lastLoginDate"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
-                            
+                            user_last_login=$(echo "$user_section" | grep '"lastLoginDate"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
+
                             # Extract user state
-                            user_state=$(echo "$user_sso" | grep '"state"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
+                            user_state=$(echo "$user_section" | grep '"state"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
                         fi
                         
                         # Check for SSO Tokens section (appears at end of output, not in JSON format)
@@ -1907,9 +1973,32 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         ConsoleFormatter.writeDebug("Microsoft Defender: mdatp CLI found, collecting health data")
         
         do {
-            // Get health status
-            let healthOutput = try await executeBashScript("/usr/local/bin/mdatp health --output json 2>/dev/null || echo '{}'")
-            
+            // Get health status. `mdatp health` can block indefinitely when the Defender
+            // daemon is wedged, which would stall the entire security collection - and with
+            // it the Platform SSO data reported below - so bound it and fall back to empty.
+            let healthOutput = try await executeBashScript("""
+                set -m
+                out=$(mktemp /tmp/reportmate-mdatp.XXXXXX) || { echo '{}'; exit 0; }
+                /usr/local/bin/mdatp health --output json >"$out" 2>/dev/null &
+                pid=$!
+                waited=0
+                while kill -0 "$pid" 2>/dev/null; do
+                    if [ "$waited" -ge 30 ]; then
+                        kill -9 -"$pid" 2>/dev/null
+                        kill -9 "$pid" 2>/dev/null
+                        wait "$pid" 2>/dev/null
+                        rm -f "$out"
+                        echo '{}'
+                        exit 0
+                    fi
+                    sleep 1
+                    waited=$((waited + 1))
+                done
+                wait "$pid" 2>/dev/null
+                if [ -s "$out" ]; then cat "$out"; else echo '{}'; fi
+                rm -f "$out"
+                """)
+
             guard let healthData = healthOutput.data(using: .utf8),
                   let healthJson = try? JSONSerialization.jsonObject(with: healthData) as? [String: Any] else {
                 ConsoleFormatter.writeDebug("Microsoft Defender: failed to parse health JSON")
