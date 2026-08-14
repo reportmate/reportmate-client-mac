@@ -14,7 +14,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     public override func collectData() async throws -> ModuleData {
         // Total collection steps for progress tracking
-        let totalSteps = 23
+        let totalSteps = 22
         
         // Collect security data sequentially with progress tracking
         ConsoleFormatter.writeQueryProgress(queryName: "sip_status", current: 1, total: totalSteps)
@@ -53,37 +53,37 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         ConsoleFormatter.writeQueryProgress(queryName: "activation_lock", current: 12, total: totalSteps)
         let activationLock = try await collectActivationLockStatus()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "platform_sso", current: 13, total: totalSteps)
-        let platformSSO = try await collectPlatformSSOStatus()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "filevault_users", current: 14, total: totalSteps)
+        // Platform SSO is an identity concern, not a security-posture one, and lives in the
+        // identity module (identity.platformSSO). It was collected here as well, which meant
+        // it also sat behind this module's slower probes.
+        ConsoleFormatter.writeQueryProgress(queryName: "filevault_users", current: 13, total: totalSteps)
         let fvUsers = try await collectFileVaultUsers()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "secure_token", current: 15, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "secure_token", current: 14, total: totalSteps)
         let secureToken = try await collectSecureTokenStatus()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "bootstrap_token", current: 16, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "bootstrap_token", current: 15, total: totalSteps)
         let bootstrapToken = try await collectBootstrapTokenStatus()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "authdb", current: 17, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "authdb", current: 16, total: totalSteps)
         let authdb = try await collectAuthDB()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "unpatched_cves", current: 18, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "unpatched_cves", current: 17, total: totalSteps)
         let unpatchedCVEs = try await collectSofaUnpatchedCVEs()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "security_release", current: 19, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "security_release", current: 18, total: totalSteps)
         let securityRelease = try await collectSofaSecurityReleaseInfo()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "remote_management", current: 20, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "remote_management", current: 19, total: totalSteps)
         let remoteMgmt = try await collectRemoteManagement()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "certificates", current: 21, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "certificates", current: 20, total: totalSteps)
         let certificates = try await collectCertificates()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "endpoint_security", current: 22, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "endpoint_security", current: 21, total: totalSteps)
         let endpointSecurity = try await collectEndpointSecurityExtensions()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "edr_products", current: 23, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "edr_products", current: 22, total: totalSteps)
         let edrProducts = try await collectEDRProducts()
         
         // Build security data dictionary
@@ -103,7 +103,6 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "mrt": mrt,
             "secureEnclave": secureEnclave,
             "activationLock": activationLock,
-            "platformSSO": platformSSO,
             "authorizationDB": authdb,
             "unpatchedCVEs": unpatchedCVEs,
             "securityReleaseInfo": securityRelease,
@@ -1127,314 +1126,6 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             echo "  \\"email\\": \\"$fmm_email\\","
             echo "  \\"ownerDisplayName\\": \\"$fmm_owner\\","
             echo "  \\"personId\\": \\"$fmm_person_id\\""
-            echo "}"
-        """
-        
-        return try await executeWithFallback(
-            osquery: nil,
-            bash: bashScript
-        )
-    }
-    
-    // MARK: - Platform Single Sign-On Status (bash: app-sso)
-    
-    private func collectPlatformSSOStatus() async throws -> [String: Any] {
-        // Platform SSO is macOS 13+ feature for enterprise single sign-on
-        // Uses the app-sso command-line tool with -s flag to get state (JSON-like format)
-        // Collects comprehensive device config + per-user SSO data
-        let bashScript = """
-            # Platform SSO status check (macOS 13+ Ventura and later)
-            # Collects device-level config and per-user SSO registration
-            set -m
-
-            # Run a command under a hard wall-clock limit, killing its whole process group on
-            # expiry. app-sso blocks forever against a user with no GUI session, and output is
-            # staged through a temp file so a surviving grandchild can never hold our stdout
-            # pipe open.
-            run_with_timeout() {
-                _limit=$1
-                shift
-                _out=$(mktemp /tmp/reportmate-psso.XXXXXX) || return 1
-                "$@" >"$_out" 2>/dev/null &
-                _pid=$!
-                _waited=0
-                while kill -0 "$_pid" 2>/dev/null; do
-                    if [ "$_waited" -ge "$_limit" ]; then
-                        kill -9 -"$_pid" 2>/dev/null
-                        kill -9 "$_pid" 2>/dev/null
-                        wait "$_pid" 2>/dev/null
-                        rm -f "$_out"
-                        return 124
-                    fi
-                    sleep 1
-                    _waited=$((_waited + 1))
-                done
-                wait "$_pid" 2>/dev/null
-                cat "$_out"
-                rm -f "$_out"
-                return 0
-            }
-
-            running_uid=$(id -u)
-
-            # Platform SSO state is per-user and only reachable inside that user's Aqua
-            # session, so a user with no GUI session must never be probed.
-            has_gui_session() {
-                if [ "$running_uid" = "$1" ]; then
-                    return 0
-                fi
-                launchctl print "gui/$1" >/dev/null 2>&1
-            }
-
-            appsso_for_user() {
-                if [ "$running_uid" = "0" ]; then
-                    run_with_timeout 20 launchctl asuser "$2" sudo -u "$1" /usr/bin/app-sso platform -s
-                elif [ "$running_uid" = "$2" ]; then
-                    run_with_timeout 20 /usr/bin/app-sso platform -s
-                else
-                    return 1
-                fi
-            }
-
-            # Check macOS version (Platform SSO requires 13+)
-            os_version=$(sw_vers -productVersion | cut -d. -f1)
-            if [ "$os_version" -lt 13 ]; then
-                echo "{"
-                echo "  \\"supported\\": false,"
-                echo "  \\"registered\\": false,"
-                echo "  \\"provider\\": \\"\\"," 
-                echo "  \\"method\\": \\"Not supported (macOS 13+ required)\\","
-                echo "  \\"extensionIdentifier\\": \\"\\"," 
-                echo "  \\"loginFrequency\\": 0,"
-                echo "  \\"offlineGracePeriod\\": \\"\\"," 
-                echo "  \\"users\\": []"
-                echo "}"
-                exit 0
-            fi
-            
-            # First get device-level SSO state (can run as root)
-            sso_state=$(run_with_timeout 20 /usr/bin/app-sso platform -s)
-            
-            # Initialize device-level variables
-            registered="false"
-            sso_provider=""
-            method="Unknown"
-            extension_id=""
-            org_name=""
-            login_freq="0"
-            offline_grace=""
-            non_psso_accounts=""
-            
-            if [ -n "$sso_state" ]; then
-                # Check registration status
-                if echo "$sso_state" | grep -q '"registrationCompleted" *: *true'; then
-                    registered="true"
-                fi
-                
-                # Extract SSO extension identifier
-                extension_id=$(echo "$sso_state" | grep '"extensionIdentifier"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
-                
-                # Extract organization/account display name (first one is org name)
-                org_name=$(echo "$sso_state" | grep '"accountDisplayName"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
-                
-                # Extract provider from accountDisplayName (find the IdP entry)
-                provider_val=$(echo "$sso_state" | grep '"accountDisplayName"' | grep -i "Entra\\|Okta\\|Google\\|Jamf\\|Microsoft" | head -1 || echo "")
-                if echo "$provider_val" | grep -qi "Microsoft\\|Entra"; then
-                    sso_provider="Microsoft Entra ID"
-                elif echo "$provider_val" | grep -qi "Okta"; then
-                    sso_provider="Okta"
-                elif echo "$provider_val" | grep -qi "Google"; then
-                    sso_provider="Google"
-                elif echo "$provider_val" | grep -qi "Jamf"; then
-                    sso_provider="Jamf Connect"
-                fi
-                
-                # Extract login type / method
-                login_type=$(echo "$sso_state" | grep '"loginType"' | head -1 || echo "")
-                if echo "$login_type" | grep -qi "SecureEnclaveKey"; then
-                    method="Secure enclave key"
-                elif echo "$login_type" | grep -qi "Password"; then
-                    method="Password"
-                elif echo "$login_type" | grep -qi "SmartCard"; then
-                    method="Smart Card"
-                fi
-                
-                # Extract login frequency (seconds)
-                login_freq=$(echo "$sso_state" | grep '"loginFrequency"' | head -1 | sed 's/[^0-9]//g' || echo "0")
-                
-                # Extract offline grace period
-                offline_grace=$(echo "$sso_state" | grep '"offlineGracePeriod"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
-                
-                # Extract non-Platform SSO accounts (local accounts) - array format
-                non_psso_accounts=$(echo "$sso_state" | sed -n '/"nonPlatformSSOAccounts"/,/\\]/p' | grep -v 'nonPlatformSSOAccounts' | grep '"' | sed 's/.*"\\([^"]*\\)".*/\\1/' | tr '\\n' ',' | sed 's/,$//' || echo "")
-            fi
-            
-            # Now collect per-user SSO data (only if registered)
-            users_json="[]"
-            if [ "$registered" = "true" ]; then
-                # Get all human users on the system
-                all_users=$(dscl . -list /Users | grep -v "^_" | grep -v "daemon\\|nobody\\|root\\|Guest" || echo "")
-                
-                users_json="["
-                first_user="true"
-                
-                for user in $all_users; do
-                    # Get user's home directory to check if real user
-                    user_home=$(dscl . -read /Users/"$user" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || echo "")
-                    if [ ! -d "$user_home" ] || [ "$user_home" = "/var/empty" ]; then
-                        continue
-                    fi
-
-                    # Accounts the payload exempts from Platform SSO have no SSO agent and
-                    # would hang the probe, so skip them outright.
-                    if echo ",$non_psso_accounts," | grep -qF ",$user,"; then
-                        continue
-                    fi
-
-                    user_uid=$(dscl . -read /Users/"$user" UniqueID 2>/dev/null | awk '{print $2}' || echo "")
-                    if [ -z "$user_uid" ] || ! has_gui_session "$user_uid"; then
-                        continue
-                    fi
-
-                    # Get SSO state for this user
-                    user_sso=$(appsso_for_user "$user" "$user_uid")
-
-                    user_registered="false"
-                    user_upn=""
-                    user_email=""
-                    user_tokens="false"
-                    user_last_login=""
-                    user_state=""
-                    token_received=""
-                    token_expiration=""
-                    
-                    if [ -n "$user_sso" ]; then
-                        # Scope extraction to the per-user block. The Device and Login
-                        # Configuration blocks print for every account regardless of that
-                        # account's registration, so matching against the whole output
-                        # attributes device-level values to unregistered users.
-                        user_section=$(echo "$user_sso" | awk '/^User Configuration:/{f=1;next} f&&/^SSO Tokens:/{f=0} f')
-
-                        if [ -n "$user_section" ]; then
-                            # Extract UPN (prefer clean one without KERBEROS suffix)
-                            user_upn=$(echo "$user_section" | grep '"upn"' | grep -v "KERBEROS" | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
-                            if [ -z "$user_upn" ]; then
-                                user_upn=$(echo "$user_section" | grep '"upn"' | head -1 | sed 's/.*: *"\\([^@]*@[^@]*\\)@.*/\\1/' | sed 's/\\\\\\\\@/@/' || echo "")
-                            fi
-
-                            # Extract loginUserName (may be masked)
-                            user_email=$(echo "$user_section" | grep '"loginUserName"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
-
-                            # Prefer UPN if email is masked
-                            if [ -n "$user_upn" ]; then
-                                if [ -z "$user_email" ] || echo "$user_email" | grep -q '\\*\\*\\*'; then
-                                    user_email="$user_upn"
-                                fi
-                            fi
-                            
-                            # If we have UPN or email, user is registered
-                            if [ -n "$user_upn" ] || [ -n "$user_email" ]; then
-                                user_registered="true"
-                            fi
-                            
-                            # Extract last login date
-                            user_last_login=$(echo "$user_section" | grep '"lastLoginDate"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
-
-                            # Extract user state
-                            user_state=$(echo "$user_section" | grep '"state"' | head -1 | sed 's/.*: *"\\([^"]*\\)".*/\\1/' || echo "")
-                        fi
-                        
-                        # Check for SSO Tokens section (appears at end of output, not in JSON format)
-                        # Format is:
-                        # SSO Tokens:
-                        # Received:
-                        # 2026-01-16T17:48:17Z
-                        # Expiration:
-                        # 2026-01-30T17:48:16Z (Not Expired)
-                        if echo "$user_sso" | grep -q "^SSO Tokens:"; then
-                            # Extract the token received timestamp (line after "Received:")
-                            token_received=$(echo "$user_sso" | awk '/^Received:/{getline; print; exit}' | tr -d ' ')
-                            # Extract the token expiration (line after "Expiration:")
-                            token_expiration=$(echo "$user_sso" | awk '/^Expiration:/{getline; print; exit}' | sed 's/ *(.*$//' | tr -d ' ')
-                            
-                            # If we have a received timestamp, tokens are present
-                            if [ -n "$token_received" ] && [ "$token_received" != "" ]; then
-                                user_tokens="true"
-                            fi
-                        fi
-                    fi
-                    
-                    # Add user to JSON array if they have any SSO data
-                    if [ "$user_registered" = "true" ] || [ -n "$user_upn" ] || [ -n "$user_email" ]; then
-                        if [ "$first_user" = "true" ]; then
-                            first_user="false"
-                        else
-                            users_json="$users_json,"
-                        fi
-                        
-                        # Convert boolean to integer for tokensPresent (1 or 0)
-                        if [ "$user_tokens" = "true" ]; then
-                            tokens_val=1
-                        else
-                            tokens_val=0
-                        fi
-                        
-                        # Convert registered boolean to integer
-                        if [ "$user_registered" = "true" ]; then
-                            registered_val=1
-                        else
-                            registered_val=0
-                        fi
-                        
-                        users_json="$users_json{"
-                        users_json="$users_json\\"username\\": \\"$user\\","
-                        users_json="$users_json\\"registered\\": $registered_val,"
-                        users_json="$users_json\\"upn\\": \\"$user_upn\\","
-                        users_json="$users_json\\"loginEmail\\": \\"$user_email\\","
-                        users_json="$users_json\\"lastLogin\\": \\"$user_last_login\\","
-                        users_json="$users_json\\"state\\": \\"$user_state\\","
-                        users_json="$users_json\\"tokensPresent\\": $tokens_val,"
-                        users_json="$users_json\\"tokenReceived\\": \\"$token_received\\","
-                        users_json="$users_json\\"tokenExpiration\\": \\"$token_expiration\\""
-                        users_json="$users_json}"
-                    fi
-                done
-                users_json="$users_json]"
-            fi
-            
-            # Fallback: Check for SSO provider via profile if not found
-            if [ "$sso_provider" = "" ] && [ "$registered" = "false" ]; then
-                azure_check=$(profiles show -type configuration 2>/dev/null | grep -i "microsoft\\|azure\\|entra" || echo "")
-                okta_check=$(profiles show -type configuration 2>/dev/null | grep -i "okta" || echo "")
-                jamf_check=$(profiles show -type configuration 2>/dev/null | grep -i "jamf connect" || echo "")
-                
-                if [ -n "$azure_check" ]; then
-                    sso_provider="Microsoft Entra ID"
-                elif [ -n "$okta_check" ]; then
-                    sso_provider="Okta"
-                elif [ -n "$jamf_check" ]; then
-                    sso_provider="Jamf Connect"
-                fi
-            fi
-            
-            # Convert device-level registered to integer
-            if [ "$registered" = "true" ]; then
-                registered_int=1
-            else
-                registered_int=0
-            fi
-            
-            echo "{"
-            echo "  \\"supported\\": 1,"
-            echo "  \\"registered\\": $registered_int,"
-            echo "  \\"provider\\": \\"$sso_provider\\","
-            echo "  \\"method\\": \\"$method\\","
-            echo "  \\"extensionIdentifier\\": \\"$extension_id\\","
-            echo "  \\"organizationName\\": \\"$org_name\\","
-            echo "  \\"loginFrequency\\": $login_freq,"
-            echo "  \\"offlineGracePeriod\\": \\"$offline_grace\\","
-            echo "  \\"nonPlatformSSOAccounts\\": \\"$non_psso_accounts\\","
-            echo "  \\"users\\": $users_json"
             echo "}"
         """
         

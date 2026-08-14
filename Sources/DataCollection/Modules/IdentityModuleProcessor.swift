@@ -662,6 +662,12 @@ public class IdentityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 echo "{"
                 echo "  \\"supported\\": false,"
                 echo "  \\"deviceRegistered\\": false,"
+                echo "  \\"provider\\": \\"\\","
+                echo "  \\"method\\": \\"\\","
+                echo "  \\"extensionIdentifier\\": \\"\\","
+                echo "  \\"organizationName\\": \\"\\","
+                echo "  \\"loginFrequency\\": 0,"
+                echo "  \\"offlineGracePeriod\\": \\"\\","
                 echo "  \\"registeredUserCount\\": 0,"
                 echo "  \\"unregisteredUserCount\\": 0,"
                 echo "  \\"tokenPresentCount\\": 0,"
@@ -729,6 +735,39 @@ public class IdentityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             if printf '%s\\n' "$device_section" | grep -q '"registrationCompleted" *: *true'; then
                 device_registered="true"
             fi
+
+            extension_id=$(printf '%s\\n' "$device_section" | json_string extensionIdentifier)
+            org_name=$(printf '%s\\n' "$device_section" | json_string accountDisplayName)
+            offline_grace=$(printf '%s\\n' "$device_section" | json_string offlineGracePeriod)
+            login_freq=$(printf '%s\\n' "$device_section" | grep '"loginFrequency"' | head -1 | sed 's/[^0-9]//g')
+            [ -z "$login_freq" ] && login_freq=0
+
+            # Identify the IdP from the extension bundle id, falling back to the account
+            # display name. The extension id is the reliable signal.
+            provider=""
+            case "$extension_id" in
+                *microsoft*|*Microsoft*) provider="Microsoft Entra ID" ;;
+                *okta*|*Okta*)           provider="Okta" ;;
+                *jamf*|*Jamf*)           provider="Jamf Connect" ;;
+                *google*|*Google*)       provider="Google" ;;
+            esac
+            if [ -z "$provider" ]; then
+                case "$org_name" in
+                    *Entra*|*Microsoft*) provider="Microsoft Entra ID" ;;
+                    *Okta*)              provider="Okta" ;;
+                    *Jamf*)              provider="Jamf Connect" ;;
+                    *Google*)            provider="Google" ;;
+                esac
+            fi
+
+            # Device-wide authentication method from the configured login type.
+            device_login_type=$(printf '%s\\n' "$device_section" | json_string loginType)
+            method="Unknown"
+            case "$device_login_type" in
+                *SecureEnclaveKey*) method="Secure enclave key" ;;
+                *SmartCard*)        method="Smart card" ;;
+                *Password*)         method="Password" ;;
+            esac
 
             # Accounts the PSSO payload exempts by policy. Never probe these: they have no SSO
             # agent, so app-sso would hang against them.
@@ -893,6 +932,12 @@ public class IdentityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             echo "{"
             echo "  \\"supported\\": true,"
             echo "  \\"deviceRegistered\\": $device_registered,"
+            echo "  \\"provider\\": \\"$(json_scrub "$provider")\\","
+            echo "  \\"method\\": \\"$(json_scrub "$method")\\","
+            echo "  \\"extensionIdentifier\\": \\"$(json_scrub "$extension_id")\\","
+            echo "  \\"organizationName\\": \\"$(json_scrub "$org_name")\\","
+            echo "  \\"loginFrequency\\": $login_freq,"
+            echo "  \\"offlineGracePeriod\\": \\"$(json_scrub "$offline_grace")\\","
             echo "  \\"registeredUserCount\\": $registered_count,"
             echo "  \\"unregisteredUserCount\\": $unregistered_count,"
             echo "  \\"tokenPresentCount\\": $token_count,"
