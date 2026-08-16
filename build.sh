@@ -1567,9 +1567,26 @@ fi
 if [ "$NOTARIZE" = true ] && [ "$SKIP_PKG" = false ]; then
     log_step "Submitting for notarization..."
     
-    # Validate notarization credentials are configured
-    if [ -z "$NOTARIZATION_APPLE_ID" ] || [ -z "$NOTARIZATION_PASSWORD" ] || [ -z "$TEAM_ID" ]; then
-        log_error "Notarization credentials not set. Please configure in .env:"
+    # Prefer a stored keychain profile. An app-specific password kept in .env is
+    # revoked whenever the Apple ID's password changes, and notarytool reports
+    # that as a bare "HTTP 401 ... not allowed for primary authentication" with
+    # no hint that the credential is simply dead. A keychain profile is
+    # validated once at creation and does not have to sit in a file.
+    if [ -n "$NOTARIZATION_KEYCHAIN_PROFILE" ]; then
+        NOTARY_AUTH=(--keychain-profile "$NOTARIZATION_KEYCHAIN_PROFILE")
+        log_info "Notarizing with keychain profile: $NOTARIZATION_KEYCHAIN_PROFILE"
+    elif [ -n "$NOTARIZATION_APPLE_ID" ] && [ -n "$NOTARIZATION_PASSWORD" ] && [ -n "$TEAM_ID" ]; then
+        NOTARY_AUTH=(--apple-id "$NOTARIZATION_APPLE_ID" --password "$NOTARIZATION_PASSWORD" --team-id "$TEAM_ID")
+        log_info "Notarizing with Apple ID: $NOTARIZATION_APPLE_ID"
+    else
+        log_error "Notarization credentials not set. Configure either in .env:"
+        log_info "  NOTARIZATION_KEYCHAIN_PROFILE=\"notarization_credentials\"   (preferred)"
+        log_info ""
+        log_info "  created once with:"
+        log_info "    xcrun notarytool store-credentials \"notarization_credentials\" \\\\"
+        log_info "      --apple-id \"your@email.com\" --team-id \"XXXXXXXXXX\" --password \"xxxx-xxxx-xxxx-xxxx\""
+        log_info ""
+        log_info "  or the legacy form:"
         log_info "  NOTARIZATION_APPLE_ID=\"your@email.com\""
         log_info "  NOTARIZATION_PASSWORD=\"xxxx-xxxx-xxxx-xxxx\""
         log_info "  TEAM_ID=\"XXXXXXXXXX\""
@@ -1577,15 +1594,10 @@ if [ "$NOTARIZE" = true ] && [ "$SKIP_PKG" = false ]; then
         log_info "Generate app-specific password at: https://appleid.apple.com/account/manage"
         exit 1
     fi
-    
+
     PKG_PATH="${DIST_DIR}/ReportMate-${VERSION}.pkg"
     
-    NOTARYTOOL_ARGS=(
-        --apple-id "$NOTARIZATION_APPLE_ID"
-        --password "$NOTARIZATION_PASSWORD"
-        --team-id "$TEAM_ID"
-        --wait
-    )
+    NOTARYTOOL_ARGS=("${NOTARY_AUTH[@]}" --wait)
     
     NOTARY_OUTPUT=$(xcrun notarytool submit "$PKG_PATH" "${NOTARYTOOL_ARGS[@]}" 2>&1)
     
@@ -1604,7 +1616,7 @@ if [ "$NOTARIZE" = true ] && [ "$SKIP_PKG" = false ]; then
         SUBMISSION_ID=$(echo "$NOTARY_OUTPUT" | grep "id:" | head -1 | awk '{print $2}')
         if [ -n "$SUBMISSION_ID" ]; then
             log_info "Getting detailed log..."
-            xcrun notarytool log "$SUBMISSION_ID" --apple-id "$NOTARIZATION_APPLE_ID" --password "$NOTARIZATION_PASSWORD" --team-id "$TEAM_ID"
+            xcrun notarytool log "$SUBMISSION_ID" "${NOTARY_AUTH[@]}"
         fi
         exit 1
     fi
