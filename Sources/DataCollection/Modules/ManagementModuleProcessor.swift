@@ -308,76 +308,148 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
     }
     
     // MARK: - MDM Certificate Details (APNs Topic, SCEP, Identity Certificate)
-    
+    /// Resolves the MDM identity certificate from the enrollment profile itself.
+    ///
+    /// The `com.apple.mdm` payload names its own identity certificate by UUID. That UUID
+    /// resolves to the payload which provisions the certificate - ACME, SCEP or PKCS12 -
+    /// which in turn carries the certificate's subject CN. That chain is authoritative and
+    /// vendor-neutral.
+    ///
+    /// Matching keychain labels against an "MDM" substring is not. It picks up stale
+    /// certificates left behind by previous enrollments, and it cannot match an Intune
+    /// identity at all, because Intune names those by bare GUID. A device that had been
+    /// migrated off another MDM reported that MDM's dead certificate, its issuer, and an
+    /// expiry sixteen months later than the real one.
     private func collectMDMCertificateDetails() async throws -> [String: Any] {
         let bashScript = """
             push_topic=""
+            server_url=""
+            checkin_url=""
             scep_url=""
             cert_name=""
             cert_subject=""
             cert_issuer=""
             cert_expires=""
             mdm_provider=""
+            enrollment_method=""
+            identity_payload_type=""
+            enrollment_url=""
 
-            # Get Push Topic from system_profiler (not profiles command)
-            push_topic=$(system_profiler SPConfigurationProfileDataType 2>/dev/null | grep "Topic" | head -1 | sed 's/.*= "//' | sed 's/".*//' | tr -d ';')
+            # profiles(1) emits an XML plist carrying <data> blobs (certificates) and a
+            # <date>, neither of which plutil renders as JSON, so drop the blobs and retype
+            # the dates before converting.
+            profiles_json=$(/usr/bin/profiles show -type configuration -o stdout-xml 2>/dev/null \\
+                | awk '
+                    /<data>/ { print "<string>[data]</string>"; if ($0 ~ /<\\/data>/) next; ind=1; next }
+                    ind && /<\\/data>/ { ind=0; next }
+                    ind { next }
+                    { print }
+                  ' \\
+                | sed 's|<date>|<string>|g; s|</date>|</string>|g' \\
+                | plutil -convert json -o - - 2>/dev/null)
 
-            # Get SCEP URL by deriving from MDM ServerURL (filter for /mdm/ to avoid Crypt etc)
-            mdm_server=$(system_profiler SPConfigurationProfileDataType 2>/dev/null | grep "ServerURL" | grep "/mdm/" | head -1 | sed 's/.*= "//' | sed 's/".*//' | tr -d ';')
-            if [ -n "$mdm_server" ]; then
-                base_url=$(echo "$mdm_server" | sed 's|/mdm/.*||')
-                scep_url="${base_url}/scep"
-            fi
+            if [ -n "$profiles_json" ]; then
+                mdm_facts=$(printf '%s' "$profiles_json" | jq -r '
+                    [ ._computerlevel[]? | .ProfileItems[]? | select(.PayloadType == "com.apple.mdm") ] as $mdm
+                    | ($mdm[0].PayloadContent // {}) as $c
+                    | [ ._computerlevel[]? | .ProfileItems[]?
+                        | select(.PayloadUUID != null and .PayloadUUID == $c.IdentityCertificateUUID) ] as $id
+                    | ($id[0] // {}) as $idp
+                    | [ ($c.ServerURL // ""),
+                        ($c.CheckInURL // ""),
+                        ($c.Topic // ""),
+                        ($idp.PayloadType // ""),
+                        (($idp.PayloadContent.Subject // []) | flatten | if length >= 2 then .[1] else "" end),
+                        ($idp.PayloadContent.URL // $idp.PayloadContent.DirectoryURL // "")
+                      ] | @tsv' 2>/dev/null)
 
-            # Get MDM certificate - use MOST RECENT certificate (sort by expiration date)
-            # This handles cases where device has multiple MDM certs (re-enrollment, device+user certs)
-            # Convert dates to epoch for proper numerical sorting
-            cert_name=$(security find-certificate -a /Library/Keychains/System.keychain 2>/dev/null | \
-                grep '"labl"' | grep -iE "MDM|Identity" | \
-                while read line; do
-                    name=$(echo "$line" | sed 's/.*="\\(.*\\)".*/\\1/')
-                    expiry_str=$(security find-certificate -c "$name" -p /Library/Keychains/System.keychain 2>/dev/null | \
-                        openssl x509 -noout -enddate 2>/dev/null | sed 's/notAfter=//')
-                    # Convert to epoch time for proper numerical sorting (latest expiry = highest number)
-                    expiry_epoch=$(date -jf "%b %d %T %Y %Z" "$expiry_str" "+%s" 2>/dev/null || echo "0")
-                    echo "$expiry_epoch|||$name"
-                done | sort -rn | head -1 | cut -d'|' -f4-)
-            
-            if [ -n "$cert_name" ]; then
-                cert_subject="$cert_name"
-                
-                # Get issuer and expiry from the certificate
-                cert_info=$(security find-certificate -c "$cert_name" -p /Library/Keychains/System.keychain 2>/dev/null | openssl x509 -noout -subject -issuer -enddate 2>/dev/null)
-                if [ -n "$cert_info" ]; then
-                    cert_issuer=$(echo "$cert_info" | grep "^issuer=" | sed 's/issuer=//' | sed 's/.*CN=//' | sed 's/,.*//')
-                    cert_expires=$(echo "$cert_info" | grep "^notAfter=" | sed 's/notAfter=//')
+                if [ -n "$mdm_facts" ]; then
+                    server_url=$(printf '%s' "$mdm_facts" | cut -f1)
+                    checkin_url=$(printf '%s' "$mdm_facts" | cut -f2)
+                    push_topic=$(printf '%s' "$mdm_facts" | cut -f3)
+                    identity_payload_type=$(printf '%s' "$mdm_facts" | cut -f4)
+                    cert_subject=$(printf '%s' "$mdm_facts" | cut -f5)
+                    enrollment_url=$(printf '%s' "$mdm_facts" | cut -f6)
                 fi
             fi
 
-            # Determine MDM provider from issuer or cert name
-            check_str=$(echo "$cert_issuer $cert_name" | tr '[:upper:]' '[:lower:]')
-            case "$check_str" in
-                *micromdm*) mdm_provider="MicroMDM" ;;
-                *nanomdm*) mdm_provider="NanoMDM" ;;
-                *jamf*) mdm_provider="Jamf Pro" ;;
-                *mosyle*) mdm_provider="Mosyle" ;;
-                *kandji*) mdm_provider="Kandji" ;;
-                *intune*|*microsoft*) mdm_provider="Microsoft Intune" ;;
-                *workspace*|*airwatch*) mdm_provider="VMware Workspace ONE" ;;
-                *) [ -n "$cert_issuer" ] && mdm_provider="$cert_issuer" ;;
+            # How the identity certificate is provisioned. Intune issues over ACME on
+            # current macOS, so a SCEP yes/no answers the wrong question.
+            case "$identity_payload_type" in
+                com.apple.security.acme)   enrollment_method="ACME" ;;
+                com.apple.security.scep)   enrollment_method="SCEP" ;;
+                com.apple.security.pkcs12) enrollment_method="PKCS12" ;;
+                "")                        enrollment_method="" ;;
+                *)                         enrollment_method="$identity_payload_type" ;;
             esac
 
+            # The enrollment URL carries session metadata in its query string; keep the
+            # endpoint for diagnostics without recording the rest.
+            if [ -n "$enrollment_url" ]; then
+                scep_url=$(printf '%s' "$enrollment_url" | sed 's/?.*//')
+            fi
+
+            # Resolve the certificate by the exact CN the profile named. Renewals can leave
+            # several certificates sharing a CN, so take the one that expires last.
+            if [ -n "$cert_subject" ]; then
+                cert_name="$cert_subject"
+                newest_epoch=0
+                tmp_pem=$(mktemp /tmp/reportmate-mdmcert.XXXXXX)
+                security find-certificate -a -c "$cert_subject" -p /Library/Keychains/System.keychain 2>/dev/null > "$tmp_pem"
+
+                if [ -s "$tmp_pem" ]; then
+                    awk 'BEGIN{n=0} /-----BEGIN CERTIFICATE-----/{n++} {print > ("'"$tmp_pem"'." n)}' "$tmp_pem"
+                    for part in "$tmp_pem".*; do
+                        [ -e "$part" ] || continue
+                        info=$(openssl x509 -noout -subject -issuer -enddate -in "$part" 2>/dev/null)
+                        [ -n "$info" ] || continue
+                        this_cn=$(printf '%s' "$info" | grep '^subject=' | sed 's/.*CN *= *//' | sed 's/,.*//')
+                        [ "$this_cn" = "$cert_subject" ] || continue
+                        this_exp=$(printf '%s' "$info" | grep '^notAfter=' | sed 's/notAfter=//')
+                        this_epoch=$(date -jf "%b %d %T %Y %Z" "$this_exp" "+%s" 2>/dev/null || echo 0)
+                        if [ "$this_epoch" -ge "$newest_epoch" ]; then
+                            newest_epoch=$this_epoch
+                            cert_expires="$this_exp"
+                            cert_issuer=$(printf '%s' "$info" | grep '^issuer=' | sed 's/.*CN *= *//' | sed 's/,.*//')
+                        fi
+                    done
+                    rm -f "$tmp_pem".*
+                fi
+                rm -f "$tmp_pem"
+            fi
+
+            # Identify the vendor from the enrollment endpoint - what the device actually
+            # talks to - falling back to the issuing CA.
+            check_str=$(printf '%s %s' "$server_url" "$cert_issuer" | tr '[:upper:]' '[:lower:]')
+            case "$check_str" in
+                *manage.microsoft.com*|*intune*)   mdm_provider="Microsoft Intune" ;;
+                *jamfcloud*|*jamf*)                mdm_provider="Jamf Pro" ;;
+                *micromdm*)                        mdm_provider="MicroMDM" ;;
+                *nanomdm*)                         mdm_provider="NanoMDM" ;;
+                *mosyle*)                          mdm_provider="Mosyle" ;;
+                *kandji*)                          mdm_provider="Kandji" ;;
+                *awmdm*|*airwatch*|*workspaceone*) mdm_provider="VMware Workspace ONE" ;;
+                *addigy*)                          mdm_provider="Addigy" ;;
+                *)                                 mdm_provider="$cert_issuer" ;;
+            esac
+
+            json_escape() { printf '%s' "$1" | sed -e 's/\\\\/\\\\\\\\/g' -e 's/"/\\\\"/g'; }
+
             echo "{"
-            echo "  \\"push_topic\\": \\"$push_topic\\","
-            echo "  \\"scep_url\\": \\"$scep_url\\","
-            echo "  \\"certificate_name\\": \\"$cert_name\\","
-            echo "  \\"certificate_subject\\": \\"$cert_subject\\","
-            echo "  \\"certificate_issuer\\": \\"$cert_issuer\\","
-            echo "  \\"certificate_expires\\": \\"$cert_expires\\","
-            echo "  \\"mdm_provider\\": \\"$mdm_provider\\""
+            echo "  \\"push_topic\\": \\"$(json_escape "$push_topic")\\","
+            echo "  \\"server_url\\": \\"$(json_escape "$server_url")\\","
+            echo "  \\"checkin_url\\": \\"$(json_escape "$checkin_url")\\","
+            echo "  \\"scep_url\\": \\"$(json_escape "$scep_url")\\","
+            echo "  \\"certificate_name\\": \\"$(json_escape "$cert_name")\\","
+            echo "  \\"certificate_subject\\": \\"$(json_escape "$cert_subject")\\","
+            echo "  \\"certificate_issuer\\": \\"$(json_escape "$cert_issuer")\\","
+            echo "  \\"certificate_expires\\": \\"$(json_escape "$cert_expires")\\","
+            echo "  \\"certificate_enrollment_method\\": \\"$(json_escape "$enrollment_method")\\","
+            echo "  \\"identity_payload_type\\": \\"$(json_escape "$identity_payload_type")\\","
+            echo "  \\"mdm_provider\\": \\"$(json_escape "$mdm_provider")\\""
             echo "}"
         """
-        
+
         return try await executeWithFallback(
             osquery: nil,
             bash: bashScript
