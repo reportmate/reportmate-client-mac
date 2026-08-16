@@ -1290,13 +1290,31 @@ done
 for daemon in ${DAEMONS}; do
     source_path="${APP_ROOT}/Library/LaunchDaemons/${daemon}"
     dest_path="${LD_ROOT}/${daemon}"
-    
+    label="${daemon%.plist}"
+
     if [ -e "${source_path}" ]; then
         log_message "Installing: ${daemon}"
         cp "${source_path}" "${dest_path}"
         chmod 644 "${dest_path}"
         chown root:wheel "${dest_path}"
-        /bin/launchctl bootstrap system "${dest_path}"
+
+        # A `launchctl disable` is recorded in launchd's own override database
+        # (/var/db/com.apple.xpc.launchd/disabled.plist), keyed by label. That
+        # record is independent of the plist file, so removing and reinstalling
+        # the plist does not clear it, and bootstrap then fails with EIO for the
+        # life of the machine. Anyone who ever disabled a daemon to chase a
+        # performance problem would silently never get it back. Clear the
+        # override before bootstrapping.
+        /bin/launchctl enable "system/${label}" 2>/dev/null
+
+        if /bin/launchctl bootstrap system "${dest_path}" 2>/dev/null; then
+            log_message "Loaded: ${label}"
+        else
+            # Do not fail the install over one daemon, but never swallow it
+            # either - a daemon that silently fails to load is a module that
+            # silently stops being collected.
+            log_message "WARNING: failed to load ${label} - collection scheduled by this daemon will not run"
+        fi
     fi
 done
 
