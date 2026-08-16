@@ -574,6 +574,34 @@ struct ReportMateClient: AsyncParsableCommand {
 
     /// Path to the persistent boot time state file for reboot detection
     private static let previousBootTimePath = "/Library/Managed Reports/cache/previous_boot_time.json"
+
+    /// How far the reported boot time may move without being treated as a restart.
+    ///
+    /// `kern.boottime` is not a frozen constant: the kernel recalculates it whenever the system
+    /// clock is corrected, so it shifts by seconds across an NTP sync without anything having
+    /// restarted. A genuine reboot moves it forward by at least the previous uptime, which is
+    /// orders of magnitude larger, so a generous tolerance costs no real detections.
+    private static let bootTimeTolerance: TimeInterval = 300
+
+    /// The kernel's boot time as reported by the system module, if present.
+    ///
+    /// The system module publishes it under `systemDetails.bootTime`, sourced from
+    /// `sysctl kern.boottime`. The top level is checked too so a payload shape change does not
+    /// silently drop back to the derived value.
+    private static func reportedBootTime(from systemData: [String: Any]) -> Date? {
+        let candidates: [String?] = [
+            (systemData["systemDetails"] as? [String: Any])?["bootTime"] as? String,
+            systemData["bootTime"] as? String
+        ]
+
+        let formatter = ISO8601DateFormatter()
+        for case let value? in candidates where !value.isEmpty {
+            if let parsed = formatter.date(from: value) {
+                return parsed
+            }
+        }
+        return nil
+    }
     
     /// Detects OS version changes by comparing current system data against stored previous version.
     /// Returns a system event if the version changed, nil otherwise.
@@ -644,13 +672,29 @@ struct ReportMateClient: AsyncParsableCommand {
     /// Detects system reboots by comparing current uptime/boot time against stored previous boot time.
     /// Returns a system event if a reboot occurred, nil otherwise.
     private func detectReboot(systemData: [String: Any], logger: Logger) -> ReportMateEvent? {
-        // Calculate boot time from uptime seconds
-        let uptimeSeconds = systemData["uptime"] as? Int ?? 0
-        guard uptimeSeconds > 0 else { return nil }
-
-        let currentBootTime = Date().addingTimeInterval(-Double(uptimeSeconds))
-        let currentBootTimeStr = ISO8601DateFormatter().string(from: currentBootTime)
         let uptimeString = systemData["uptimeString"] as? String ?? ""
+        let uptimeSeconds = systemData["uptime"] as? Int ?? 0
+
+        // Use the kernel's own record of when the system came up. Deriving it as
+        // `now - uptime` re-derives a fixed instant from two values that are sampled at
+        // different moments: uptime is read early in the system module, while `now` is read
+        // here, after every module has finished collecting. The gap between them is the rest
+        // of the collection run, so the computed boot time slides forward by however long
+        // that took. Runs vary from seconds to minutes, so the value moves between every
+        // run and each move looks like a fresh reboot - which is why entire labs, all
+        // running the same schedule against the same slow modules, reported rebooting
+        // together when none of them had.
+        let currentBootTime: Date
+        if let bootTime = Self.reportedBootTime(from: systemData) {
+            currentBootTime = bootTime
+        } else if uptimeSeconds > 0 {
+            logger.info("No kernel boot time reported, falling back to uptime-derived boot time")
+            currentBootTime = Date().addingTimeInterval(-Double(uptimeSeconds))
+        } else {
+            return nil
+        }
+
+        let currentBootTimeStr = ISO8601DateFormatter().string(from: currentBootTime)
 
         // Read previous boot time state
         let fileURL = URL(fileURLWithPath: Self.previousBootTimePath)
@@ -681,10 +725,22 @@ struct ReportMateClient: AsyncParsableCommand {
             return nil
         }
 
-        // Boot time unchanged (within 60 second tolerance for clock drift)
-        guard abs(currentBootTime.timeIntervalSince(oldBootTime)) >= 60 else { return nil }
+        let delta = currentBootTime.timeIntervalSince(oldBootTime)
 
-        // Boot time changed — system was rebooted
+        // A reboot can only move boot time forward. Backwards movement is measurement error
+        // - a clock adjustment, or a previous run that recorded a value derived the old way -
+        // and never a restart, so it must never raise an event.
+        if delta <= -Self.bootTimeTolerance {
+            logger.info("Boot time moved backwards by \(Int(-delta))s; recording drift, not a reboot")
+            return nil
+        }
+
+        // Boot time unchanged, within tolerance for clock adjustments. kern.boottime is
+        // recalculated when the system clock is corrected, so it shifts by a few seconds
+        // without any restart.
+        guard delta >= Self.bootTimeTolerance else { return nil }
+
+        // Boot time moved forward — system was rebooted
         let message = "System reboot detected"
         logger.info(Logger.Message(stringLiteral: message))
 
