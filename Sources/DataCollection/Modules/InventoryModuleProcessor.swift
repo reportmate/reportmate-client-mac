@@ -47,6 +47,20 @@ public class InventoryModuleProcessor: BaseModuleProcessor, @unchecked Sendable 
         let uuid = (finalData["uuid"] as? String) ?? ""
         let deviceName = (finalData["computer_name"] as? String) ?? (finalData["hostname"] as? String) ?? ""
         
+        // Fleet is the first comma-separated field, and is legitimately empty on most
+        // devices — only shared machines belong to a fleet, so an assigned staff Mac has
+        // none.
+        //
+        // The value can arrive with trailing fields attached, as `,SomeHostname`. That comes
+        // from the enrolment script: `IFS=',' read -r ... comp_fleet` assigns the remainder
+        // of the line to the last variable, so any CSV column past the eleventh spills into
+        // fleet. Taking the leading field keeps that spill out of the payload rather than
+        // reporting a hostname as a fleet name.
+        let fleet = (fileInfo["fleet"] ?? "")
+            .split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
+            .first
+            .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+
         return InventoryData(
             deviceName: deviceName,
             serialNumber: serialNumber,
@@ -58,7 +72,8 @@ public class InventoryModuleProcessor: BaseModuleProcessor, @unchecked Sendable 
             purchaseDate: nil,
             warrantyExpiration: nil,
             catalog: fileInfo["catalog"] ?? "",
-            usage: fileInfo["usage"] ?? ""
+            usage: fileInfo["usage"] ?? "",
+            fleet: fleet
         )
     }
     
