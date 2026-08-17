@@ -1728,18 +1728,13 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 ]
             }
             
-            // Get scan list - use jq to extract just last scan and threat count to reduce output size
+            // Get scan list - condense to just the last scan and total threat count so the
+            // full history (100KB+) never crosses the pipe. jq, not Python: the repo's
+            // allowed-technologies rule, and jq is what every other collector uses.
             let scanSummaryScript = """
-            /usr/local/bin/mdatp scan list --output json 2>/dev/null | python3 -c '
-import json,sys
-try:
-    scans = json.load(sys.stdin)
-    last = scans[-1] if scans else {}
-    threats = sum(len(s.get("threats",[]) or []) for s in scans)
-    print(json.dumps({"lastScan": last, "totalThreats": threats}))
-except: print("{}")
-' || echo '{}'
-"""
+            summary=$(/usr/local/bin/mdatp scan list --output json 2>/dev/null | jq -c '{lastScan: (.[-1] // {}), totalThreats: ([.[].threats // [] | length] | add // 0)}' 2>/dev/null)
+            [ -n "$summary" ] && echo "$summary" || echo '{}'
+            """
             let scanSummaryOutput = try await executeBashScriptJSON(scanSummaryScript)
             
             var lastScan: [String: Any]? = nil
