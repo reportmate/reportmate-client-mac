@@ -1635,21 +1635,21 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         ]
     }
     
-    /// Simple bash command execution helper for EDR collection
-    private func executeBashScript(_ script: String) async throws -> String {
-        let process = Process()
-        let pipe = Pipe()
-        
-        process.standardOutput = pipe
-        process.standardError = pipe
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-c", script]
-        
-        try process.run()
-        process.waitUntilExit()
-        
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8) ?? ""
+    /// Simple bash command execution helper for EDR collection.
+    ///
+    /// Runs through ProcessRunner rather than driving Process directly. The previous version
+    /// called `waitUntilExit()` and only then read the pipe, which deadlocks outright once a
+    /// command produces more than a 64KB pipe buffer: the child blocks writing, the parent
+    /// waits for an exit that can never come. That is a hang determined by output size, not by
+    /// any misbehaving command, and this helper takes arbitrary commands.
+    private func executeBashScript(_ script: String, timeout: TimeInterval = ProcessRunner.defaultTimeout) async throws -> String {
+        let result = try await ProcessRunner.bash(script, timeout: timeout)
+        if result.timedOut {
+            ConsoleFormatter.writeDebug("EDR command exceeded its \(Int(timeout))s budget: \(script)")
+        }
+        // Preserves the previous behaviour of merging stderr into the returned text, which
+        // callers of this helper expect.
+        return result.standardOutput + result.standardError
     }
     
     /// Collect Microsoft Defender for Endpoint status via mdatp CLI
