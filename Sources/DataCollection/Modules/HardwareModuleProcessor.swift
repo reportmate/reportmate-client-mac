@@ -556,7 +556,34 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         // Use system_profiler SPStorageDataType for rich physical drive details
         var windowsStorage: [[String: Any]] = []
         var processedDrives: Set<String> = []  // Dedupe by device name
-        
+
+        // Physical disk serial numbers live in the NVMe/SATA controller trees, not in
+        // SPStorageDataType - join them by device model name so upgraded internal SSD
+        // modules are identifiable (parity with the Windows client's disk_info serial)
+        var diskSerials: [String: String] = [:]
+        let spDiskScript = """
+            system_profiler SPNVMeDataType SPSerialATADataType -json 2>/dev/null
+        """
+
+        if let spDiskJson = try? await BashService.execute(spDiskScript),
+           let spDiskData = spDiskJson.data(using: .utf8),
+           let spDisk = try? JSONSerialization.jsonObject(with: spDiskData) as? [String: Any] {
+            for controllerType in ["SPNVMeDataType", "SPSerialATADataType"] {
+                guard let controllers = spDisk[controllerType] as? [[String: Any]] else { continue }
+                for controller in controllers {
+                    guard let items = controller["_items"] as? [[String: Any]] else { continue }
+                    for item in items {
+                        guard let name = item["_name"] as? String,
+                              let serial = item["device_serial"] as? String else { continue }
+                        let trimmedSerial = serial.trimmingCharacters(in: .whitespaces)
+                        if !trimmedSerial.isEmpty {
+                            diskSerials[name.trimmingCharacters(in: .whitespaces).uppercased()] = trimmedSerial
+                        }
+                    }
+                }
+            }
+        }
+
         // First, try to get enhanced storage info from system_profiler
         let spStorageScript = """
             system_profiler SPStorageDataType -json 2>/dev/null
@@ -594,7 +621,14 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 
                 // Device name (actual hardware name like "APPLE SSD AP2048Z") - snake_case
                 drive["device_name"] = deviceName
-                
+
+                // Physical disk identity - model mirrors device_name for parity with the
+                // Windows client; serial joins from the NVMe/SATA controller data above
+                drive["model"] = deviceName
+                if let serial = diskSerials[deviceName.trimmingCharacters(in: .whitespaces).uppercased()] {
+                    drive["serial_number"] = serial
+                }
+
                 // Capacity and free space (snake_case to match osquery)
                 if let sizeBytes = volume["size_in_bytes"] as? Int64 {
                     drive["capacity"] = sizeBytes
