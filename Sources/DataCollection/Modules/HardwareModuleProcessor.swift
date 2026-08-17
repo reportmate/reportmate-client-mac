@@ -48,6 +48,81 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     }
     
     /// Load cached storage analysis results
+    /// Transports that mean a real piece of storage hardware. Anything else - a mounted
+    /// disk image, a cryptex, a simulator runtime, a network share - is a volume the OS
+    /// synthesized, not a drive, and reporting it as storage is what filled the fleet with
+    /// entries like "iOS 26.5 Simulator" and "MetalToolchainCryptex".
+    ///
+    /// Allow-listed rather than deny-listed: new synthetic protocols appear with macOS
+    /// releases, and the failure mode of an unknown one should be to drop a volume we
+    /// cannot vouch for, not to publish it as a disk.
+    private static let physicalStorageProtocols: Set<String> = [
+        "apple fabric", "nvmexpress", "nvme", "pci-express", "pci", "sata",
+        "serial ata", "usb", "thunderbolt", "sas", "fibre channel", "secure digital"
+    ]
+
+    /// Walk a system_profiler controller tree and collect device serials by model name.
+    /// USB and Thunderbolt nest devices under hubs, so this recurses rather than reading
+    /// a single `_items` level, and it accepts either serial key system_profiler uses
+    /// (`device_serial` on the NVMe/SATA trees, `serial_num` on USB/Thunderbolt).
+    private func collectDiskSerials(from node: [String: Any], into serials: inout [String: String]) {
+        if let name = node["_name"] as? String {
+            let serial = (node["device_serial"] as? String) ?? (node["serial_num"] as? String)
+            if let serial = serial?.trimmingCharacters(in: .whitespaces), !serial.isEmpty {
+                let key = name.trimmingCharacters(in: .whitespaces).uppercased()
+                // First writer wins: a controller names the drive, a hub names itself
+                if serials[key] == nil {
+                    serials[key] = serial
+                }
+            }
+        }
+
+        if let children = node["_items"] as? [[String: Any]] {
+            for child in children {
+                collectDiskSerials(from: child, into: &serials)
+            }
+        }
+    }
+
+    /// Collect serials for USB-attached drives from the IO registry, keyed by product name
+    /// to match `physical_drive.device_name` in SPStorageDataType. Only fills gaps - a
+    /// serial already found in a controller tree wins.
+    private func collectUSBDiskSerials(into serials: inout [String: String]) async {
+        guard let output = try? await BashService.execute("ioreg -a -r -c IOUSBHostDevice 2>/dev/null"),
+              let data = output.data(using: .utf8),
+              !data.isEmpty,
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
+              let entries = plist as? [[String: Any]] else {
+            return
+        }
+
+        for entry in entries {
+            collectUSBSerials(from: entry, into: &serials)
+        }
+    }
+
+    /// Walk an IO registry subtree. Devices hang off hubs, and a drive plugged into a
+    /// display is several levels down, so this recurses through IORegistryEntryChildren.
+    private func collectUSBSerials(from node: [String: Any], into serials: inout [String: String]) {
+        let name = (node["USB Product Name"] as? String) ?? (node["kUSBProductString"] as? String)
+        let serial = (node["USB Serial Number"] as? String) ?? (node["kUSBSerialNumberString"] as? String)
+
+        if let name = name?.trimmingCharacters(in: .whitespaces),
+           let serial = serial?.trimmingCharacters(in: .whitespaces),
+           !name.isEmpty, !serial.isEmpty {
+            let key = name.uppercased()
+            if serials[key] == nil {
+                serials[key] = serial
+            }
+        }
+
+        if let children = node["IORegistryEntryChildren"] as? [[String: Any]] {
+            for child in children {
+                collectUSBSerials(from: child, into: &serials)
+            }
+        }
+    }
+
     private func loadCachedStorageAnalysis() -> [[String: Any]]? {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: storageAnalysisCachePath) else {
@@ -556,7 +631,32 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         // Use system_profiler SPStorageDataType for rich physical drive details
         var windowsStorage: [[String: Any]] = []
         var processedDrives: Set<String> = []  // Dedupe by device name
-        
+
+        // Physical disk serial numbers live in the NVMe/SATA controller trees, not in
+        // SPStorageDataType - join them by device model name so upgraded internal SSD
+        // modules are identifiable (parity with the Windows client's disk_info serial)
+        var diskSerials: [String: String] = [:]
+        let spDiskScript = """
+            system_profiler SPNVMeDataType SPSerialATADataType -json 2>/dev/null
+        """
+
+        if let spDiskJson = try? await BashService.execute(spDiskScript),
+           let spDiskData = spDiskJson.data(using: .utf8),
+           let spDisk = try? JSONSerialization.jsonObject(with: spDiskData) as? [String: Any] {
+            for controllerType in ["SPNVMeDataType", "SPSerialATADataType"] {
+                guard let controllers = spDisk[controllerType] as? [[String: Any]] else { continue }
+                for controller in controllers {
+                    collectDiskSerials(from: controller, into: &diskSerials)
+                }
+            }
+        }
+
+        // An externally attached drive appears in none of the system_profiler controller
+        // trees - SPUSBDataType is empty on current macOS even with a USB SSD mounted, and
+        // a drive behind a display's hub is not in SPThunderboltDataType either. The IO
+        // registry does have it, so fill in anything the trees above missed from there.
+        await collectUSBDiskSerials(into: &diskSerials)
+
         // First, try to get enhanced storage info from system_profiler
         let spStorageScript = """
             system_profiler SPStorageDataType -json 2>/dev/null
@@ -582,7 +682,16 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 // Get physical drive info
                 guard let physicalDrive = volume["physical_drive"] as? [String: Any] else { continue }
                 let deviceName = physicalDrive["device_name"] as? String ?? "Unknown"
-                
+
+                // Only report volumes that sit on real storage hardware. A disk image or a
+                // network mount is not a drive, and both were being published as one.
+                let driveProtocol = (physicalDrive["protocol"] as? String ?? "")
+                    .trimmingCharacters(in: .whitespaces)
+                guard Self.physicalStorageProtocols.contains(driveProtocol.lowercased()) else {
+                    print("[\(timestamp())] Skipping non-physical volume '\(volumeName)' (protocol: \(driveProtocol.isEmpty ? "none" : driveProtocol))")
+                    continue
+                }
+
                 // Skip if we've already processed this device
                 if processedDrives.contains(deviceName) { continue }
                 processedDrives.insert(deviceName)
@@ -594,7 +703,14 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 
                 // Device name (actual hardware name like "APPLE SSD AP2048Z") - snake_case
                 drive["device_name"] = deviceName
-                
+
+                // Physical disk identity - model mirrors device_name for parity with the
+                // Windows client; serial joins from the NVMe/SATA controller data above
+                drive["model"] = deviceName
+                if let serial = diskSerials[deviceName.trimmingCharacters(in: .whitespaces).uppercased()] {
+                    drive["serial_number"] = serial
+                }
+
                 // Capacity and free space (snake_case to match osquery)
                 if let sizeBytes = volume["size_in_bytes"] as? Int64 {
                     drive["capacity"] = sizeBytes
@@ -619,10 +735,14 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 drive["type"] = mediumType.uppercased()
                 
                 // Protocol/interface (Apple Fabric, USB, SATA, etc.)
-                drive["interface"] = physicalDrive["protocol"] as? String ?? "Unknown"
-                
-                // Internal vs External (snake_case to match osquery)
+                drive["interface"] = driveProtocol.isEmpty ? "Unknown" : driveProtocol
+
+                // Internal vs External (snake_case to match osquery). Trust the transport
+                // over is_internal_disk: the flag is also "no" for volumes that are not
+                // drives at all, which is why it cannot stand on its own as "external".
+                let externalProtocols: Set<String> = ["usb", "thunderbolt", "fibre channel", "secure digital"]
                 let isInternal = physicalDrive["is_internal_disk"] as? String == "yes"
+                    && !externalProtocols.contains(driveProtocol.lowercased())
                 drive["is_internal"] = isInternal
                 
                 // SMART status (Verified, Failing, etc.) - snake_case to match osquery
