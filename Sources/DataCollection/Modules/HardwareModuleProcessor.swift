@@ -2561,47 +2561,36 @@ private func collectBatteryInfo() async throws -> [String: Any] {
     /// Use this for user home directories which can contain millions of files
     /// Includes timeout to prevent hanging on TCC-protected directories
     private func fastDirectorySizeWithDu(path: String, timeoutSeconds: Int = 30) async -> Int64? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/du")
-        // -s = summary only, -k = kilobytes, -x = don't cross filesystem boundaries
-        process.arguments = ["-skx", path]
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()  // Suppress error output (permission denied, etc.)
-        
-        do {
-            try process.run()
-            
-            // Wait with timeout to prevent hanging on TCC-protected directories
-            let deadline = Date().addingTimeInterval(Double(timeoutSeconds))
-            while process.isRunning && Date() < deadline {
-                try await Task.sleep(nanoseconds: 100_000_000)  // 100ms
-            }
-            
-            if process.isRunning {
-                // Timeout reached - terminate the process
-                print("[\(timestamp())] du timeout for: \(path) - terminating")
-                process.terminate()
-                return nil
-            }
-            
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                // Output format: "123456\t/path/to/directory"
-                let components = output.components(separatedBy: "\t")
-                if let sizeStr = components.first?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   let sizeKB = Int64(sizeStr) {
-                    return sizeKB * 1024  // Convert KB to bytes
-                }
-            }
-        } catch {
-            if process.isRunning {
-                process.terminate()
-            }
+        // -s = summary only, -k = kilobytes, -x = don't cross filesystem boundaries.
+        // stderr is discarded by the caller: du reports permission-denied per directory and
+        // that noise is expected here.
+        //
+        // Previously this polled `process.isRunning` every 100ms against a deadline and then
+        // read the pipe. The poll bounded the wait but terminating du does not close a pipe
+        // still held open by anything it spawned, and the read that followed was unbounded —
+        // so the timeout path could still block. ProcessRunner resolves the timeout without
+        // depending on EOF and kills the whole process tree.
+        let result = try? await ProcessRunner.run(
+            executable: "/usr/bin/du",
+            arguments: ["-skx", path],
+            timeout: TimeInterval(timeoutSeconds),
+            label: "du -skx \(path)"
+        )
+
+        guard let result = result else { return nil }
+
+        if result.timedOut {
+            ConsoleFormatter.writeDebug("du exceeded its \(timeoutSeconds)s budget for: \(path)")
             return nil
         }
-        
+
+        // Output format: "123456\t/path/to/directory"
+        let components = result.standardOutput.components(separatedBy: "\t")
+        if let sizeStr = components.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let sizeKB = Int64(sizeStr) {
+            return sizeKB * 1024  // Convert KB to bytes
+        }
+
         return nil
     }
     
