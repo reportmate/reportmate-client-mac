@@ -350,13 +350,26 @@ public class ApplicationsModuleProcessor: BaseModuleProcessor, @unchecked Sendab
                 echo "{\\"name\\": \\"$label_escaped\\", \\"path\\": \\"$program_escaped\\", \\"type\\": \\"LaunchAgent\\", \\"source\\": \\"Local\\", \\"status\\": \\"$status\\"},"
             done
             
-            # Get Login Items via osascript (if available)
-            osascript -e 'tell application "System Events" to get the name of every login item' 2>/dev/null | tr ',' '\\n' | while read -r item; do
-                item=$(echo "$item" | xargs)
-                [ -z "$item" ] && continue
-                item_escaped=$(echo "$item" | sed 's/"/\\\\"/g')
-                echo "{\\"name\\": \\"$item_escaped\\", \\"path\\": \\"\\", \\"type\\": \\"LoginItem\\", \\"source\\": \\"User\\", \\"status\\": \\"Enabled\\"},"
-            done
+            # Get Login Items from BackgroundTaskManagement (sfltool, root only - no Apple Events / TCC prompt)
+            if [ "$(id -u)" -eq 0 ]; then
+                sfltool dumpbtm 2>/dev/null | awk '
+                    function emit() {
+                        if (type ~ /login item/ && name != "" && name != "(null)") {
+                            status = (disp ~ /enabled/) ? "Enabled" : "Disabled"
+                            gsub(/"/, "", name); gsub(/"/, "", url)
+                            sub(/^file:\\/\\//, "", url); sub(/\\/$/, "", url)
+                            printf "{\\"name\\": \\"%s\\", \\"path\\": \\"%s\\", \\"type\\": \\"LoginItem\\", \\"source\\": \\"User\\", \\"status\\": \\"%s\\"},\\n", name, url, status
+                        }
+                        name=""; type=""; disp=""; url=""
+                    }
+                    /^[[:space:]]*#[0-9]+:/ { emit() }
+                    /^[[:space:]]*Name:/ { name=$0; sub(/^[[:space:]]*Name:[[:space:]]*/, "", name) }
+                    /^[[:space:]]*Type:/ { type=$0 }
+                    /^[[:space:]]*Disposition:/ { disp=$0 }
+                    /^[[:space:]]*URL:/ { url=$0; sub(/^[[:space:]]*URL:[[:space:]]*/, "", url) }
+                    END { emit() }
+                '
+            fi
             
             echo "{}]" | sed 's/,{}]/]/'
         """
