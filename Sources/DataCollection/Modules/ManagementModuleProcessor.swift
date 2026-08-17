@@ -430,6 +430,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
                 *kandji*)                          mdm_provider="Kandji" ;;
                 *awmdm*|*airwatch*|*workspaceone*) mdm_provider="VMware Workspace ONE" ;;
                 *addigy*)                          mdm_provider="Addigy" ;;
+                *simplemdm*)                       mdm_provider="SimpleMDM" ;;
                 *)                                 mdm_provider="$cert_issuer" ;;
             esac
 
