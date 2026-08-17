@@ -778,22 +778,16 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
     
     /// Fallback method using profiles list command (basic info only)
     private func collectInstalledProfilesBasic() async throws -> [[String: Any]] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/profiles")
-        process.arguments = ["list"]
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        
-        try process.run()
-        process.waitUntilExit()
-        
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else {
+        let result = try await ProcessRunner.run(
+            executable: "/usr/bin/profiles",
+            arguments: ["list"]
+        )
+        guard !result.timedOut else {
+            ConsoleFormatter.writeDebug("profiles list exceeded its time budget")
             return []
         }
-        
+        let output = result.standardOutput
+
         var profiles: [[String: Any]] = []
         var currentProfile: [String: Any]? = nil
         
@@ -945,19 +939,16 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
     
     // MARK: - Helper to execute bash commands
     
-    private func executeBashCommand(_ command: String) async throws -> String {
-        let process = Process()
-        let pipe = Pipe()
-        
-        process.standardOutput = pipe
-        process.standardError = pipe
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-c", command]
-        
-        try process.run()
-        process.waitUntilExit()
-        
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8) ?? ""
+    /// Runs through ProcessRunner rather than driving Process directly. The previous version
+    /// called `waitUntilExit()` and only then read the pipe, which deadlocks once a command
+    /// produces more than a 64KB pipe buffer — a hang determined by output size rather than by
+    /// any misbehaving command, and this helper takes arbitrary commands.
+    private func executeBashCommand(_ command: String, timeout: TimeInterval = ProcessRunner.defaultTimeout) async throws -> String {
+        let result = try await ProcessRunner.bash(command, timeout: timeout)
+        if result.timedOut {
+            ConsoleFormatter.writeDebug("Management command exceeded its \(Int(timeout))s budget: \(command)")
+        }
+        // Preserves the previous behaviour of merging stderr into the returned text.
+        return result.standardOutput + result.standardError
     }
 }
