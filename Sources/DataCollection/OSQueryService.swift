@@ -230,6 +230,35 @@ public class OSQueryService {
         let rows: [[String: Any]]
     }
 
+    /// Drains stdout and stderr concurrently.
+    ///
+    /// Reading one stream to EOF before starting the other lets a large write to the idle
+    /// stream fill its 64KB pipe buffer and block the child, which in turn stalls the read
+    /// already in progress. osquery writes extension registration and table warnings to
+    /// stderr, so a query producing enough of it would hang until the surrounding timeout
+    /// fired — turning "this query is noisy" into "this query timed out" and losing the rows
+    /// it had already produced on stdout.
+    private static func drainConcurrently(stdout: FileHandle, stderr: FileHandle) -> (Data, Data) {
+        final class ErrorBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var data = Data()
+            func set(_ value: Data) { lock.lock(); data = value; lock.unlock() }
+            func get() -> Data { lock.lock(); defer { lock.unlock() }; return data }
+        }
+
+        let box = ErrorBox()
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            box.set(stderr.readDataToEndOfFile())
+            group.leave()
+        }
+
+        let outputData = stdout.readDataToEndOfFile()
+        group.wait()
+        return (outputData, box.get())
+    }
+
     /// Shared handle to the running osqueryi/bash Process so the timeout watcher
     /// can kill it from outside the running Task. Process itself is not Sendable
     /// across Swift Concurrency boundaries; we wrap it in a small class with
@@ -278,8 +307,10 @@ public class OSQueryService {
             }
             processBox.attach(task)
 
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let (outputData, errorData) = Self.drainConcurrently(
+                stdout: outputPipe.fileHandleForReading,
+                stderr: errorPipe.fileHandleForReading
+            )
             task.waitUntilExit()
 
             // If the process was killed (e.g. timeout), surface a clean error so
@@ -345,8 +376,10 @@ public class OSQueryService {
             }
             processBox.attach(task)
 
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let (outputData, errorData) = Self.drainConcurrently(
+                stdout: outputPipe.fileHandleForReading,
+                stderr: errorPipe.fileHandleForReading
+            )
             task.waitUntilExit()
 
             guard let outputString = String(data: outputData, encoding: .utf8) else {

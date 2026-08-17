@@ -1,64 +1,43 @@
 import Foundation
+import IOKit
 
 /// Utility class for retrieving system information
 public class SystemUtils {
-    
-    /// Retrieves the system serial number
+
+    /// Retrieves the system serial number.
+    ///
+    /// Read straight from the IO registry. This previously shelled out to `ioreg -l` and grepped
+    /// its output for `IOPlatformSerialNumber`, with `system_profiler SPHardwareDataType` as a
+    /// fallback — two unbounded subprocess reads on the path that establishes device identity,
+    /// which runs before the payload can be assembled. A hang in either meant the device never
+    /// reported at all.
+    ///
+    /// `ioreg -l` also serialises the *entire* IO registry — megabytes of text — to find one
+    /// string that `IORegistryEntryCreateCFProperty` returns directly. Removing the subprocess
+    /// removes the need to bound it, and keeps this function synchronous so no caller changes.
     public static func getSerialNumber() -> String {
-        // Try to get serial number using ioreg (most reliable on macOS)
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/ioreg")
-        process.arguments = ["-l"]
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        
-        do {
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                // Look for IOPlatformSerialNumber
-                let lines = output.components(separatedBy: .newlines)
-                for line in lines {
-                    if line.contains("IOPlatformSerialNumber") {
-                        let parts = line.components(separatedBy: "=")
-                        if parts.count > 1 {
-                            return parts[1].trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\"", with: "")
-                        }
-                    }
-                }
-            }
-        } catch {
-            print("Error retrieving serial number: \(error)")
+        let matching = IOServiceMatching("IOPlatformExpertDevice")
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+        guard service != IO_OBJECT_NULL else {
+            print("Error retrieving serial number: IOPlatformExpertDevice not found")
+            return "UNKNOWN"
         }
-        
-        // Fallback to system_profiler if ioreg fails
-        let profilerProcess = Process()
-        profilerProcess.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
-        profilerProcess.arguments = ["SPHardwareDataType"]
-        
-        let profilerPipe = Pipe()
-        profilerProcess.standardOutput = profilerPipe
-        
-        do {
-            try profilerProcess.run()
-            let data = profilerPipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                let lines = output.components(separatedBy: .newlines)
-                for line in lines {
-                    if line.contains("Serial Number") {
-                        let parts = line.components(separatedBy: ":")
-                        if parts.count > 1 {
-                            return parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
-                        }
-                    }
-                }
-            }
-        } catch {
-            print("Error retrieving serial number via system_profiler: \(error)")
+        defer { IOObjectRelease(service) }
+
+        guard let property = IORegistryEntryCreateCFProperty(
+            service,
+            kIOPlatformSerialNumberKey as CFString,
+            kCFAllocatorDefault,
+            0
+        ) else {
+            print("Error retrieving serial number: IOPlatformSerialNumber unset")
+            return "UNKNOWN"
         }
-        
-        return "UNKNOWN"
+
+        let serial = (property.takeRetainedValue() as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        return serial.isEmpty ? "UNKNOWN" : serial
     }
     
     /// Retrieves the OS version
