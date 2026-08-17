@@ -85,7 +85,7 @@ graph TD
 - Logs execution to `/Library/Managed Reports/logs/munki-postflight.log`
 - Non-blocking: failure in one script doesn't prevent others from running
 
-**Source:** Bundled in `ReportMate.app/Contents/Resources/munki/postflight-wrapper`
+**Source:** Bundled in `Managed Reports Runner.app/Contents/Resources/munki/postflight-wrapper`
 
 #### 00-original.sh (MunkiReport)
 
@@ -120,7 +120,7 @@ graph TD
 - Homebrew packages
 - App Store apps
 
-**Source:** Bundled in `ReportMate.app/Contents/Resources/munki/reportmate.sh`
+**Source:** Bundled in `Managed Reports Runner.app/Contents/Resources/munki/reportmate.sh`
 
 ## Coexistence Benefits
 
@@ -247,7 +247,7 @@ head -5 /usr/local/munki/postflight
 **Fix:**
 ```bash
 # Reinstall ReportMate.pkg or manually copy wrapper
-sudo cp /usr/local/reportmate/ReportMate.app/Contents/Resources/munki/postflight-wrapper \
+sudo cp "/Applications/Utilities/Managed Reports Runner.app/Contents/Resources/munki/postflight-wrapper" \
         /usr/local/munki/postflight
 sudo chmod 755 /usr/local/munki/postflight
 sudo chown root:wheel /usr/local/munki/postflight
