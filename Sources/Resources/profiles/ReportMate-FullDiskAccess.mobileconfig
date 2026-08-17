@@ -39,27 +39,6 @@
 			<integer>1</integer>
 			<key>Services</key>
 			<dict>
-				<key>AppleEvents</key>
-				<array>
-					<dict>
-						<key>AEReceiverCodeRequirement</key>
-						<string>identifier "com.apple.systemevents" and anchor apple</string>
-						<key>AEReceiverIdentifier</key>
-						<string>com.apple.systemevents</string>
-						<key>AEReceiverIdentifierType</key>
-						<string>bundleID</string>
-						<key>Authorization</key>
-						<string>Allow</string>
-						<key>CodeRequirement</key>
-						<string>identifier "com.github.reportmate.managedreportsrunner" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "7TF6CSP83S"</string>
-						<key>Comment</key>
-						<string>ReportMate macOS Client - System Events automation</string>
-						<key>Identifier</key>
-						<string>com.github.reportmate.managedreportsrunner</string>
-						<key>IdentifierType</key>
-						<string>bundleID</string>
-					</dict>
-				</array>
 				<key>SystemPolicyAllFiles</key>
 				<array>
 					<dict>
