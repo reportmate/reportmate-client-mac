@@ -140,7 +140,7 @@ jobs:
             printf '%s\n' '```bash'
             printf '%s\n' 'codesign --force --options runtime --timestamp \'
             printf '%s\n' '  --sign "Developer ID Application: <Org> (<TeamID>)" \'
-            printf '%s\n' '  /Applications/Utilities/ReportMate.app'
+            printf '%s\n' '  "/Applications/Utilities/Managed Reports Runner.app"'
             printf '%s\n' ''
             printf '%s\n' 'productsign --timestamp \'
             printf '%s\n' '  --sign "Developer ID Installer: <Org> (<TeamID>)" \'
