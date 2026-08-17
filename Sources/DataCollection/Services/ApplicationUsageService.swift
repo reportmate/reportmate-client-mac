@@ -134,7 +134,7 @@ public class ApplicationUsageService: @unchecked Sendable {
         snapshot.isCaptureEnabled = true
         
         do {
-            let sessions = try collectRunningSessions(installedApps: installedApps)
+            let sessions = try await collectRunningSessions(installedApps: installedApps)
             snapshot.status = "complete"
             snapshot.activeSessions = sessions
             snapshot.totalLaunches = sessions.count
@@ -271,31 +271,24 @@ public class ApplicationUsageService: @unchecked Sendable {
     // MARK: - Fallback: Process Polling
     
     /// Collect running application sessions - fast ps-based polling (fallback)
-    private func collectRunningSessions(installedApps: [[String: Any]]) throws -> [ApplicationUsageSession] {
+    private func collectRunningSessions(installedApps: [[String: Any]]) async throws -> [ApplicationUsageSession] {
         var sessions: [ApplicationUsageSession] = []
-        
-        // Use Process with bash -c - MUST read output before waitUntilExit to avoid pipe deadlock
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-c", "/bin/ps axo pid,lstart,user,comm 2>/dev/null"]
-        
-        let outputPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = FileHandle.nullDevice
-        
-        let readHandle = outputPipe.fileHandleForReading
-        
-        try process.run()
-        
-        // CRITICAL: Read output BEFORE waitUntilExit to avoid pipe buffer deadlock
-        let outputData = readHandle.readDataToEndOfFile()
-        
-        process.waitUntilExit()
-        
-        guard let output = String(data: outputData, encoding: .utf8) else {
+
+        // Reading before waiting avoided the pipe-buffer deadlock, but left the read itself
+        // unbounded — a wedged ps would hold usage collection open indefinitely. ProcessRunner
+        // gives it a time budget without reintroducing that deadlock.
+        let result = try await ProcessRunner.bash("/bin/ps axo pid,lstart,user,comm 2>/dev/null", timeout: 60)
+
+        guard !result.timedOut else {
+            ConsoleFormatter.writeDebug("ps exceeded its time budget while collecting running sessions")
             return sessions
         }
-        
+
+        let output = result.standardOutput
+        guard !output.isEmpty else {
+            return sessions
+        }
+
         // Parse output efficiently
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
