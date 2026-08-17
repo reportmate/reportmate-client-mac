@@ -34,6 +34,32 @@ public class APIClient {
     }
     
     /// Transmit device data to the API
+    /// Copy the payload's device identity onto the request as headers.
+    ///
+    /// Identity is diagnostic metadata, so an unusable value is skipped rather
+    /// than allowed to cost the device its check-in: URLRequest rejects header
+    /// values carrying control characters, and hardware and directory lookups
+    /// occasionally return them.
+    private func applyIdentityHeaders(to request: inout URLRequest, from payload: [String: Any]) {
+        guard let metadata = payload["metadata"] as? [String: Any] else { return }
+        let additional = metadata["additional"] as? [String: Any]
+        let fields: [(String, Any?)] = [
+            ("X-Device-Serial", metadata["serialNumber"]),
+            ("X-Device-Uuid", metadata["deviceId"]),
+            ("X-Device-Name", additional?["deviceName"]),
+            ("X-Platform", metadata["platform"]),
+            ("X-Client-Version", metadata["clientVersion"])
+        ]
+        for (header, value) in fields {
+            guard let raw = value as? String else { continue }
+            let cleaned = String(String.UnicodeScalarView(
+                raw.unicodeScalars.filter { $0.value >= 32 && $0.value < 127 }
+            )).trimmingCharacters(in: .whitespaces)
+            guard !cleaned.isEmpty else { continue }
+            request.setValue(String(cleaned.prefix(255)), forHTTPHeaderField: header)
+        }
+    }
+
     public func transmitData(_ payload: [String: Any]) async throws -> Result<TransmissionResponse, APIError> {
         guard let apiUrl = configuration.apiUrl,
               let url = URL(string: apiUrl) else {
@@ -54,7 +80,15 @@ public class APIClient {
         if let passphrase = configuration.passphrase {
             request.setValue(passphrase, forHTTPHeaderField: "X-Client-Passphrase")
         }
-        
+
+        // Mirror the device's identity into headers. The same values sit in the
+        // payload, but the server can only read them when the body arrives
+        // intact and parses; a truncated or aborted upload is rejected with no
+        // idea which machine sent it and lands in /events/failures as
+        // "unidentified", which is a rejection nobody can act on. Headers
+        // survive a body that never became readable.
+        applyIdentityHeaders(to: &request, from: payload)
+
         do {
             // Encode as JSON dictionary
             request.httpBody = try JSONSerialization.data(withJSONObject: payload)
