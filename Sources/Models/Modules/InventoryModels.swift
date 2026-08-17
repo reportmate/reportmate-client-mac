@@ -22,7 +22,8 @@ public struct InventoryData: ModuleDataModel, Sendable {
     // Additional fields from external inventory source
     public let catalog: String
     public let usage: String
-    
+    public let fleet: String
+
     public init(
         collectionTimestamp: Date = Date(),
         success: Bool = true,
@@ -37,7 +38,8 @@ public struct InventoryData: ModuleDataModel, Sendable {
         purchaseDate: Date? = nil,
         warrantyExpiration: Date? = nil,
         catalog: String = "",
-        usage: String = ""
+        usage: String = "",
+        fleet: String = ""
     ) {
         self.collectionTimestamp = collectionTimestamp
         self.success = success
@@ -53,5 +55,6 @@ public struct InventoryData: ModuleDataModel, Sendable {
         self.warrantyExpiration = warrantyExpiration
         self.catalog = catalog
         self.usage = usage
+        self.fleet = fleet
     }
 }
