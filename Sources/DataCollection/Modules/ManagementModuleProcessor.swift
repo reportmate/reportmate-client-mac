@@ -418,9 +418,11 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
                 rm -f "$tmp_pem"
             fi
 
-            # Identify the vendor from the enrollment endpoint - what the device actually
-            # talks to - falling back to the issuing CA.
-            check_str=$(printf '%s %s' "$server_url" "$cert_issuer" | tr '[:upper:]' '[:lower:]')
+            # Identify the vendor from the enrollment endpoints - what the device actually
+            # talks to - falling back to the issuing CA. Both ServerURL and CheckInURL are
+            # considered: a profile may carry only one of the two, and the issuer is a stale
+            # signal that survives a migration between MDMs for years.
+            check_str=$(printf '%s %s %s' "$server_url" "$checkin_url" "$cert_issuer" | tr '[:upper:]' '[:lower:]')
             case "$check_str" in
                 *manage.microsoft.com*|*intune*)   mdm_provider="Microsoft Intune" ;;
                 *jamfcloud*|*jamf*)                mdm_provider="Jamf Pro" ;;
