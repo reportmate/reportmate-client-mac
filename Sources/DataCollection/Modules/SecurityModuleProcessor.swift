@@ -1651,6 +1651,26 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         // callers of this helper expect.
         return result.standardOutput + result.standardError
     }
+
+    /// Like `executeBashScript`, but returns standard output alone.
+    ///
+    /// Any output that will be handed to a JSON parser MUST come through here: bash writes
+    /// its own diagnostics to stderr, and merging them into the parse input corrupts it.
+    /// The concrete case that motivated this: a job-control shell (`set -m`) prints
+    /// "[1]+  Done <command>" to stderr when a backgrounded command finishes, so the
+    /// Defender health probe produced `[1]+  Done ...{json}` — unparseable — on every
+    /// machine where Defender was healthy, and the whole product silently vanished from
+    /// the report (issue #33).
+    private func executeBashScriptJSON(_ script: String, timeout: TimeInterval = ProcessRunner.defaultTimeout) async throws -> String {
+        let result = try await ProcessRunner.bash(script, timeout: timeout)
+        if result.timedOut {
+            ConsoleFormatter.writeDebug("EDR command exceeded its \(Int(timeout))s budget: \(script)")
+        }
+        if !result.standardError.isEmpty {
+            ConsoleFormatter.writeDebug("EDR command stderr (dropped from JSON parse input): \(result.standardError.prefix(200))")
+        }
+        return result.standardOutput
+    }
     
     /// Collect Microsoft Defender for Endpoint status via mdatp CLI
     private func collectMicrosoftDefender() async throws -> [String: Any] {
@@ -1667,15 +1687,17 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             // Get health status. `mdatp health` can block indefinitely when the Defender
             // daemon is wedged, which would stall the entire security collection - and with
             // it the Platform SSO data reported below - so bound it and fall back to empty.
-            let healthOutput = try await executeBashScript("""
-                set -m
+            // No `set -m` here: job control makes bash announce the backgrounded command's
+            // completion on stderr, and that announcement corrupted the JSON on every
+            // healthy machine (issue #33). wdavdaemonclient spawns no children, so a plain
+            // kill of the pid is a sufficient bound.
+            let healthOutput = try await executeBashScriptJSON("""
                 out=$(mktemp /tmp/reportmate-mdatp.XXXXXX) || { echo '{}'; exit 0; }
                 /usr/local/bin/mdatp health --output json >"$out" 2>/dev/null &
                 pid=$!
                 waited=0
                 while kill -0 "$pid" 2>/dev/null; do
                     if [ "$waited" -ge 30 ]; then
-                        kill -9 -"$pid" 2>/dev/null
                         kill -9 "$pid" 2>/dev/null
                         wait "$pid" 2>/dev/null
                         rm -f "$out"
@@ -1692,23 +1714,28 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
 
             guard let healthData = healthOutput.data(using: .utf8),
                   let healthJson = try? JSONSerialization.jsonObject(with: healthData) as? [String: Any] else {
+                // Defender IS installed - the gate above passed - so a broken probe must
+                // degrade to a visible, unhealthy product entry, never to silence. A machine
+                // running Defender reporting hasEDR: 0 is how issue #33 went unnoticed.
                 ConsoleFormatter.writeDebug("Microsoft Defender: failed to parse health JSON")
-                return [:]
+                return [
+                    "name": "Microsoft Defender for Endpoint",
+                    "vendor": "Microsoft",
+                    "identifier": "com.microsoft.wdav",
+                    "installed": true,
+                    "healthy": false,
+                    "healthIssues": ["mdatp health output could not be parsed"]
+                ]
             }
             
-            // Get scan list - use jq to extract just last scan and threat count to reduce output size
+            // Get scan list - condense to just the last scan and total threat count so the
+            // full history (100KB+) never crosses the pipe. jq, not Python: the repo's
+            // allowed-technologies rule, and jq is what every other collector uses.
             let scanSummaryScript = """
-            /usr/local/bin/mdatp scan list --output json 2>/dev/null | python3 -c '
-import json,sys
-try:
-    scans = json.load(sys.stdin)
-    last = scans[-1] if scans else {}
-    threats = sum(len(s.get("threats",[]) or []) for s in scans)
-    print(json.dumps({"lastScan": last, "totalThreats": threats}))
-except: print("{}")
-' || echo '{}'
-"""
-            let scanSummaryOutput = try await executeBashScript(scanSummaryScript)
+            summary=$(/usr/local/bin/mdatp scan list --output json 2>/dev/null | jq -c '{lastScan: (.[-1] // {}), totalThreats: ([.[].threats // [] | length] | add // 0)}' 2>/dev/null)
+            [ -n "$summary" ] && echo "$summary" || echo '{}'
+            """
+            let scanSummaryOutput = try await executeBashScriptJSON(scanSummaryScript)
             
             var lastScan: [String: Any]? = nil
             var totalThreatsDetected = 0
