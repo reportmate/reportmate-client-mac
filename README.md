@@ -521,7 +521,6 @@ ReportMate requires **Full Disk Access** and other privacy permissions to collec
 **Permissions Granted:**
 - Full Disk Access (SystemPolicyAllFiles) - Read `/Library/`, `/System/`, `/Users/`, TCC database
 - System Policy Admin Files - MDM enrollment data, configuration profiles
-- Apple Events - System automation (optional)
 
 **For Enterprise Deployment:**
 Deploy the `ReportMate-PrivacyPermissions.mobileconfig` via your MDM solution (Jamf Pro, Intune, Workspace ONE, etc.) to automatically grant permissions across all managed devices.
