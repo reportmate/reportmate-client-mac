@@ -23,7 +23,7 @@ struct ScheduleDefinition {
         .init(label: "Hourly", interval: "Every 60 min", modules: "security, network, management", plistName: "com.github.reportmate.hourly.plist"),
         .init(label: "Fourhourly", interval: "Every 4 hrs", modules: "applications, inventory, system, identity", plistName: "com.github.reportmate.fourhourly.plist"),
         .init(label: "Daily", interval: "9:00 AM", modules: "hardware, peripherals", plistName: "com.github.reportmate.daily.plist"),
-        .init(label: "Full", interval: "Every 12 hrs", modules: "All modules", plistName: "com.github.reportmate.allmodules.plist"),
+        .init(label: "Full", interval: "Daily, 4:00-6:00 AM", modules: "All modules", plistName: "com.github.reportmate.allmodules.plist"),
     ]
 }
 
