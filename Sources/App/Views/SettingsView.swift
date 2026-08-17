@@ -51,7 +51,7 @@ struct SettingsView: View {
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 56, height: 56)
-                    Text("ReportMate")
+                    Text("Managed Reports Runner")
                         .font(.title2.bold())
                     Text("Device telemetry collection & reporting")
                         .font(.caption)
