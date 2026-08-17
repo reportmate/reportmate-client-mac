@@ -326,23 +326,19 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             fi
             """
         
-        // Execute bash script
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-c", bashScript]
-        
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-        
+        // Execute bash script through ProcessRunner. This reads a Munki log and truncates at
+        // 100KB below, so it deliberately expects output well past the 64KB pipe buffer — and
+        // the previous `waitUntilExit()` before reading deadlocked at exactly that point. The
+        // machines with the most log data were the ones that hung.
         do {
-            try process.run()
-            process.waitUntilExit()
-            
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !output.isEmpty {
+            let result = try await ProcessRunner.bash(bashScript)
+            if result.timedOut {
+                ConsoleFormatter.writeDebug("Munki log read exceeded its time budget")
+                return ""
+            }
+
+            let output = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !output.isEmpty {
                 // Limit to reasonable size (100KB max to avoid bloating the payload)
                 let maxSize = 100_000
                 if output.count > maxSize {
@@ -408,16 +404,13 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         // Get Munki version from the binary
         if FileManager.default.fileExists(atPath: "/usr/local/munki/managedsoftwareupdate") {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/local/munki/managedsoftwareupdate")
-            process.arguments = ["--version"]
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = Pipe()
-            try? process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let version = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !version.isEmpty {
+            let result = try? await ProcessRunner.run(
+                executable: "/usr/local/munki/managedsoftwareupdate",
+                arguments: ["--version"],
+                timeout: 30
+            )
+            let version = (result?.standardOutput ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if result?.timedOut != true, !version.isEmpty {
                 info["version"] = version
             }
         }
