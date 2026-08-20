@@ -14,34 +14,49 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
     public override func collectData() async throws -> ModuleData {
         // Total collection steps for progress tracking
         let totalSteps = 8
-        
-        // Collect management data sequentially with progress tracking
-        ConsoleFormatter.writeQueryProgress(queryName: "mdm_status", current: 1, total: totalSteps)
-        let mdm = try await collectMDMEnrollmentStatus()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "mdm_info", current: 2, total: totalSteps)
-        let mdmInfo = try await collectMDMClientInfo()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "mdm_certificate", current: 3, total: totalSteps)
-        let mdmCert = try await collectMDMCertificateDetails()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "ade_config", current: 4, total: totalSteps)
-        let ade = try await collectADEConfiguration()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "device_ids", current: 5, total: totalSteps)
-        let ids = try await collectDeviceIdentifiers()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "remote_mgmt", current: 6, total: totalSteps)
-        let remote = try await collectRemoteManagement()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "profiles", current: 7, total: totalSteps)
-        let profiles = try await collectInstalledProfiles()
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "managed_policies", current: 8, total: totalSteps)
-        let policies = try await collectManagedPolicies()
+
+        // Each step is isolated. A collector that throws (or, before the underlying process runners
+        // were bounded, hung) must not sink the whole module: a management payload that never
+        // arrives makes the server retain the device's previous record, so a Mac that has already
+        // re-enrolled keeps reporting its old MDM provider indefinitely. That silent-stale failure
+        // is exactly what hid an entire migration wave from the progress report. So every step
+        // degrades to a recorded error plus a safe default, and the module always emits what it
+        // managed to collect.
+        var collectionErrors: [[String: String]] = []
+
+        func step(_ name: String, _ index: Int, _ body: () async throws -> [String: Any]) async -> [String: Any] {
+            ConsoleFormatter.writeQueryProgress(queryName: name, current: index, total: totalSteps)
+            do {
+                return try await body()
+            } catch {
+                ConsoleFormatter.writeWarning("management step '\(name)' failed, continuing: \(error.localizedDescription)")
+                collectionErrors.append(["step": name, "error": error.localizedDescription])
+                return [:]
+            }
+        }
+
+        func stepList(_ name: String, _ index: Int, _ body: () async throws -> [[String: Any]]) async -> [[String: Any]] {
+            ConsoleFormatter.writeQueryProgress(queryName: name, current: index, total: totalSteps)
+            do {
+                return try await body()
+            } catch {
+                ConsoleFormatter.writeWarning("management step '\(name)' failed, continuing: \(error.localizedDescription)")
+                collectionErrors.append(["step": name, "error": error.localizedDescription])
+                return []
+            }
+        }
+
+        let mdm = await step("mdm_status", 1) { try await self.collectMDMEnrollmentStatus() }
+        let mdmInfo = await step("mdm_info", 2) { try await self.collectMDMClientInfo() }
+        let mdmCert = await step("mdm_certificate", 3) { try await self.collectMDMCertificateDetails() }
+        let ade = await step("ade_config", 4) { try await self.collectADEConfiguration() }
+        let ids = await step("device_ids", 5) { try await self.collectDeviceIdentifiers() }
+        let remote = await step("remote_mgmt", 6) { try await self.collectRemoteManagement() }
+        let profiles = await stepList("profiles", 7) { try await self.collectInstalledProfiles() }
+        let policies = await stepList("managed_policies", 8) { try await self.collectManagedPolicies() }
 
         // Use snake_case for top-level keys to match osquery conventions
-        let managementData: [String: Any] = [
+        var managementData: [String: Any] = [
             "mdm_enrollment": mdm,
             "mdm_info": mdmInfo,
             "mdm_certificate": mdmCert,
@@ -51,6 +66,9 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             "installed_profiles": profiles,
             "managed_policies": policies
         ]
+        if !collectionErrors.isEmpty {
+            managementData["_collection_errors"] = collectionErrors
+        }
 
         return BaseModuleData(moduleId: moduleId, data: managementData)
     }
@@ -653,20 +671,18 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
     // MARK: - Installed Profiles (Full details via /usr/bin/profiles -P)
     
     private func collectInstalledProfiles() async throws -> [[String: Any]] {
-        // Use /usr/bin/profiles -P -o <file> like munkireport does - much faster than system_profiler
+        // Use /usr/bin/profiles -P -o <file> like munkireport does - much faster than system_profiler.
+        // Run it through ProcessRunner so it inherits the shared hard timeout and concurrent pipe
+        // draining rather than a bare waitUntilExit() that could wedge on an undrained pipe.
         let tempPath = "/tmp/reportmate_profile_temp.plist"
-        
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/profiles")
-        process.arguments = ["-P", "-o", tempPath]
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        
-        try process.run()
-        process.waitUntilExit()
-        
+
+        _ = try await ProcessRunner.run(
+            executable: "/usr/bin/profiles",
+            arguments: ["-P", "-o", tempPath],
+            timeout: 60,
+            label: "profiles -P (installed profiles)"
+        )
+
         // Read the plist output file
         guard let plistData = FileManager.default.contents(atPath: tempPath),
               let plist = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any] else {
@@ -835,108 +851,90 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         return ""
     }
     
-    // MARK: - Managed Policies (osquery managed_policies table)
-    
-    /// Collect managed policies from osquery - provides key-value pairs for each managed preference domain
+    // MARK: - Managed Policies (managed-preference domains, read from disk)
+
+    /// Collect managed policies: the key/value pairs each MDM-delivered profile writes into a
+    /// managed-preference domain.
+    ///
+    /// This reads `/Library/Managed Preferences` directly instead of osquery's `managed_policies`
+    /// table. That table is backed by a `cfprefsd` callback that, on some freshly MDM-migrated
+    /// Macs, never fires — so the query would hang indefinitely and (because it was the module's
+    /// last step) the module would emit nothing at all, freezing the device's reported MDM state
+    /// at its pre-migration value. The on-disk plists are the same data `cfprefsd` itself serves,
+    /// they are read in-process with no subprocess to wedge, and reading them cannot hang.
     private func collectManagedPolicies() async throws -> [[String: Any]] {
-        let osqueryScript = """
-            SELECT domain, name, value, uuid
-            FROM managed_policies
-            ORDER BY domain, name;
-        """
-        
-        // Execute osquery with a hard timeout — the managed_policies table can hang
-        // indefinitely on devices with sparse MDM coverage (cfprefsd never fires its callback).
-        let result: [[String: Any]]
-        do {
-            result = try await executeOsqueryRaw(osqueryScript, timeout: 20)
-        } catch {
-            ConsoleFormatter.writeWarning("managed_policies query did not complete, skipping: \(error.localizedDescription)")
-            return []
-        }
-        
-        // Group policies by domain for better organization
-        var policiesByDomain: [String: [[String: Any]]] = [:]
-        
-        for policy in result {
-            guard let domain = policy["domain"] as? String else { continue }
-            
-            let policyEntry: [String: Any] = [
-                "name": policy["name"] as? String ?? "",
-                "value": policy["value"] as? String ?? "",
-                "uuid": policy["uuid"] as? String ?? ""
-            ]
-            
-            if policiesByDomain[domain] == nil {
-                policiesByDomain[domain] = []
+        let fm = FileManager.default
+        let root = "/Library/Managed Preferences"
+
+        // System domains live at the root; each subdirectory is one account's per-user managed
+        // preferences, named by its short name. Collect (domain, scope, path) for every plist.
+        var domainFiles: [(domain: String, scope: String, path: String)] = []
+
+        func addPlists(inDirectory dir: String, scope: String) {
+            guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return }
+            for entry in entries where entry.hasSuffix(".plist") {
+                let domain = String(entry.dropLast(".plist".count))
+                domainFiles.append((domain, scope, "\(dir)/\(entry)"))
             }
-            policiesByDomain[domain]?.append(policyEntry)
         }
-        
-        // Convert to array format with domain as a property
+
+        addPlists(inDirectory: root, scope: "System Level")
+        if let entries = try? fm.contentsOfDirectory(atPath: root) {
+            for entry in entries {
+                let path = "\(root)/\(entry)"
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+                    addPlists(inDirectory: path, scope: entry)
+                }
+            }
+        }
+
+        var policiesByDomain: [String: [[String: Any]]] = [:]
+        for file in domainFiles {
+            guard let data = fm.contents(atPath: file.path),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any]
+            else { continue }
+
+            for (key, rawValue) in plist {
+                policiesByDomain[file.domain, default: []].append([
+                    "name": key,
+                    "value": stringifyPolicyValue(rawValue),
+                    "scope": file.scope
+                ])
+            }
+        }
+
+        // Domain-keyed array, each domain's settings sorted by name, to match the prior shape.
         var policies: [[String: Any]] = []
         for (domain, settings) in policiesByDomain.sorted(by: { $0.key < $1.key }) {
+            let sorted = settings.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
             policies.append([
                 "domain": domain,
-                "settings": settings,
-                "setting_count": settings.count
+                "settings": sorted,
+                "setting_count": sorted.count
             ])
         }
-        
         return policies
     }
-    
-    /// Execute osquery and return raw array of dictionaries.
-    /// - Parameters:
-    ///   - query: The SQL query to execute.
-    ///   - timeout: Seconds before the osqueryi child process is killed; 0 = no timeout.
-    private func executeOsqueryRaw(_ query: String, timeout: TimeInterval = 0) async throws -> [[String: Any]] {
-        return try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/local/bin/osqueryi")
-            process.arguments = ["--json", query]
 
-            let outputPipe = Pipe()
-            process.standardOutput = outputPipe
-            process.standardError = Pipe()
-
-            // Watchdog: terminate process after `timeout` seconds so a hanging
-            // osquery table (e.g. managed_policies on lightly-managed devices)
-            // never blocks the runner indefinitely.
-            var watchdog: DispatchWorkItem?
-            if timeout > 0 {
-                let item = DispatchWorkItem {
-                    guard process.isRunning else { return }
-                    process.terminate()
-                }
-                watchdog = item
-                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: item)
+    /// Render a managed-preference value as the flat string the `value` column carried: scalars
+    /// verbatim, containers as compact JSON so structure survives without a nested schema.
+    private func stringifyPolicyValue(_ rawValue: Any) -> String {
+        let value = makeJSONSafe(rawValue)
+        switch value {
+        case let bool as Bool:
+            return bool ? "1" : "0"
+        case let number as NSNumber:
+            return number.stringValue
+        case let string as String:
+            return string
+        default:
+            if JSONSerialization.isValidJSONObject(value),
+               let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+               let json = String(data: data, encoding: .utf8) {
+                return json
             }
-
-            process.terminationHandler = { p in
-                // The watchdog already guards against double-terminate via process.isRunning,
-                // so no explicit cancel is needed here.
-                // If the watchdog fired, the process was killed via SIGTERM.
-                if timeout > 0 && p.terminationReason == .uncaughtSignal {
-                    continuation.resume(throwing: OSQueryError.executionFailed(
-                        "Query timed out after \(Int(timeout))s"
-                    ))
-                    return
-                }
-                let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                if let result = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-                    continuation.resume(returning: result)
-                } else {
-                    continuation.resume(returning: [])
-                }
-            }
-
-            do {
-                try process.run()
-            } catch {
-                watchdog?.cancel()
-                continuation.resume(throwing: OSQueryError.processLaunchFailed(error))
-            }
+            return String(describing: rawValue)
         }
     }
     
