@@ -30,6 +30,14 @@ public final class AppUsageDatabase: @unchecked Sendable {
     // Both accumulate per session for the lifetime of the process.
     private let foregroundSeconds = Expression<Int64>("foreground_seconds")
     private let activeSeconds = Expression<Int64>("active_seconds")
+    // Reporting watermark — the counter values already delivered to the server,
+    // and when that delivery was confirmed. The server accumulates per
+    // (device, date, app), so a session that is still running is reported as the
+    // increment since this watermark rather than as its running total.
+    private let reportedTotalSeconds = Expression<Int64>("reported_total_seconds")
+    private let reportedForegroundSeconds = Expression<Int64>("reported_foreground_seconds")
+    private let reportedActiveSeconds = Expression<Int64>("reported_active_seconds")
+    private let reportedAt = Expression<String?>("reported_at")  // ISO8601, null until first report
     private let transmitted = Expression<Bool>("transmitted")  // Mark as transmitted for two-phase delete
     
     // MARK: - Properties
@@ -72,6 +80,10 @@ public final class AppUsageDatabase: @unchecked Sendable {
             t.column(durationSeconds, defaultValue: 0)
             t.column(foregroundSeconds, defaultValue: 0)
             t.column(activeSeconds, defaultValue: 0)
+            t.column(reportedTotalSeconds, defaultValue: 0)
+            t.column(reportedForegroundSeconds, defaultValue: 0)
+            t.column(reportedActiveSeconds, defaultValue: 0)
+            t.column(reportedAt)
             t.column(transmitted, defaultValue: false)
         })
 
@@ -80,6 +92,10 @@ public final class AppUsageDatabase: @unchecked Sendable {
         // error. Safe to run on every initialize().
         _ = try? db?.execute("ALTER TABLE app_sessions ADD COLUMN foreground_seconds INTEGER NOT NULL DEFAULT 0")
         _ = try? db?.execute("ALTER TABLE app_sessions ADD COLUMN active_seconds INTEGER NOT NULL DEFAULT 0")
+        _ = try? db?.execute("ALTER TABLE app_sessions ADD COLUMN reported_total_seconds INTEGER NOT NULL DEFAULT 0")
+        _ = try? db?.execute("ALTER TABLE app_sessions ADD COLUMN reported_foreground_seconds INTEGER NOT NULL DEFAULT 0")
+        _ = try? db?.execute("ALTER TABLE app_sessions ADD COLUMN reported_active_seconds INTEGER NOT NULL DEFAULT 0")
+        _ = try? db?.execute("ALTER TABLE app_sessions ADD COLUMN reported_at TEXT")
 
         // Create indexes for common queries
         try db?.run(sessions.createIndex(bundleId, ifNotExists: true))
@@ -117,6 +133,10 @@ public final class AppUsageDatabase: @unchecked Sendable {
             durationSeconds <- 0,
             foregroundSeconds <- 0,
             activeSeconds <- 0,
+            reportedTotalSeconds <- 0,
+            reportedForegroundSeconds <- 0,
+            reportedActiveSeconds <- 0,
+            reportedAt <- nil as String?,
             transmitted <- false
         )
 
@@ -226,6 +246,10 @@ public final class AppUsageDatabase: @unchecked Sendable {
                     durationSeconds <- 0,
                     foregroundSeconds <- 0,
                     activeSeconds <- 0,
+                    reportedTotalSeconds <- 0,
+                    reportedForegroundSeconds <- 0,
+                    reportedActiveSeconds <- 0,
+                    reportedAt <- nil as String?,
                     transmitted <- false
                 )
                 _ = try db.run(insert)
