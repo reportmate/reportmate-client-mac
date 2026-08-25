@@ -64,6 +64,15 @@ public struct ApplicationUsageSession: Sendable {
     public var activeSeconds: Double = 0
     public var isActive: Bool = false
 
+    // Reporting watermark: the counter values the server has already accepted,
+    // and when. A session still running contributes only what it gained since
+    // then, so it can be reported the same day it is used without its running
+    // total being added again on every cycle.
+    public var reportedTotalSeconds: Double = 0
+    public var reportedForegroundSeconds: Double = 0
+    public var reportedActiveSeconds: Double = 0
+    public var reportedAt: Date? = nil
+
     public func toDictionary() -> [String: Any] {
         let formatter = ISO8601DateFormatter()
         var dict: [String: Any] = [
@@ -93,7 +102,27 @@ public struct ApplicationUsageSession: Sendable {
 public class ApplicationUsageService: @unchecked Sendable {
     
     private let dbPath: String
-    private var transmittedSessionIds: [Int64] = []  // Track IDs for two-phase delete
+    private var transmittedSessionIds: [Int64] = []  // Completed rows, retired on confirmation
+    // Counter values handed to the server this cycle, per row. On confirmation
+    // these become the row's watermark, so the next cycle reports only what the
+    // session gained after this point.
+    private var pendingWatermarks: [(id: Int64, total: Int64, foreground: Int64, active: Int64)] = []
+    private var collectedAt: Date?
+
+    /// How far back a session's very first report may attribute usage.
+    ///
+    /// A session that has never been reported carries counters covering its
+    /// whole life, and nothing records which days that time fell on. Spreading
+    /// it evenly would invent a usage pattern — a Mac left up for three months
+    /// would appear to have been used every one of those days, weekends and
+    /// closures included. Beyond this window the counters are taken as a
+    /// starting watermark instead and nothing is claimed for them; reporting
+    /// begins from the next cycle, when the window is a real measurement.
+    private static let maxFirstReportWindow: TimeInterval = 24 * 3600
+
+    /// Capture method reported when sessions come from the watcher's database,
+    /// which is the only source that can carry a watermark forward.
+    private static let watcherCaptureMethod = "SQLiteWatcher"
     
     public init(dbPath: String = "/Library/Managed Reports/appusage.sqlite") {
         self.dbPath = dbPath
@@ -117,12 +146,13 @@ public class ApplicationUsageService: @unchecked Sendable {
             do {
                 let result = try collectFromDatabase(installedApps: installedApps)
                 snapshot.isCaptureEnabled = true
-                snapshot.captureMethod = "SQLiteWatcher"
+                snapshot.captureMethod = Self.watcherCaptureMethod
                 snapshot.status = "complete"
                 snapshot.activeSessions = result.sessions
                 snapshot.totalLaunches = result.totalLaunches
                 snapshot.totalUsageSeconds = result.totalUsageSeconds
                 transmittedSessionIds = result.sessionIds
+                pendingWatermarks = result.watermarks
                 return snapshot
             } catch {
                 snapshot.warnings.append("Database error: \(error.localizedDescription), falling back to polling")
@@ -154,8 +184,13 @@ public class ApplicationUsageService: @unchecked Sendable {
     /// Retire the sessions that were just delivered. Call only after the API has
     /// confirmed success — until this runs, the same sessions are collected again
     /// on the next cycle and the server adds their duration a second time.
+    ///
+    /// Two things happen here. Every session that was reported, running or not,
+    /// has its watermark advanced to the counters the server accepted, so the
+    /// next cycle sends only the increment on top. Sessions that have ended are
+    /// then retired, because they can gain nothing further.
     public func confirmTransmission() {
-        guard !transmittedSessionIds.isEmpty else { return }
+        guard !transmittedSessionIds.isEmpty || !pendingWatermarks.isEmpty else { return }
 
         do {
             let db = try Connection(dbPath)
@@ -166,6 +201,8 @@ public class ApplicationUsageService: @unchecked Sendable {
             let sessions = Table("app_sessions")
             let id = Expression<Int64>("id")
             let transmitted = Expression<Bool>("transmitted")
+
+            advanceWatermarks(db: db, sessions: sessions, id: id)
 
             // The first confirmation after a long backlog can carry tens of
             // thousands of ids; a single IN-list that size exceeds SQLite's
@@ -188,11 +225,56 @@ public class ApplicationUsageService: @unchecked Sendable {
             print("Warning: Failed to mark sessions as transmitted: \(error)")
         }
     }
+
+    /// Record, per reported session, the counter values the server accepted.
+    ///
+    /// The columns are added here as well as by the watcher because the two run
+    /// as separate processes: a client that collects before the upgraded watcher
+    /// has restarted would otherwise have nowhere to write the watermark, and
+    /// would resend the same seconds every cycle.
+    private func advanceWatermarks(db: Connection, sessions: Table, id: Expression<Int64>) {
+        guard !pendingWatermarks.isEmpty else { return }
+
+        _ = try? db.execute("ALTER TABLE app_sessions ADD COLUMN reported_total_seconds INTEGER NOT NULL DEFAULT 0")
+        _ = try? db.execute("ALTER TABLE app_sessions ADD COLUMN reported_foreground_seconds INTEGER NOT NULL DEFAULT 0")
+        _ = try? db.execute("ALTER TABLE app_sessions ADD COLUMN reported_active_seconds INTEGER NOT NULL DEFAULT 0")
+        _ = try? db.execute("ALTER TABLE app_sessions ADD COLUMN reported_at TEXT")
+
+        let reportedTotal = Expression<Int64>("reported_total_seconds")
+        let reportedForeground = Expression<Int64>("reported_foreground_seconds")
+        let reportedActive = Expression<Int64>("reported_active_seconds")
+        let reportedAt = Expression<String?>("reported_at")
+        let stamp = ISO8601DateFormatter().string(from: collectedAt ?? Date())
+
+        do {
+            try db.transaction {
+                for mark in pendingWatermarks {
+                    try db.run(sessions.filter(id == mark.id).update(
+                        reportedTotal <- mark.total,
+                        reportedForeground <- mark.foreground,
+                        reportedActive <- mark.active,
+                        reportedAt <- stamp
+                    ))
+                }
+            }
+            pendingWatermarks = []
+        } catch {
+            // Leaving the watermarks unadvanced resends this cycle's seconds on
+            // the next one. That is the same at-least-once behaviour the delete
+            // path already has, and is preferable to losing the counters.
+            print("Warning: Failed to advance usage watermarks: \(error)")
+        }
+    }
     
     // MARK: - SQLite Database Collection
     
-    private func collectFromDatabase(installedApps: [[String: Any]]) throws -> (sessions: [ApplicationUsageSession], totalLaunches: Int, totalUsageSeconds: Double, sessionIds: [Int64]) {
+    private func collectFromDatabase(installedApps: [[String: Any]]) throws -> (sessions: [ApplicationUsageSession], totalLaunches: Int, totalUsageSeconds: Double, sessionIds: [Int64], watermarks: [(id: Int64, total: Int64, foreground: Int64, active: Int64)]) {
         let db = try Connection(dbPath, readonly: true)
+
+        // Every elapsed figure in this batch is measured from one instant, so
+        // the watermark written on confirmation matches what was actually sent.
+        let now = Date()
+        collectedAt = now
         
         let sessions = Table("app_sessions")
         let idCol = Expression<Int64>("id")
@@ -205,6 +287,10 @@ public class ApplicationUsageService: @unchecked Sendable {
         let durationCol = Expression<Int64>("duration_seconds")
         let foregroundCol = Expression<Int64>("foreground_seconds")
         let activeCol = Expression<Int64>("active_seconds")
+        let reportedTotalCol = Expression<Int64>("reported_total_seconds")
+        let reportedForegroundCol = Expression<Int64>("reported_foreground_seconds")
+        let reportedActiveCol = Expression<Int64>("reported_active_seconds")
+        let reportedAtCol = Expression<String?>("reported_at")
         let transmittedCol = Expression<Bool>("transmitted")
         
         // Query untransmitted completed sessions + active sessions
@@ -214,6 +300,7 @@ public class ApplicationUsageService: @unchecked Sendable {
         
         var result: [ApplicationUsageSession] = []
         var sessionIds: [Int64] = []
+        var watermarks: [(id: Int64, total: Int64, foreground: Int64, active: Int64)] = []
         var totalLaunches = 0
         var totalUsageSeconds: Double = 0
         
@@ -231,7 +318,7 @@ public class ApplicationUsageService: @unchecked Sendable {
             
             // For active sessions, calculate current duration
             if isActive {
-                duration = Date().timeIntervalSince(startDate)
+                duration = now.timeIntervalSince(startDate)
             }
             
             // Skip unknown duration sessions in totals but include them
@@ -253,8 +340,22 @@ public class ApplicationUsageService: @unchecked Sendable {
             // correct neutral value.
             session.foregroundSeconds = Double((try? row.get(foregroundCol)) ?? 0)
             session.activeSeconds = Double((try? row.get(activeCol)) ?? 0)
+            // Watermark columns are absent on databases written before the
+            // migration; SQLite has no value to return and 0 / never-reported
+            // is the correct reading for a row that predates them.
+            session.reportedTotalSeconds = Double((try? row.get(reportedTotalCol)) ?? 0)
+            session.reportedForegroundSeconds = Double((try? row.get(reportedForegroundCol)) ?? 0)
+            session.reportedActiveSeconds = Double((try? row.get(reportedActiveCol)) ?? 0)
+            session.reportedAt = ((try? row.get(reportedAtCol)) ?? nil).flatMap { formatter.date(from: $0) }
             session.isActive = isActive
-            
+
+            watermarks.append((
+                id: rowId,
+                total: Int64(observedTotalSeconds(of: session).rounded()),
+                foreground: Int64(session.foregroundSeconds.rounded()),
+                active: Int64(session.activeSeconds.rounded())
+            ))
+
             result.append(session)
             // Only completed sessions are eligible for retirement. A running app
             // is still accruing time, so it stays in the database until it exits
@@ -265,7 +366,7 @@ public class ApplicationUsageService: @unchecked Sendable {
             totalLaunches += 1
         }
         
-        return (result, totalLaunches, totalUsageSeconds, sessionIds)
+        return (result, totalLaunches, totalUsageSeconds, sessionIds, watermarks)
     }
     
     // MARK: - Fallback: Process Polling
@@ -385,6 +486,23 @@ public class ApplicationUsageService: @unchecked Sendable {
         return nil
     }
 
+    /// The wall-clock seconds a session is known to cover.
+    ///
+    /// `durationSeconds` carries -1 when a watcher restart interrupted the
+    /// session and its true end was never observed (see
+    /// `AppUsageDatabase.markOrphanedSessions`). The row still records when the
+    /// session began and when the watcher closed it, and the app cannot have run
+    /// past that point, so the span between the two is the figure available.
+    /// Treating the sentinel as zero instead would put a day's foreground
+    /// seconds above its total, which is not a state the data can be in.
+    private func observedTotalSeconds(of session: ApplicationUsageSession) -> Double {
+        if session.durationSeconds >= 0 {
+            return session.durationSeconds
+        }
+        guard let end = session.endTime else { return 0 }
+        return max(0, end.timeIntervalSince(session.startTime))
+    }
+
     /// Running totals for one (date, app name) pair while summaries are built.
     private struct DailyUsageBucket {
         var launches = 0
@@ -394,23 +512,23 @@ public class ApplicationUsageService: @unchecked Sendable {
         var users: Set<String> = []
     }
 
-    /// The calendar days a session covers, each with the fraction of the
-    /// session's wall-clock span that fell on that day.
+    /// The calendar days an interval covers, each with the fraction of the
+    /// interval's wall-clock span that fell on that day.
     ///
-    /// A session is one continuous run of an application, so an app opened
-    /// before midnight and closed after it was in use on both days. Attributing
-    /// the whole run to the day it started — as this did previously — books a
-    /// week of uptime onto a single date and leaves the days it actually
-    /// covered empty, which makes any per-day or per-week series wrong.
+    /// An app opened before midnight and closed after it was in use on both
+    /// days. Attributing everything to one date books a stretch of uptime onto
+    /// a single day and leaves the days it actually covered empty, which makes
+    /// any per-day or per-week series wrong.
     ///
-    /// The foreground and active counters are accumulated across the whole
-    /// session rather than per day, so they are apportioned by the same
-    /// wall-clock share. That is an estimate; only per-day counters in the
-    /// watcher itself could make it exact.
-    private func daySpans(of session: ApplicationUsageSession,
+    /// The counters accumulate across the interval rather than per day, so they
+    /// are apportioned by wall-clock share. That is an estimate, but the
+    /// interval here is one collection cycle rather than a whole session, so it
+    /// only ever spreads a few hours across a midnight boundary. Only per-day
+    /// counters in the watcher itself could make it exact.
+    private func daySpans(from start: Date,
+                          to end: Date,
                           formatter: DateFormatter) -> [(String, Double)] {
-        let start = session.startTime
-        guard let end = session.endTime, end > start else {
+        guard end > start else {
             return [(formatter.string(from: start), 1.0)]
         }
 
@@ -437,15 +555,23 @@ public class ApplicationUsageService: @unchecked Sendable {
     }
 
     /// Build daily per-application usage summaries from sessions.
-    /// Groups by (date, app name). Cumulative: last collection of the day wins (UPSERT on API).
-    public func buildDailySummaries(sessions: [ApplicationUsageSession]) -> [[String: Any]] {
-        // The server accumulates these totals per (device, date, app), so every
-        // session must appear here exactly once, in the cycle it completes.
-        // Running apps are excluded: their duration grows between cycles, so
-        // sending them repeatedly would add the same app-open several times over.
-        // They are counted once they exit; `sessions` still carries them for the
-        // snapshot's live view.
-        let sessions = sessions.filter { !$0.isActive }
+    /// Groups by (date, app name). The API accumulates these per (device, date, app).
+    ///
+    /// Each session reports the seconds it has gained since the counters the
+    /// server last accepted, apportioned across the days that increment covers.
+    /// Reporting a running total instead would add an app's whole lifetime again
+    /// on every cycle, and waiting for the process to exit — which is what this
+    /// did previously — reports nothing at all for the applications that matter
+    /// most: the ones people leave open all day, on machines that stay booted
+    /// for weeks. Those sessions never end, so their usage was never sent.
+    public func buildDailySummaries(snapshot: ApplicationUsageSnapshot) -> [[String: Any]] {
+        // Only the watcher's database can carry a watermark forward. The polling
+        // fallback re-derives the same running processes every cycle with nothing
+        // to record against them, so anything it reported would be counted again
+        // on the next run.
+        guard snapshot.captureMethod == Self.watcherCaptureMethod else { return [] }
+
+        let sessions = snapshot.activeSessions
         guard !sessions.isEmpty else { return [] }
 
         let dateFormatter = DateFormatter()
@@ -453,22 +579,43 @@ public class ApplicationUsageService: @unchecked Sendable {
         dateFormatter.locale = Locale(identifier: "en_US_POSIX")
         dateFormatter.timeZone = TimeZone.current
 
-        // Accumulate by (date string, app name). A session that runs past
-        // midnight belongs to every day it covers, not only the one it started
-        // on, so each session is split across the days it spans first.
+        let now = collectedAt ?? Date()
         var buckets: [String: DailyUsageBucket] = [:]
+
         for session in sessions {
-            // A session interrupted by a watcher restart is stamped with the -1
-            // unknown-duration sentinel (AppUsageDatabase.markOrphanedSessions).
-            // It carries no measurable duration, so it contributes nothing here —
-            // summing it raw would send a negative total to the server, which
-            // reads these as real seconds and accumulates them.
-            let total = max(0, session.durationSeconds)
-            let foreground = max(0, session.foregroundSeconds)
-            let active = max(0, session.activeSeconds)
             let startDate = dateFormatter.string(from: session.startTime)
 
-            for (dateStr, share) in daySpans(of: session, formatter: dateFormatter) {
+            // An app-open is one launch, counted once on the day it happened,
+            // the first time the session is reported. Counting it on every cycle
+            // would multiply launches by how long the app stayed open.
+            if session.reportedAt == nil {
+                let key = "\(startDate)||\(session.name)"
+                var bucket = buckets[key] ?? DailyUsageBucket()
+                bucket.launches += 1
+                if !session.user.isEmpty {
+                    bucket.users.insert(session.user)
+                }
+                buckets[key] = bucket
+            }
+
+            let windowStart = session.reportedAt ?? session.startTime
+            let windowEnd = session.endTime ?? now
+            guard windowEnd > windowStart else { continue }
+
+            // A first report reaching further back than the cap covers days
+            // nothing recorded. Its counters become the watermark without being
+            // claimed for any date — see maxFirstReportWindow.
+            if session.reportedAt == nil,
+               windowEnd.timeIntervalSince(windowStart) > Self.maxFirstReportWindow {
+                continue
+            }
+
+            let total = max(0, observedTotalSeconds(of: session) - session.reportedTotalSeconds)
+            let foreground = max(0, session.foregroundSeconds - session.reportedForegroundSeconds)
+            let active = max(0, session.activeSeconds - session.reportedActiveSeconds)
+            guard total > 0 || foreground > 0 || active > 0 else { continue }
+
+            for (dateStr, share) in daySpans(from: windowStart, to: windowEnd, formatter: dateFormatter) {
                 let key = "\(dateStr)||\(session.name)"
                 var bucket = buckets[key] ?? DailyUsageBucket()
                 bucket.totalSeconds += total * share
@@ -476,12 +623,6 @@ public class ApplicationUsageService: @unchecked Sendable {
                 bucket.activeSeconds += active * share
                 if !session.user.isEmpty {
                     bucket.users.insert(session.user)
-                }
-                // One app-open is one launch, counted on the day it happened —
-                // apportioning it too would multiply launch counts by the number
-                // of days a long-running app happened to stay open.
-                if dateStr == startDate {
-                    bucket.launches += 1
                 }
                 buckets[key] = bucket
             }
