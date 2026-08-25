@@ -91,8 +91,19 @@ public class APIClient {
 
         do {
             // Encode as JSON dictionary
-            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-            
+            let body = try JSONSerialization.data(withJSONObject: payload)
+
+            // Compress unless the device has been told not to, or the encoder
+            // declined. Compression is an optimisation and must never cost a
+            // device its check-in, so every failure path here falls back to
+            // sending the body as it was.
+            if configuration.compressPayload, let compressed = GzipEncoder.compress(body) {
+                request.httpBody = compressed
+                request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
+            } else {
+                request.httpBody = body
+            }
+
             let (data, response) = try await session.data(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse else {

@@ -238,6 +238,11 @@ public struct ReportMateConfiguration {
     public var validateSSL: Bool = true
     public var timeout: Int = 300 // 5 minutes
 
+    /// Gzip the check-in body before sending. Set CompressPayload to false in
+    /// the managed profile to put a machine back on uncompressed check-ins
+    /// without shipping a new client.
+    public var compressPayload: Bool = true
+
     /// Per-query timeout for built-in osquery tables. Kills the osqueryi process
     /// if it does not return within this bound, so a single misbehaving table
     /// cannot block the rest of a module's collection.
@@ -272,6 +277,7 @@ public struct ReportMateConfiguration {
         if let useAltSystemInfo = other["UseAltSystemInfo"] as? Bool { self.useAltSystemInfo = useAltSystemInfo }
         if let validateSSL = other["ValidateSSL"] as? Bool { self.validateSSL = validateSSL }
         if let timeout = other["Timeout"] as? Int { self.timeout = timeout }
+        if let compressPayload = other["CompressPayload"] as? Bool { self.compressPayload = compressPayload }
         if let queryTimeout = other["QueryTimeoutSeconds"] as? Double { self.queryTimeoutSeconds = queryTimeout }
         else if let queryTimeoutInt = other["QueryTimeoutSeconds"] as? Int { self.queryTimeoutSeconds = Double(queryTimeoutInt) }
         if let extQueryTimeout = other["ExtensionQueryTimeoutSeconds"] as? Double { self.extensionQueryTimeoutSeconds = extQueryTimeout }
