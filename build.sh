@@ -860,7 +860,13 @@ EOF
 </plist>
 EOF
 
-    # Daily daemon - hardware, peripherals (at 9 AM)
+    # Daily daemon - hardware deep scan, in the hour after 09:00.
+    #
+    # StartCalendarInterval fires at the same absolute instant on every Mac,
+    # so a fixed 09:00 puts the whole fleet on the API in one minute. The
+    # hourly and fourhourly daemons do not have this problem -- StartInterval
+    # counts from daemon load, which is boot time, and that is already spread
+    # across the fleet. Same random-sleep wrapper the allmodules job uses.
     cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.daily.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -870,11 +876,9 @@ EOF
     <string>com.github.reportmate.daily</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner</string>
-        <string>--run-modules</string>
-        <string>hardware</string>
-        <string>--storage-mode</string>
-        <string>deep</string>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>sleep $(/usr/bin/jot -r 1 0 3540); exec "/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner" --run-modules hardware --storage-mode deep</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
