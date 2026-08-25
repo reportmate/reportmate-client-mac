@@ -46,7 +46,7 @@ public class ApplicationsModuleProcessor: BaseModuleProcessor, @unchecked Sendab
                 "totalUsageSeconds": usageSnapshot.totalUsageSeconds,
                 "activeSessions": usageSnapshot.activeSessions.map { $0.toDictionary() }
             ]
-            dailyUsageHistory = usageService.buildDailySummaries(sessions: usageSnapshot.activeSessions)
+            dailyUsageHistory = usageService.buildDailySummaries(snapshot: usageSnapshot)
         }
         
         let applicationsData: [String: Any] = [
