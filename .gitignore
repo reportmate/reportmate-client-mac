@@ -152,3 +152,6 @@ dev/
 
 # Per-module version file generated at build time
 Sources/Generated/
+
+# Development worktrees live inside the repo at ./.worktrees/<name>
+/.worktrees/

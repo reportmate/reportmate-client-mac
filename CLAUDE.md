@@ -172,4 +172,14 @@ The installer creates multiple daemons with different schedules:
 - `com.github.reportmate.boot` - Full collection at boot
 - `com.github.reportmate.hourly` - security, profiles, network, management
 - `com.github.reportmate.fourhourly` - applications, inventory, system
-- `com.github.reportmate.daily` - hardware, displays (at 9 AM)
+- `com.github.reportmate.daily` - hardware, displays (random offset within the hour after 09:00)
+
+## Worktrees
+
+Create development worktrees **inside this repo** at `./.worktrees/<name>` — never as sibling `<repo>.worktree` folders next to it. Use the global `git wt` alias, which resolves the repo root and places the worktree under `.worktrees/` from any subdirectory:
+
+```bash
+git wt <name> [branch]
+```
+
+That runs `git worktree add .worktrees/<name> [branch]`. Keep `/.worktrees/` listed in this repo's `.gitignore`.
