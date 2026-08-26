@@ -364,6 +364,29 @@ struct ReportMateClient: AsyncParsableCommand {
                 collectedData[moduleName] = data
             }
         }
+
+        // Stamp every module with the instant this run collected it.
+        //
+        // collectedAt used to be set by hand inside individual processors, and
+        // only hardware and peripherals ever did it -- so eight of ten modules
+        // reached the API with no collection time at all, while the Windows
+        // client emitted one for every module from its base model. Without it
+        // there is no way to tell a module refreshed on this run from one whose
+        // stored row has not moved in months: a module's own content timestamps
+        // report what the underlying source last wrote, not when we last looked,
+        // so a Munki installs document frozen since March reads identically
+        // whether the collector ran daily or died in the spring.
+        //
+        // Stamping here rather than in each processor is what makes it hold: a
+        // new module gets the field by existing, not by someone remembering. A
+        // processor that sets its own collectedAt keeps it, since that is the
+        // true collection instant and this is only the end of the run.
+        let collectedAtStamp = ISO8601DateFormatter().string(from: Date())
+        for (moduleName, value) in collectedData {
+            guard var dict = value as? [String: Any], dict["collectedAt"] == nil else { continue }
+            dict["collectedAt"] = collectedAtStamp
+            collectedData[moduleName] = dict
+        }
         
         // Display completion status
         let completionTimestamp = dateFormatter.string(from: Date())
