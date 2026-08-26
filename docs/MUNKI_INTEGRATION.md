@@ -128,7 +128,7 @@ graph TD
 |---------|-------------|------------|-------|
 | **Execution order** | 1st | 2nd | Guaranteed by filename |
 | **Data isolation** | MunkiReport server | ReportMate API | Separate endpoints |
-| **No conflicts** | ✅ | ✅ | Both can succeed/fail independently |
+| **No conflicts** | Yes | Yes | Both can succeed/fail independently |
 | **Logging** | MunkiReport logs | ReportMate logs | Separate log files |
 | **Performance** | ~2-5 seconds | ~3-8 seconds | Sequential, not parallel |
 
@@ -322,11 +322,11 @@ sudo mv /usr/local/munki/postflight.d/00-original.sh \
 ## Summary
 
 The ReportMate postflight integration:
-- ✅ Preserves existing MunkiReport functionality
-- ✅ Runs automatically after every Munki operation
-- ✅ Supports unlimited additional scripts
-- ✅ Provides detailed logging
-- ✅ Handles errors gracefully (non-blocking)
-- ✅ Zero configuration required after installation
+- Preserves existing MunkiReport functionality
+- Runs automatically after every Munki operation
+- Supports unlimited additional scripts
+- Provides detailed logging
+- Handles errors gracefully (non-blocking)
+- Zero configuration required after installation
 
 Both systems collect complementary data and submit to their respective servers without conflicts.
