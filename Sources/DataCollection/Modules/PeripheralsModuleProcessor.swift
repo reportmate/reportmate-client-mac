@@ -243,221 +243,201 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
     // MARK: - Input Devices
     
     private func collectInputDevices() async throws -> [String: Any] {
-        let keyboards = try await collectKeyboards()
-        let mice = try await collectMice()
-        let trackpads = try await collectTrackpads()
-        let tablets = try await collectGraphicsTablets()
-        
+        // One enumeration of the HID registry, classified by what each device
+        // declares itself to be. See collectHidDevices() for why this replaced four
+        // separate ioreg/system_profiler scrapes.
+        let hid = await collectHidDevices()
+
+        let keyboards = hid.filter { $0.isKeyboard }.map { $0.asInputDevice(type: "Keyboard") }
+        let mice = hid.filter { $0.isMouse }.map { $0.asInputDevice(type: "Mouse") }
+        let trackpads = hid.filter { $0.isTrackpad }.map { $0.asTrackpad() }
+        let tablets = hid.filter { $0.isGraphicsTablet }.map { $0.asGraphicsTablet() }
+
         return [
-            "keyboards": keyboards,
-            "mice": mice,
-            "trackpads": trackpads,
-            "tablets": tablets
+            "keyboards": dedupe(keyboards),
+            "mice": dedupe(mice),
+            "trackpads": dedupe(trackpads),
+            "tablets": dedupe(tablets)
         ]
     }
-    
-    private func collectKeyboards() async throws -> [[String: Any]] {
-        let bashScript = """
-            echo "["
-            first=true
-            
-            # Check for keyboards using IOKit
-            ioreg -r -c IOHIDKeyboard 2>/dev/null | awk '
-            BEGIN { name=""; vendor=""; product=""; first=1 }
-            /"Product"/ { gsub(/.*"Product" = "/, ""); gsub(/".*/, ""); name = $0 }
-            /"Manufacturer"/ { gsub(/.*"Manufacturer" = "/, ""); gsub(/".*/, ""); vendor = $0 }
-            /"VendorID"/ { gsub(/.*"VendorID" = /, ""); gsub(/[^0-9].*/, ""); product = $0 }
-            /"IOClass" = "IOHIDKeyboard"/ {
-                if (name != "") {
-                    if (!first) printf ","
-                    printf "{\\"name\\": \\"%s\\", \\"vendor\\": \\"%s\\", \\"vendorId\\": \\"%s\\"}", name, vendor, product
-                    first = 0
-                }
-                name = ""; vendor = ""; product = ""
-            }
-            '
-            
-            echo "]"
-            """
-        
-        let result = try await executeWithFallback(osquery: nil, bash: bashScript)
-        
-        var keyboards: [[String: Any]] = []
-        if let items = result["items"] as? [[String: Any]] {
-            keyboards = items
-        }
-        
-        return keyboards.map { kb in
-            let name = kb["name"] as? String ?? "Keyboard"
-            let isBuiltIn = name.lowercased().contains("internal") || name.lowercased().contains("built-in")
-            let connectionType = isBuiltIn ? "Built-in" : (name.lowercased().contains("bluetooth") ? "Bluetooth" : "USB")
-            
-            return [
-                "name": name,
-                "vendor": kb["vendor"] as? String ?? "",
-                "vendorId": kb["vendorId"] as? String ?? "",
-                "isBuiltIn": isBuiltIn,
-                "connectionType": connectionType,
-                "deviceType": "Keyboard"
-            ]
-        }
-    }
-    
-    private func collectMice() async throws -> [[String: Any]] {
-        let bashScript = """
-            echo "["
-            first=true
-            
-            # Check for mice using IOKit
-            ioreg -r -c IOHIDPointing 2>/dev/null | awk '
-            BEGIN { name=""; vendor=""; first=1 }
-            /"Product"/ { gsub(/.*"Product" = "/, ""); gsub(/".*/, ""); name = $0 }
-            /"Manufacturer"/ { gsub(/.*"Manufacturer" = "/, ""); gsub(/".*/, ""); vendor = $0 }
-            /"IOClass" = "IOHIDPointing"/ {
-                if (name != "" && tolower(name) !~ /trackpad/) {
-                    if (!first) printf ","
-                    printf "{\\"name\\": \\"%s\\", \\"vendor\\": \\"%s\\"}", name, vendor
-                    first = 0
-                }
-                name = ""; vendor = ""
-            }
-            '
-            
-            echo "]"
-            """
-        
-        let result = try await executeWithFallback(osquery: nil, bash: bashScript)
-        
-        var mice: [[String: Any]] = []
-        if let items = result["items"] as? [[String: Any]] {
-            mice = items
-        }
-        
-        return mice.map { mouse in
-            let name = mouse["name"] as? String ?? "Mouse"
-            let connectionType = name.lowercased().contains("bluetooth") || name.lowercased().contains("magic") ? "Bluetooth" : "USB"
-            
-            return [
-                "name": name,
-                "vendor": mouse["vendor"] as? String ?? "",
-                "connectionType": connectionType,
-                "deviceType": "Mouse"
-            ]
-        }
-    }
-    
-    private func collectTrackpads() async throws -> [[String: Any]] {
-        // Use simpler awk without problematic quote escaping
-        let bashScript = """
-            system_profiler SPBluetoothDataType SPUSBDataType 2>/dev/null | grep -i trackpad | awk '
-            BEGIN { first=1; print "[" }
-            {
-                name = $0
-                gsub(/:.*/, "", name)
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
-                if (name == "") next
-                
-                if (!first) printf ","
-                printf "{\\"name\\": \\"%s\\"}", name
-                first = 0
-            }
-            END { print "]" }
-            '
-            """
-        
-        let result = try await executeWithFallback(osquery: nil, bash: bashScript)
-        
-        var trackpads: [[String: Any]] = []
-        if let items = result["items"] as? [[String: Any]] {
-            trackpads = items
-        }
-        
-        // Deduplicate and process
+
+    /// A device is enumerated once per HID collection it publishes, so the same
+    /// keyboard can appear several times. Key on name plus vendor/product id.
+    private func dedupe(_ devices: [[String: Any]]) -> [[String: Any]] {
         var seen = Set<String>()
-        var uniqueTrackpads: [[String: Any]] = []
-        
-        for trackpad in trackpads {
-            let name = trackpad["name"] as? String ?? "Trackpad"
-            if !seen.contains(name) {
-                seen.insert(name)
-                let isBuiltIn = name.lowercased().contains("internal") || name.lowercased().contains("built-in") || name.lowercased().contains("force touch")
-                let connectionType = isBuiltIn ? "Built-in" : (name.lowercased().contains("magic") ? "Bluetooth" : "USB")
-                
-                uniqueTrackpads.append([
-                    "name": name,
-                    "isBuiltIn": isBuiltIn,
-                    "supportsForcTouch": name.lowercased().contains("force touch") || name.lowercased().contains("magic trackpad 2"),
-                    "connectionType": connectionType,
-                    "deviceType": "Trackpad"
-                ])
-            }
+        var unique: [[String: Any]] = []
+        for device in devices {
+            let key = [
+                device["name"] as? String ?? "",
+                device["vendorId"] as? String ?? "",
+                device["productId"] as? String ?? ""
+            ].joined(separator: "|")
+            if seen.insert(key).inserted { unique.append(device) }
         }
-        
-        return uniqueTrackpads
+        return unique
     }
-    
-    private func collectGraphicsTablets() async throws -> [[String: Any]] {
-        let bashScript = """
-            echo "["
-            first=true
-            
-            # Look for graphics tablets in USB devices
-            system_profiler SPUSBDataType 2>/dev/null | awk '
-            BEGIN { in_device=0; name=""; vendor=""; first=1 }
-            /^[[:space:]]+[A-Za-z].*:$/ {
-                if (in_device && name != "" && (tolower(name) ~ /wacom|huion|xp-pen|tablet|intuos|cintiq|bamboo/)) {
-                    if (!first) printf ","
-                    printf "{\\"name\\": \\"%s\\", \\"vendor\\": \\"%s\\"}", name, vendor
-                    first = 0
-                }
-                gsub(/^[[:space:]]+/, "")
-                gsub(/:$/, "")
-                name = $0
-                vendor = ""
-                in_device = 1
-            }
-            /Manufacturer:/ {
-                gsub(/.*Manufacturer:[[:space:]]*/, "")
-                vendor = $0
-            }
-            END {
-                if (in_device && name != "" && (tolower(name) ~ /wacom|huion|xp-pen|tablet|intuos|cintiq|bamboo/)) {
-                    if (!first) printf ","
-                    printf "{\\"name\\": \\"%s\\", \\"vendor\\": \\"%s\\"}", name, vendor
-                }
-            }
-            '
-            
-            echo "]"
-            """
-        
-        let result = try await executeWithFallback(osquery: nil, bash: bashScript)
-        
-        var tablets: [[String: Any]] = []
-        if let items = result["items"] as? [[String: Any]] {
-            tablets = items
+
+    // MARK: - HID enumeration
+
+    /// One HID device as the I/O registry describes it.
+    ///
+    /// Classification is by HID usage - what the device tells the OS it is - rather
+    /// than by matching words in its product name. A keyboard is a keyboard because
+    /// it publishes Generic Desktop / Keyboard, whatever it happens to be called.
+    private struct HidDevice {
+        let name: String
+        let vendor: String
+        let vendorId: String
+        let productId: String
+        let transport: String
+        /// Every usage pair the device publishes, not only the primary one: a
+        /// composite device puts its keyboard, pointer and digitizer collections on
+        /// one node, and the primary pair names only the first of them.
+        let usages: [(page: Int, usage: Int)]
+
+        // HID usage tables: page 0x01 Generic Desktop, page 0x0D Digitizer.
+        private func has(page: Int, _ usage: Int) -> Bool {
+            usages.contains { $0.page == page && $0.usage == usage }
         }
-        
-        return tablets.map { tablet in
-            let name = tablet["name"] as? String ?? "Graphics Tablet"
-            let vendor = tablet["vendor"] as? String ?? ""
-            
-            var tabletType = "Graphics Tablet"
-            if name.lowercased().contains("cintiq") || name.lowercased().contains("display") {
-                tabletType = "Pen Display"
-            } else if name.lowercased().contains("intuos") || name.lowercased().contains("bamboo") {
-                tabletType = "Pen Tablet"
-            }
-            
-            return [
+
+        var isKeyboard: Bool { has(page: 0x01, 0x06) }
+        var isMouse: Bool { has(page: 0x01, 0x02) && !isTrackpad }
+        var isTrackpad: Bool { has(page: 0x0D, 0x05) }
+
+        /// Pen and digitizer collections, plus the tablet vendors whose devices do
+        /// not always publish a digitizer collection on the node ioreg reports.
+        var isGraphicsTablet: Bool {
+            if isTrackpad { return false }
+            if has(page: 0x0D, 0x01) || has(page: 0x0D, 0x02) { return true }
+            return PeripheralsModuleProcessor.tabletVendorIds.contains(vendorId.uppercased())
+        }
+
+        var isBuiltIn: Bool {
+            // Apple's internal keyboard and trackpad hang off the SPI or FIFO
+            // transports; anything on USB or Bluetooth is attached.
+            ["SPI", "FIFO"].contains(transport.uppercased())
+        }
+
+        var connectionType: String {
+            if isBuiltIn { return "Built-in" }
+            if transport.uppercased() == "BLUETOOTH" { return "Bluetooth" }
+            return transport
+        }
+
+        func asInputDevice(type: String) -> [String: Any] {
+            [
                 "name": name,
                 "vendor": vendor,
-                "connectionType": "USB",
-                "tabletType": tabletType,
-                "deviceType": "Graphics Tablet"
+                "vendorId": vendorId,
+                "productId": productId,
+                "isBuiltIn": isBuiltIn,
+                "connectionType": connectionType,
+                "deviceType": type
             ]
         }
+
+        func asTrackpad() -> [String: Any] {
+            var device = asInputDevice(type: "Trackpad")
+            device["supportsForcTouch"] = name.lowercased().contains("force touch")
+                || name.lowercased().contains("magic trackpad 2")
+            return device
+        }
+
+        func asGraphicsTablet() -> [String: Any] {
+            let lowered = name.lowercased()
+            var tabletType = "Graphics Tablet"
+            if lowered.contains("cintiq") || lowered.contains("display") {
+                tabletType = "Pen Display"
+            } else if lowered.contains("intuos") || lowered.contains("bamboo") {
+                tabletType = "Pen Tablet"
+            }
+
+            var device = asInputDevice(type: "Graphics Tablet")
+            device["tabletType"] = tabletType
+            return device
+        }
     }
+
+    /// USB vendor ids of the graphics-tablet makers we deploy, matching the Windows
+    /// client's table.
+    private static let tabletVendorIds: Set<String> = ["056A", "256C", "28BD", "5543"]
+
+    /// Enumerate HID devices from the I/O registry.
+    ///
+    /// This replaced four separate scrapes, three of which could not work:
+    /// `ioreg -r -c IOHIDKeyboard` and `-c IOHIDPointing` name legacy IOKit classes,
+    /// and the awk only emitted a record when `IOClass` was exactly that string -
+    /// which it never is, because the concrete class is always a subclass
+    /// (`AppleUserHIDKeyboard` and friends). Both returned nothing on every machine
+    /// in the fleet. Trackpads were grepped out of `system_profiler SPBluetoothDataType
+    /// SPUSBDataType`, which sees an external Magic Trackpad but never a built-in one.
+    ///
+    /// `ioreg -a` emits a plist, so this parses a documented format instead of
+    /// pattern-matching indented text.
+    private func collectHidDevices() async -> [HidDevice] {
+        let output: String
+        do {
+            output = try await BashService.execute("ioreg -a -r -c IOHIDDevice 2>/dev/null")
+        } catch {
+            ConsoleFormatter.writeWarning("Could not enumerate HID devices: \(error)")
+            return []
+        }
+
+        guard let data = output.data(using: .utf8), !data.isEmpty else { return [] }
+
+        let parsed = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+        guard let nodes = parsed as? [[String: Any]] else {
+            ConsoleFormatter.writeWarning("HID registry output was not a plist array")
+            return []
+        }
+
+        return nodes.compactMap { node in
+            // A node with no product name is a transport or container, not a device.
+            guard let name = (node["Product"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !name.isEmpty else { return nil }
+
+            var usages: [(page: Int, usage: Int)] = []
+            if let pairs = node["DeviceUsagePairs"] as? [[String: Any]] {
+                for pair in pairs {
+                    guard let page = (pair["DeviceUsagePage"] as? NSNumber)?.intValue,
+                          let usage = (pair["DeviceUsage"] as? NSNumber)?.intValue else { continue }
+                    usages.append((page: page, usage: usage))
+                }
+            }
+            if let page = (node["PrimaryUsagePage"] as? NSNumber)?.intValue,
+               let usage = (node["PrimaryUsage"] as? NSNumber)?.intValue,
+               !usages.contains(where: { $0.page == page && $0.usage == usage }) {
+                usages.append((page: page, usage: usage))
+            }
+            if usages.isEmpty { return nil }
+
+            // Real hardware always arrives through a transport driver that stamps
+            // the node (USB, Bluetooth, SPI, FIFO). Virtual HID devices - the Touch
+            // Bar's keyboard shim, Karabiner's DriverKit keyboard - report Transport
+            // "Virtual" or nothing at all, and would otherwise be counted as
+            // attached keyboards.
+            let transport = ((node["Transport"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if transport.isEmpty || transport.uppercased() == "VIRTUAL" { return nil }
+
+            return HidDevice(
+                name: name,
+                vendor: (node["Manufacturer"] as? String) ?? "",
+                vendorId: Self.hexId(node["VendorID"]),
+                productId: Self.hexId(node["ProductID"]),
+                transport: transport,
+                usages: usages
+            )
+        }
+    }
+
+    /// ioreg reports vendor and product ids as decimal integers; every other surface
+    /// in ReportMate carries them as four-digit hex, as they are written on the
+    /// device and in the Windows payload.
+    private static func hexId(_ value: Any?) -> String {
+        guard let number = value as? NSNumber else { return "" }
+        return String(format: "%04X", number.intValue)
+    }
+    
     
     // MARK: - Audio Devices
     
