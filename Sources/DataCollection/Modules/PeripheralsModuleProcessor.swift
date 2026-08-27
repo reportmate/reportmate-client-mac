@@ -321,7 +321,6 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
         var connectionType: String {
             if isBuiltIn { return "Built-in" }
             if transport.uppercased() == "BLUETOOTH" { return "Bluetooth" }
-            if transport.isEmpty { return "USB" }
             return transport
         }
 
@@ -412,12 +411,20 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
             }
             if usages.isEmpty { return nil }
 
+            // Real hardware always arrives through a transport driver that stamps
+            // the node (USB, Bluetooth, SPI, FIFO). Virtual HID devices - the Touch
+            // Bar's keyboard shim, Karabiner's DriverKit keyboard - report Transport
+            // "Virtual" or nothing at all, and would otherwise be counted as
+            // attached keyboards.
+            let transport = ((node["Transport"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if transport.isEmpty || transport.uppercased() == "VIRTUAL" { return nil }
+
             return HidDevice(
                 name: name,
                 vendor: (node["Manufacturer"] as? String) ?? "",
                 vendorId: Self.hexId(node["VendorID"]),
                 productId: Self.hexId(node["ProductID"]),
-                transport: (node["Transport"] as? String) ?? "",
+                transport: transport,
                 usages: usages
             )
         }
