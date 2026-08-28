@@ -200,9 +200,16 @@ public final class AppUsageDatabase: @unchecked Sendable {
         }
     }
     
-    /// Mark orphaned sessions (no end time) with unknown duration
-    /// Called at watcher startup to handle sessions from previous crashes
-    public func markOrphanedSessions() throws {
+    /// Close the sessions left open by a previous run, stamping them with the
+    /// unknown-duration sentinel. Called at watcher startup.
+    ///
+    /// `live` carries the sessions whose process is still running, established
+    /// by `reconcileWithRunningProcesses`. Those are not orphans: closing one
+    /// ends a run that has not ended, and the replacement session opened in its
+    /// place books a second launch for the same app-open and throws away the
+    /// reporting watermark. Reconciliation therefore runs first and its result
+    /// is passed here.
+    public func markOrphanedSessions(excluding live: Set<Int64> = []) throws {
         guard let db = db else {
             throw AppUsageDatabaseError.notInitialized
         }
@@ -210,51 +217,98 @@ public final class AppUsageDatabase: @unchecked Sendable {
         let formatter = ISO8601DateFormatter()
         let now = formatter.string(from: Date())
         
-        // Find all sessions with no end time and mark them with -1 duration (unknown)
-        let orphaned = sessions.filter(endTime == nil)
+        var orphaned = sessions.filter(endTime == nil)
+        if !live.isEmpty {
+            orphaned = orphaned.filter(!live.contains(id))
+        }
         try db.run(orphaned.update(
             endTime <- now,
             durationSeconds <- -1  // -1 indicates unknown/interrupted duration
         ))
     }
     
-    /// Reconcile with currently running processes at startup
-    /// Creates sessions for apps that were already running before watcher started
-    public func reconcileWithRunningProcesses(_ runningApps: [(bundleId: String?, name: String, path: String, user: String, pid: Int, startTime: Date)]) throws {
+    /// Reconcile the database with the applications running right now, and
+    /// return the ids of the sessions that describe them.
+    ///
+    /// Called at watcher startup, before the orphan sweep, so that a session
+    /// whose process survived the restart is carried forward instead of being
+    /// closed and replaced. An app the user never quit is one continuous
+    /// app-open: reopening it as a new session counts a second launch for it
+    /// and resets the reporting watermark, so every application running at the
+    /// moment of a reboot or a client upgrade inflated the launch count by one.
+    ///
+    /// Applications that were opened while the watcher was down have no session
+    /// yet and get one here, stamped with the real process start time.
+    @discardableResult
+    public func reconcileWithRunningProcesses(_ runningApps: [RunningApplication]) throws -> Set<Int64> {
         guard let db = db else {
             throw AppUsageDatabaseError.notInitialized
         }
         
         let formatter = ISO8601DateFormatter()
+        var live: Set<Int64> = []
         
         for app in runningApps {
-            // Check if we already have an active session for this PID
-            let existing = sessions
-                .filter(pid == Int64(app.pid))
-                .filter(endTime == nil)
-            
-            if try db.pluck(existing) == nil {
-                // No existing session, create one
-                let insert = sessions.insert(
-                    bundleId <- app.bundleId,
-                    appName <- app.name,
-                    path <- app.path,
-                    user <- app.user,
-                    self.pid <- Int64(app.pid),
-                    startTime <- formatter.string(from: app.startTime),
-                    endTime <- nil as String?,
-                    durationSeconds <- 0,
-                    foregroundSeconds <- 0,
-                    activeSeconds <- 0,
-                    reportedTotalSeconds <- 0,
-                    reportedForegroundSeconds <- 0,
-                    reportedActiveSeconds <- 0,
-                    reportedAt <- nil as String?,
-                    transmitted <- false
-                )
-                _ = try db.run(insert)
+            if let carried = try continuedSession(for: app, formatter: formatter, db: db) {
+                live.insert(carried)
+                continue
             }
+            
+            let insert = sessions.insert(
+                bundleId <- app.bundleId,
+                appName <- app.name,
+                path <- app.path,
+                user <- app.user,
+                self.pid <- Int64(app.pid),
+                startTime <- formatter.string(from: app.startTime ?? Date()),
+                endTime <- nil as String?,
+                durationSeconds <- 0,
+                foregroundSeconds <- 0,
+                activeSeconds <- 0,
+                reportedTotalSeconds <- 0,
+                reportedForegroundSeconds <- 0,
+                reportedActiveSeconds <- 0,
+                reportedAt <- nil as String?,
+                transmitted <- false
+            )
+            live.insert(try db.run(insert))
         }
+        
+        return live
+    }
+    
+    /// The open session already describing this process, if there is one.
+    ///
+    /// A PID alone does not identify a process — the kernel reuses numbers, so
+    /// a session left open by a machine that lost power can carry the same PID
+    /// as something unrelated after the reboot. Two further conditions settle
+    /// it: the bundle path must agree, and the session cannot have begun before
+    /// the process it claims to describe. `ps` reports whole seconds and
+    /// truncates, and a session is stamped no earlier than the launch
+    /// notification that follows the exec, so a genuine match always satisfies
+    /// `session.startTime >= process.startTime`.
+    ///
+    /// When the process start time could not be read the pair is matched on
+    /// PID and path alone. That is the weaker test, but the alternative —
+    /// treating the running app as new — is the double count this exists to
+    /// prevent.
+    private func continuedSession(
+        for app: RunningApplication,
+        formatter: ISO8601DateFormatter,
+        db: Connection
+    ) throws -> Int64? {
+        let candidates = sessions
+            .filter(pid == Int64(app.pid))
+            .filter(endTime == nil)
+            .filter(path == app.path)
+            .order(startTime.desc)
+        
+        guard let row = try db.pluck(candidates) else { return nil }
+        guard let processStart = app.startTime else { return row[id] }
+        guard let sessionStart = formatter.date(from: row[startTime]),
+              sessionStart >= processStart else { return nil }
+        
+        return row[id]
     }
     
     // MARK: - Query Methods
@@ -458,6 +512,31 @@ public final class AppUsageDatabase: @unchecked Sendable {
 }
 
 // MARK: - Supporting Types
+
+/// One application found running when the watcher starts.
+///
+/// `startTime` is the moment the kernel started the process, and is optional
+/// because it is read from `ps` and can fail. Nil means unknown rather than
+/// now: a session stamped with the current time for an app that has been open
+/// since Tuesday claims a launch on the wrong day, and reconciliation needs to
+/// tell "started just now" apart from "could not tell".
+public struct RunningApplication: Sendable {
+    public let bundleId: String?
+    public let name: String
+    public let path: String
+    public let user: String
+    public let pid: Int
+    public let startTime: Date?
+
+    public init(bundleId: String?, name: String, path: String, user: String, pid: Int, startTime: Date?) {
+        self.bundleId = bundleId
+        self.name = name
+        self.path = path
+        self.user = user
+        self.pid = pid
+        self.startTime = startTime
+    }
+}
 
 public struct AppUsageSessionRecord: Sendable {
     public let id: Int64
