@@ -289,6 +289,9 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
         let vendor: String
         let vendorId: String
         let productId: String
+        /// Hardware serial where the device publishes one. A pen display is a tracked
+        /// asset, so this is what lets one be identified rather than merely counted.
+        let serialNumber: String
         let transport: String
         /// Every usage pair the device publishes, not only the primary one: a
         /// composite device puts its keyboard, pointer and digitizer collections on
@@ -330,6 +333,7 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
                 "vendor": vendor,
                 "vendorId": vendorId,
                 "productId": productId,
+                "serialNumber": serialNumber,
                 "isBuiltIn": isBuiltIn,
                 "connectionType": connectionType,
                 "deviceType": type
@@ -424,6 +428,7 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
                 vendor: (node["Manufacturer"] as? String) ?? "",
                 vendorId: Self.hexId(node["VendorID"]),
                 productId: Self.hexId(node["ProductID"]),
+                serialNumber: ((node["SerialNumber"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
                 transport: transport,
                 usages: usages
             )
