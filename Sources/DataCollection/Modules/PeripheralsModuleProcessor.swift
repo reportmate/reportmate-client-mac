@@ -348,16 +348,13 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
         }
 
         func asGraphicsTablet() -> [String: Any] {
-            let lowered = name.lowercased()
-            var tabletType = "Graphics Tablet"
-            if lowered.contains("cintiq") || lowered.contains("display") {
-                tabletType = "Pen Display"
-            } else if lowered.contains("intuos") || lowered.contains("bamboo") {
-                tabletType = "Pen Tablet"
-            }
-
+            // What this entry describes is the pen digitizer, whether or not the same
+            // chassis also contains a panel. A pen display's screen is a display, and
+            // the hardware module already enumerates it from EDID with its real model
+            // name and its own serial. Each module reports what it actually collected,
+            // so this one does not infer a screen it never looked at.
             var device = asInputDevice(type: "Graphics Tablet")
-            device["tabletType"] = tabletType
+            device["tabletType"] = "Pen Input"
             return device
         }
     }
