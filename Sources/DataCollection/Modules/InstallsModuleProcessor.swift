@@ -222,6 +222,33 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         return nil
     }
     
+    /// Transient network conditions hit while downloading an installer.
+    ///
+    /// Munki records these in ProblemInstalls because the item could not be installed
+    /// on this run, but they are not install failures: nothing is wrong with the package
+    /// or the device, and Munki retries on the next run. They are routine on laptops that
+    /// sleep, roam between networks, or leave the campus network mid-download.
+    ///
+    /// This is deliberately an allowlist of known-transient conditions rather than a
+    /// `"Download failed:"` prefix match. Munki raises insufficient disk space through the
+    /// same `FetchError.download` case, so it carries the identical prefix while being a
+    /// real, actionable failure that must keep surfacing as an error. Anything not matched
+    /// here stays an error.
+    static func isTransientDownloadFailure(_ note: String) -> Bool {
+        guard note.hasPrefix("Download failed:") else { return false }
+        let lower = note.lowercased()
+        // NSURLError descriptions, as surfaced by Munki's FetchError description.
+        let transientConditions = [
+            "the network connection was lost",               // NSURLErrorNetworkConnectionLost (-1005)
+            "the request timed out",                         // NSURLErrorTimedOut (-1001)
+            "the internet connection appears to be offline",  // NSURLErrorNotConnectedToInternet (-1009)
+            "could not connect to the server",               // NSURLErrorCannotConnectToHost (-1004)
+            "a server with the specified hostname could not be found", // NSURLErrorCannotFindHost (-1003)
+            "network connection was interrupted",
+        ]
+        return transientConditions.contains { lower.contains($0) }
+    }
+
     /// Attach warnings and errors to their respective items using precise name extraction.
     /// Each raw message from Munki's Warnings[] / Errors[] plist arrays is matched to an item
     /// by extracting the exact item name from the message using known Munki patterns.
@@ -256,6 +283,18 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             let message = rawMessage.hasPrefix("ERROR: ") ? String(rawMessage.dropFirst(7)) : rawMessage
             guard !message.isEmpty else { continue }
             if let idx = findItem(for: message) {
+                // A transient download failure is not an install failure — the item is
+                // still pending and Munki retries next run. Record it as a warning so it
+                // stays visible without counting against the device.
+                if isTransientDownloadFailure(message) {
+                    if result[idx].lastWarning.isEmpty {
+                        result[idx].lastWarning = message
+                    }
+                    if result[idx].pendingReason.isEmpty {
+                        result[idx].pendingReason = message
+                    }
+                    continue
+                }
                 if result[idx].lastError.isEmpty {
                     result[idx].lastError = message
                 }
@@ -795,8 +834,14 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 item.status = result.status == 0 ? "removed" : "install_failed"
                 if !result.time.isEmpty { item.endTime = result.time }
             } else if let note = problemInstallsMap[name] {
-                item.status = "install_failed"
-                if !note.isEmpty { item.lastError = note }
+                if Self.isTransientDownloadFailure(note) {
+                    // Still wanted, just not downloaded yet — Munki retries next run.
+                    item.status = "pending_install"
+                    item.lastWarning = note
+                } else {
+                    item.status = "install_failed"
+                    if !note.isEmpty { item.lastError = note }
+                }
             } else if itemsToRemoveNames.contains(name) {
                 item.status = "pending_removal"
             } else if installed {
@@ -923,6 +968,9 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             return "Uninstalled"
             
         case "pending_install":
+            // A transient download failure explains the pending state better than
+            // "Not yet installed" — surface it rather than the generic reason.
+            if !item.lastWarning.isEmpty { return item.lastWarning }
             if installedVersion.isEmpty {
                 return "Not yet installed"
             }
