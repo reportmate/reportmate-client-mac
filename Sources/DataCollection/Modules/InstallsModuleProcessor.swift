@@ -229,6 +229,14 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     /// or the device, and Munki retries on the next run. They are routine on laptops that
     /// sleep, roam between networks, or leave the campus network mid-download.
     ///
+    /// Text-based fallback, used alongside Munki's `download_error_is_transient`.
+    /// That key is the better signal — Munki derives it from the NSURLError code
+    /// rather than the localized description — and a `true` there is enough on its
+    /// own. This still runs when the key is absent (older Munki) or `false`, since
+    /// Munki loses the original code on its catch-all path and rethrows as
+    /// `.download(errorCode: -1, ...)`, which can carry a genuinely transient
+    /// description. Either signal saying "transient" is treated as transient.
+    ///
     /// This is deliberately an allowlist of known-transient conditions rather than a
     /// `"Download failed:"` prefix match. Munki raises insufficient disk space through the
     /// same `FetchError.download` case, so it carries the identical prefix while being a
@@ -773,11 +781,19 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             removalResultsMap[name] = (status: status, time: timeStr)
         }
         
-        // Build lookup: ProblemInstalls name → note (error detail)
+        // Build lookup: ProblemInstalls name → note (error detail), plus the set of
+        // items Munki itself flagged as a transient network failure. Munki records
+        // download_error_is_transient from the NSURLError code, which is a far more
+        // reliable signal than reading the localized description; older clients
+        // don't emit it, so the text heuristic remains as a fallback.
         var problemInstallsMap: [String: String] = [:]
+        var munkiTransientNames = Set<String>()
         for item in problemInstalls {
             guard let name = item["name"] as? String else { continue }
             problemInstallsMap[name] = item["note"] as? String ?? ""
+            if item["download_error_is_transient"] as? Bool == true {
+                munkiTransientNames.insert(name)
+            }
         }
         
         // Build sets for pending items
@@ -834,7 +850,7 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 item.status = result.status == 0 ? "removed" : "install_failed"
                 if !result.time.isEmpty { item.endTime = result.time }
             } else if let note = problemInstallsMap[name] {
-                if Self.isTransientDownloadFailure(note) {
+                if munkiTransientNames.contains(name) || Self.isTransientDownloadFailure(note) {
                     // Still wanted, just not downloaded yet — Munki retries next run.
                     item.status = "pending_install"
                     item.lastWarning = note
