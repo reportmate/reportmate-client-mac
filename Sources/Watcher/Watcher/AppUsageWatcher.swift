@@ -29,6 +29,10 @@ public final class AppUsageWatcher: @unchecked Sendable {
     // than the safety-net retention, independent of the transmit/confirm path.
     private var pruneTimer: DispatchSourceTimer?
     private static let pruneInterval: TimeInterval = 86_400
+
+    // Time budget for a `ps` invocation. Nothing the watcher runs should be
+    // able to block its startup indefinitely.
+    private static let psTimeout: TimeInterval = 15
     
     // MARK: - Initialization
     
@@ -305,28 +309,27 @@ public final class AppUsageWatcher: @unchecked Sendable {
     /// them. Called at startup to pick up apps that were already open.
     @discardableResult
     private func reconcileRunningApps() throws -> Set<Int64> {
-        let runningApps = NSWorkspace.shared.runningApplications
-        var appsToReconcile: [RunningApplication] = []
-        
-        for app in runningApps {
+        let trackable = NSWorkspace.shared.runningApplications.compactMap { app -> (NSRunningApplication, URL)? in
             guard let bundleURL = app.bundleURL,
                   isTrackableApplication(bundleURL: bundleURL) else {
-                continue
+                return nil
             }
-            
-            let bundleId = app.bundleIdentifier
-            let appName = app.localizedName ?? bundleURL.deletingPathExtension().lastPathComponent
-            let path = bundleURL.path
+            return (app, bundleURL)
+        }
+        
+        // One `ps` for the whole set, before the loop, rather than two inside it.
+        let details = processDetails(pids: trackable.map { Int($0.0.processIdentifier) })
+        
+        var appsToReconcile: [RunningApplication] = []
+        for (app, bundleURL) in trackable {
             let pid = Int(app.processIdentifier)
-            let user = processOwner(pid: pid) ?? NSUserName()
-
             appsToReconcile.append(RunningApplication(
-                bundleId: bundleId,
-                name: appName,
-                path: path,
-                user: user,
+                bundleId: app.bundleIdentifier,
+                name: app.localizedName ?? bundleURL.deletingPathExtension().lastPathComponent,
+                path: bundleURL.path,
+                user: details[pid]?.user ?? NSUserName(),
                 pid: pid,
-                startTime: getProcessStartTime(pid: pid)
+                startTime: details[pid]?.startTime
             ))
         }
         
@@ -335,70 +338,126 @@ public final class AppUsageWatcher: @unchecked Sendable {
         return live
     }
     
-    /// The user a running process belongs to, or nil if it can't be determined.
+    /// Owner and start time for a set of PIDs, read in a single `ps` call.
     ///
     /// The watcher runs as a root LaunchDaemon, so `NSUserName()` reports the
     /// daemon's own identity rather than the person at the keyboard. Reading the
     /// owner from the observed process attributes each session to the right user
     /// and stays correct across fast user switching. The uid is read rather than
     /// `ps -o user=`, which truncates usernames past eight characters.
-    private func processOwner(pid: Int) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-o", "uid=", "-p", "\(pid)"]
+    ///
+    /// One invocation, not two per application. Startup asked `ps` twice for
+    /// every running app -- roughly 134 spawns for 67 applications, 29 seconds
+    /// on a real machine -- and the watcher sees nothing at all until it
+    /// finishes, so every app opened in that window lost its launch.
+    private func processDetails(pids: [Int]) -> [Int: (user: String?, startTime: Date?)] {
+        guard !pids.isEmpty else { return [:] }
 
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
+        let list = pids.map(String.init).joined(separator: ",")
+        guard let output = runPS(arguments: ["-o", "pid=,uid=,lstart=", "-p", list]) else {
+            return [:]
+        }
 
-        do {
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
+        // "Day Mon DD HH:MM:SS YYYY", with the day of month space-padded. The
+        // padding collapses because the line is split on whitespace runs.
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
 
-            guard let output = String(data: data, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                  let uid = uid_t(output),
-                  let entry = getpwuid(uid) else {
-                return nil
+        var details: [Int: (user: String?, startTime: Date?)] = [:]
+        for line in output.split(separator: "\n") {
+            let fields = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard fields.count >= 3, let pid = Int(fields[0]) else { continue }
+
+            var user: String? = nil
+            if let uid = uid_t(fields[1]), let entry = getpwuid(uid) {
+                let name = String(cString: entry.pointee.pw_name)
+                user = name.isEmpty ? nil : name
             }
 
-            let name = String(cString: entry.pointee.pw_name)
-            return name.isEmpty ? nil : name
-        } catch {
-            logger.debug("Could not resolve owner of PID \(pid): \(error)")
-            return nil
+            let started = formatter.date(from: fields[2...].joined(separator: " "))
+            details[pid] = (user: user, startTime: started)
         }
+
+        return details
     }
 
-    /// Get process start time using ps command
-    private func getProcessStartTime(pid: Int) -> Date? {
+    /// The user a running process belongs to, or nil if it can't be determined.
+    private func processOwner(pid: Int) -> String? {
+        processDetails(pids: [pid])[pid]?.user
+    }
+
+    /// Run `ps` under a time budget, returning nil if it does not finish.
+    ///
+    /// The collection path routes external commands through `ProcessRunner`,
+    /// which carries a timeout; the Watcher is a separate executable target and
+    /// cannot reach it without making Core a library, so the two properties
+    /// that matter are reproduced here. Output drains on its own queue, and the
+    /// deadline is a semaphore rather than a read reaching EOF -- a wedged `ps`
+    /// used to hang watcher startup with nothing to stop it.
+    private func runPS(arguments: [String], timeout: TimeInterval = AppUsageWatcher.psTimeout) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-o", "lstart=", "-p", "\(pid)"]
-        
+        process.arguments = arguments
+
+        // `ps` formats lstart through LC_TIME, so an inherited locale changes
+        // the field order -- en_CA prints "Tue 25 Aug", which the month-first
+        // parser below reads as nothing at all. launchd starts the watcher with
+        // no locale set, so the daemon already gets the C ordering; pinning it
+        // keeps the same result when the binary is run by hand from a shell.
+        var environment = ProcessInfo.processInfo.environment
+        environment["LC_ALL"] = "C"
+        environment["LANG"] = "C"
+        process.environment = environment
+
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
-        
+
         do {
             try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            
-            guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !output.isEmpty else {
-                return nil
-            }
-            
-            // Parse "Day Mon DD HH:MM:SS YYYY" format
-            let formatter = DateFormatter()
-            formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            
-            return formatter.date(from: output)
         } catch {
+            logger.debug("Could not run ps \(arguments.joined(separator: " ")): \(error)")
             return nil
+        }
+
+        let collected = OutputBox()
+        let drained = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            collected.store(pipe.fileHandleForReading.readDataToEndOfFile())
+            drained.signal()
+        }
+
+        if drained.wait(timeout: .now() + timeout) == .timedOut {
+            logger.warning("ps exceeded its \(Int(timeout))s budget; continuing without it")
+            process.terminate()
+            if drained.wait(timeout: .now() + 2) == .timedOut, process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
+            return nil
+        }
+
+        process.waitUntilExit()
+        return String(data: collected.value, encoding: .utf8)
+    }
+
+    /// Hands the drained output back from the reader queue. The read has to
+    /// happen off the calling thread so the deadline below does not depend on
+    /// it, which means the buffer crosses a concurrency boundary.
+    private final class OutputBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func store(_ new: Data) {
+            lock.lock()
+            data = new
+            lock.unlock()
+        }
+
+        var value: Data {
+            lock.lock()
+            defer { lock.unlock() }
+            return data
         }
     }
     
