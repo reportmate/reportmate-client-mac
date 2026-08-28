@@ -610,9 +610,27 @@ public class ApplicationUsageService: @unchecked Sendable {
                 continue
             }
 
+            // The counters are accumulated on different clocks, so the
+            // increments have to be put back in order before they are sent.
+            // Foreground is charged a whole tick at a time, and a tick that
+            // straddles the watermark instant contributes all of its interval
+            // to the window that reads it while only the part after the
+            // watermark is inside that window's wall clock. Total is measured
+            // as wall clock, so foreground can land above it — an application
+            // on screen for longer than it existed, which the fleet showed once
+            // in 1,375 rows, over by 16.7 s against a 30 s tick.
+            //
+            // Active is bounded by foreground for the same reason and by
+            // construction: the watcher charges active seconds only for the tick
+            // it also charged as foreground.
+            //
+            // The excess is dropped rather than deferred. The watermark advances
+            // to the counters actually observed, not to the clamped figures, so
+            // at most one tick per session per cycle goes unreported and nothing
+            // compounds.
             let total = max(0, observedTotalSeconds(of: session) - session.reportedTotalSeconds)
-            let foreground = max(0, session.foregroundSeconds - session.reportedForegroundSeconds)
-            let active = max(0, session.activeSeconds - session.reportedActiveSeconds)
+            let foreground = min(total, max(0, session.foregroundSeconds - session.reportedForegroundSeconds))
+            let active = min(foreground, max(0, session.activeSeconds - session.reportedActiveSeconds))
             guard total > 0 || foreground > 0 || active > 0 else { continue }
 
             for (dateStr, share) in daySpans(from: windowStart, to: windowEnd, formatter: dateFormatter) {
