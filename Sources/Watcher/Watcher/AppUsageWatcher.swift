@@ -55,16 +55,17 @@ public final class AppUsageWatcher: @unchecked Sendable {
         // Initialize database
         try database.initialize()
         
-        // Mark any orphaned sessions from previous run
-        try database.markOrphanedSessions()
+        // Reconcile before sweeping. An application still running is one
+        // continuous app-open, so its session has to survive the sweep with its
+        // launch and its reporting watermark intact; only the sessions with no
+        // process behind them any more are orphans.
+        let live = try reconcileRunningApps()
+        try database.markOrphanedSessions(excluding: live)
         logger.info("Marked orphaned sessions from previous run")
 
         // Prune expired sessions once at startup, then daily via timer
         runRetentionSweep()
         startPruneTimer()
-
-        // Reconcile with currently running apps
-        try reconcileRunningApps()
         
         // Set up workspace notifications
         setupNotificationObservers()
@@ -299,11 +300,13 @@ public final class AppUsageWatcher: @unchecked Sendable {
 
     // MARK: - Reconciliation
     
-    /// Reconcile database with currently running applications
-    /// Called at startup to capture apps that were already running
-    private func reconcileRunningApps() throws {
+    /// Reconcile the database with the applications running right now, and
+    /// return the sessions that describe them so the orphan sweep can spare
+    /// them. Called at startup to pick up apps that were already open.
+    @discardableResult
+    private func reconcileRunningApps() throws -> Set<Int64> {
         let runningApps = NSWorkspace.shared.runningApplications
-        var appsToReconcile: [(bundleId: String?, name: String, path: String, user: String, pid: Int, startTime: Date)] = []
+        var appsToReconcile: [RunningApplication] = []
         
         for app in runningApps {
             guard let bundleURL = app.bundleURL,
@@ -317,21 +320,19 @@ public final class AppUsageWatcher: @unchecked Sendable {
             let pid = Int(app.processIdentifier)
             let user = processOwner(pid: pid) ?? NSUserName()
 
-            // Try to get actual start time from process info
-            let startTime = getProcessStartTime(pid: pid) ?? Date()
-            
-            appsToReconcile.append((
+            appsToReconcile.append(RunningApplication(
                 bundleId: bundleId,
                 name: appName,
                 path: path,
                 user: user,
                 pid: pid,
-                startTime: startTime
+                startTime: getProcessStartTime(pid: pid)
             ))
         }
         
-        try database.reconcileWithRunningProcesses(appsToReconcile)
+        let live = try database.reconcileWithRunningProcesses(appsToReconcile)
         logger.info("Reconciled \(appsToReconcile.count) running applications")
+        return live
     }
     
     /// The user a running process belongs to, or nil if it can't be determined.
