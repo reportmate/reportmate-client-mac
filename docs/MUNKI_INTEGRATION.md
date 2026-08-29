@@ -40,12 +40,11 @@ if [ -d "/usr/local/munki" ]; then
            /usr/local/munki/postflight.d/00-original.sh
     fi
     
-    # 3. Install wrapper as new postflight
-    cp Resources/munki/postflight-wrapper /usr/local/munki/postflight
+    # 3. Write the wrapper as the new postflight
+    cat > /usr/local/munki/postflight << 'EOF' ... EOF
     
-    # 4. Install ReportMate script
-    cp Resources/munki/reportmate.sh \
-       /usr/local/munki/postflight.d/reportmate.sh
+    # 4. Write the ReportMate script
+    cat > /usr/local/munki/postflight.d/reportmate.sh << 'EOF' ... EOF
 fi
 ```
 
@@ -85,7 +84,7 @@ graph TD
 - Logs execution to `/Library/Managed Reports/logs/munki-postflight.log`
 - Non-blocking: failure in one script doesn't prevent others from running
 
-**Source:** Bundled in `Managed Reports Runner.app/Contents/Resources/munki/postflight-wrapper`
+**Source:** Emitted by the package postinstall (see `build.sh`), so a reinstall always recreates it.
 
 #### 00-original.sh (MunkiReport)
 
@@ -109,7 +108,7 @@ graph TD
 **What it does:**
 ```bash
 # Run installs module (collects AND transmits)
-/usr/local/reportmate/managedreportsrunner --run-module installs
+"/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner" --run-modules installs
 ```
 
 **Data collected:**
@@ -120,7 +119,7 @@ graph TD
 - Homebrew packages
 - App Store apps
 
-**Source:** Bundled in `Managed Reports Runner.app/Contents/Resources/munki/reportmate.sh`
+**Source:** Emitted by the package postinstall (see `build.sh`), so a reinstall always recreates it.
 
 ## Coexistence Benefits
 
