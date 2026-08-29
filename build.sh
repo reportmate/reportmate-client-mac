@@ -1037,23 +1037,6 @@ EOF
 EOF
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # MUNKI POSTFLIGHT RESOURCES
-    # ═══════════════════════════════════════════════════════════════════════════
-    
-    MUNKI_RESOURCES_SRC="${BUILD_DIR}/resources/munki"
-    MUNKI_RESOURCES_DST="${APP_RESOURCES}/munki"
-    
-    if [ -d "$MUNKI_RESOURCES_SRC" ]; then
-        log_info "Bundling Munki postflight integration scripts..."
-        mkdir -p "$MUNKI_RESOURCES_DST"
-        cp "$MUNKI_RESOURCES_SRC"/* "$MUNKI_RESOURCES_DST/"
-        chmod 755 "$MUNKI_RESOURCES_DST"/*
-        log_success "Munki postflight scripts bundled"
-    else
-        log_warn "Munki resources not found at: $MUNKI_RESOURCES_SRC"
-    fi
-
-    # ═══════════════════════════════════════════════════════════════════════════
     # APP ICON (Liquid Glass / Tahoe icon pipeline for macOS Sequoia+)
     # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1366,7 +1349,6 @@ echo "/usr/local/reportmate" > /etc/paths.d/reportmate 2>/dev/null
 MUNKI_DIR="/usr/local/munki"
 POSTFLIGHT_D="${MUNKI_DIR}/postflight.d"
 POSTFLIGHT="${MUNKI_DIR}/postflight"
-MUNKI_RESOURCES="${APP_ROOT}/Resources/munki"
 
 # Only install if Munki is present
 if [ -d "$MUNKI_DIR" ]; then
@@ -1411,22 +1393,93 @@ if [ -d "$MUNKI_DIR" ]; then
         fi
     fi
     
-    # Install wrapper postflight (implements .d/ directory iteration)
-    if [ -f "${MUNKI_RESOURCES}/postflight-wrapper" ]; then
-        log_message "Installing postflight wrapper..."
-        cp "${MUNKI_RESOURCES}/postflight-wrapper" "$POSTFLIGHT"
-        chmod 755 "$POSTFLIGHT"
-        chown root:wheel "$POSTFLIGHT"
+    # Write the wrapper postflight (implements .d/ directory iteration). The
+    # scripts are emitted here rather than copied from the app bundle so the
+    # package can always recreate the hook -- a receipt says nothing about a
+    # script-authored file, and the hook has been lost to other packages' cleanups.
+    log_message "Installing postflight wrapper..."
+    cat > "$POSTFLIGHT" << 'WRAPPER_EOF'
+#!/bin/bash
+# ReportMate postflight wrapper
+# Deployed by: ReportMate macOS Client
+#
+# Munki honours a single /usr/local/munki/postflight. This wrapper runs every
+# executable in /usr/local/munki/postflight.d/ in name order, passing Munki's
+# runtype through, so several tools can share the slot (10-munkireport.sh,
+# reportmate.sh, ...). One script failing never stops the others.
+
+RUNTYPE="${1:-}"
+POSTFLIGHT_D="/usr/local/munki/postflight.d"
+LOG_DIR="/Library/Managed Reports/logs"
+LOG="${LOG_DIR}/munki-postflight.log"
+
+mkdir -p "$LOG_DIR" 2>/dev/null
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG" 2>/dev/null; }
+
+log "Munki postflight started (runtype: ${RUNTYPE:-none})"
+if [ ! -d "$POSTFLIGHT_D" ]; then
+    log "No postflight.d directory; nothing to run"
+    exit 0
+fi
+
+count=0
+for script in "$POSTFLIGHT_D"/*; do
+    [ -f "$script" ] || continue
+    name=$(basename "$script")
+    case "$name" in .*) continue ;; esac
+    if [ ! -x "$script" ]; then
+        log "Skipping non-executable: $name"
+        continue
     fi
-    
-    # Install ReportMate postflight script
-    if [ -f "${MUNKI_RESOURCES}/reportmate.sh" ]; then
-        log_message "Installing ReportMate postflight script..."
-        cp "${MUNKI_RESOURCES}/reportmate.sh" "${POSTFLIGHT_D}/reportmate.sh"
-        chmod 755 "${POSTFLIGHT_D}/reportmate.sh"
-        chown root:wheel "${POSTFLIGHT_D}/reportmate.sh"
+    # A copy of this wrapper inside the directory it orchestrates would recurse forever
+    if grep -q "ReportMate postflight wrapper" "$script" 2>/dev/null; then
+        log "Skipping wrapper copy: $name"
+        continue
     fi
-    
+    count=$((count + 1))
+    log "Running: $name"
+    if "$script" "$RUNTYPE" >> "$LOG" 2>&1; then
+        log "  $name completed successfully"
+    else
+        log "  $name exited $? (continuing)"
+    fi
+done
+log "Munki postflight completed ($count script(s))"
+exit 0
+WRAPPER_EOF
+    chmod 755 "$POSTFLIGHT"
+    chown root:wheel "$POSTFLIGHT"
+
+    # Write the ReportMate postflight.d script: collect and transmit the installs
+    # module after every Munki run. This is the only scheduled path for installs.
+    log_message "Installing ReportMate postflight script..."
+    cat > "${POSTFLIGHT_D}/reportmate.sh" << 'REPORTMATE_EOF'
+#!/bin/bash
+# ReportMate installs-module postflight
+# Deployed by: ReportMate macOS Client
+#
+# Runs after every managedsoftwareupdate so the installs module reflects the run
+# that just finished. Invoked by the postflight wrapper with Munki's runtype.
+
+RUNNER="/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner"
+[ -x "$RUNNER" ] || RUNNER="/usr/local/reportmate/managedreportsrunner"
+LOG_DIR="/Library/Managed Reports/logs"
+LOG="${LOG_DIR}/reportmate-munki-postflight.log"
+mkdir -p "$LOG_DIR" 2>/dev/null
+stamp() { date '+%Y-%m-%d %H:%M:%S'; }
+
+echo "[$(stamp)] Munki run finished (runtype: ${1:-none}); collecting installs" >> "$LOG"
+if [ -x "$RUNNER" ]; then
+    "$RUNNER" --run-modules installs >> "$LOG" 2>&1
+    echo "[$(stamp)] installs module exited $?" >> "$LOG"
+else
+    echo "[$(stamp)] managedreportsrunner not found; skipping" >> "$LOG"
+fi
+exit 0
+REPORTMATE_EOF
+    chmod 755 "${POSTFLIGHT_D}/reportmate.sh"
+    chown root:wheel "${POSTFLIGHT_D}/reportmate.sh"
+
     log_message "Munki postflight integration installed"
 else
     log_message "Munki not detected, skipping postflight integration"
