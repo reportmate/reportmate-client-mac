@@ -796,12 +796,13 @@ struct ReportMateClient: AsyncParsableCommand {
                 eventType: "success",
                 message: message,
                 timestamp: Date(),
-                stringDetails: newlyInstalledItems.count <= 5
-                    ? Dictionary(uniqueKeysWithValues: newlyInstalledItems.compactMap { item -> (String, String)? in
-                        guard let name = item["name"] else { return nil }
-                        return (name, item["version"] ?? "")
-                      })
-                    : ["count": String(newlyInstalledItems.count)]
+                // The package list is what the event is for. Runs of more than five used
+                // to send only a count, which left "13 packages installed" with nothing
+                // to expand into on the dashboard.
+                stringDetails: Dictionary(uniqueKeysWithValues: newlyInstalledItems.compactMap { item -> (String, String)? in
+                    guard let name = item["name"] else { return nil }
+                    return (name, item["version"] ?? "")
+                }).merging(["count": String(newlyInstalledItems.count)]) { current, _ in current }
             ))
         }
         
