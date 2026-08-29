@@ -24,7 +24,15 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let homebrew = try await collectHomebrewPackages()
         
         ConsoleFormatter.writeQueryProgress(queryName: "munki_log", current: 3, total: totalSteps)
-        let runLog = try await collectMunkiRunLog()
+        // Newer Munki builds write structured session reports; when present they replace the
+        // log slicing and the regex attribution below, and the legacy plist path is untouched.
+        let sessionReports = MunkiSessionReportReader.read()
+        let runLog: String
+        if let reports = sessionReports, !reports.runLog.isEmpty {
+            runLog = reports.runLog
+        } else {
+            runLog = try await collectMunkiRunLog()
+        }
 
         ConsoleFormatter.writeQueryProgress(queryName: "munki_info", current: 4, total: totalSteps)
         let info = try await collectMunkiInfo(runLog: runLog)
@@ -155,10 +163,15 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             } ?? [:]
         ]
         
-        // Inject newly installed items info for event message generation
+        // Inject newly installed/removed items info for event message generation
         if var munkiDict = installsData["munki"] as? [String: Any] {
             munkiDict["newlyInstalledCount"] = info["newlyInstalledCount"] as? Int ?? 0
             munkiDict["newlyInstalledItems"] = info["newlyInstalledItems"] as? [[String: String]] ?? []
+            munkiDict["newlyRemovedCount"] = info["newlyRemovedCount"] as? Int ?? 0
+            munkiDict["newlyRemovedItems"] = info["newlyRemovedItems"] as? [[String: String]] ?? []
+            if let reports = sessionReports {
+                munkiDict = Self.applySessionReports(reports, to: munkiDict)
+            }
             installsData["munki"] = munkiDict
         }
         
@@ -170,6 +183,85 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         return BaseModuleData(moduleId: moduleId, data: installsData)
     }
     
+    // MARK: - Structured session reports (newer Munki builds)
+
+    /// Merges Munki's session reports into the `munki` payload using the field names the
+    /// Windows client sends for Cimian, so the dashboard reads both platforms the same way.
+    /// Sessions stay snake_case as written; events and items are camelCase.
+    static func applySessionReports(_ reports: MunkiSessionReports, to munki: [String: Any]) -> [String: Any] {
+        var dict = munki
+        dict["sessions"] = Array(reports.sessions.prefix(20))
+        dict["events"] = reports.events.map { event -> [String: Any] in
+            var e = MunkiSessionReportReader.camelCased(event)
+            // Windows names these `package` and `version` on the wire.
+            if let name = event["package_name"] { e["package"] = name }
+            if let version = event["package_version"] { e["version"] = version }
+            return e
+        }
+        dict["totalSessions"] = reports.totalSessions
+        if let id = reports.sessionId { dict["sessionId"] = id }
+        if let runType = reports.runType { dict["runType"] = runType }
+        if let duration = reports.durationSeconds { dict["durationSeconds"] = duration }
+        if let status = reports.status { dict["lastSessionStatus"] = status }
+        dict["warningItems"] = reports.warningItems
+        dict["errorItems"] = reports.errorItems
+        if let version = reports.environment["munki_version"] as? String, !version.isEmpty,
+           (dict["version"] as? String ?? "").isEmpty
+        {
+            dict["version"] = version
+        }
+        if let clientId = reports.environment["client_identifier"] as? String, !clientId.isEmpty, dict["clientIdentifier"] == nil {
+            dict["clientIdentifier"] = clientId
+        }
+
+        // Per-item fields from items.json, keyed by exact name. lastError / lastWarning
+        // from the report replace the regex attribution when present.
+        var byName: [String: [String: Any]] = [:]
+        for record in reports.items {
+            if let name = record["item_name"] as? String { byName[name] = record }
+        }
+        var errorByName: [String: String] = [:]
+        for problem in reports.errorItems {
+            if let name = problem["name"] as? String, let message = problem["message"] as? String, errorByName[name] == nil {
+                errorByName[name] = message
+            }
+        }
+        var warningByName: [String: String] = [:]
+        for problem in reports.warningItems {
+            if let name = problem["name"] as? String, let message = problem["message"] as? String, warningByName[name] == nil {
+                warningByName[name] = message
+            }
+        }
+        if let items = dict["items"] as? [[String: Any]] {
+            dict["items"] = items.map { item -> [String: Any] in
+                var i = item
+                let name = item["name"] as? String ?? ""
+                if let record = byName[name] {
+                    i["itemName"] = record["item_name"]
+                    i["itemType"] = record["item_type"]
+                    i["currentStatus"] = record["current_status"]
+                    i["mappedStatus"] = record["current_status"]
+                    i["latestVersion"] = record["latest_version"]
+                    i["lastSeenInSession"] = record["last_seen_in_session"] ?? ""
+                    i["lastAttemptTime"] = record["last_attempt_time"] ?? ""
+                    i["lastAttemptStatus"] = record["last_attempt_status"] ?? ""
+                    i["lastUpdate"] = record["last_update"] ?? ""
+                    i["failureCount"] = record["failure_count"] ?? 0
+                    i["warningCount"] = record["warning_count"] ?? 0
+                    i["installCount"] = 0
+                    if let action = record["action_performed"] { i["actionPerformed"] = action }
+                    if let installed = record["installed_version"] as? String, !installed.isEmpty { i["installedVersion"] = installed }
+                    if let lastError = record["last_error"] as? String, !lastError.isEmpty { i["lastError"] = lastError }
+                    if let lastWarning = record["last_warning"] as? String, !lastWarning.isEmpty { i["lastWarning"] = lastWarning }
+                }
+                if let message = errorByName[name] { i["lastError"] = message }
+                if let message = warningByName[name], (i["lastError"] as? String ?? "").isEmpty { i["lastWarning"] = message }
+                return i
+            }
+        }
+        return dict
+    }
+
     // MARK: - Per-item message consolidation (precise regex extraction)
     
     /// Known Munki warning/error message patterns with a capture group for the exact item name.
