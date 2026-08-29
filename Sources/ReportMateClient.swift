@@ -455,6 +455,27 @@ struct ReportMateClient: AsyncParsableCommand {
             events.append(summaryEvent)
         }
         
+        // Report osquery health. A run where osquery is unusable still produces a
+        // well-formed payload -- every module falls back to bash and the sparse
+        // ones return nothing -- so without this the device looks healthy in the
+        // UI while reporting almost nothing. Emit it as an event so the failure
+        // is visible on the device timeline rather than inferred from blank cards.
+        let osqueryHealth = await OSQueryHealth.shared.snapshot()
+        if osqueryHealth.isDegraded {
+            events.append(ReportMateEvent(
+                moduleId: "collection",
+                eventType: osqueryHealth.isCritical ? "error" : "warning",
+                message: osqueryHealth.summary,
+                timestamp: Date(),
+                stringDetails: osqueryHealth.details
+            ))
+            if osqueryHealth.isCritical {
+                logger.error("\(osqueryHealth.summary)")
+            } else {
+                logger.warning("\(osqueryHealth.summary)")
+            }
+        }
+
         // Create UnifiedDevicePayload matching Windows format for API
         let unifiedPayload = UnifiedDevicePayload(
             metadata: metadata,
