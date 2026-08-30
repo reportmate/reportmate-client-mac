@@ -1,4 +1,5 @@
 import Foundation
+import Yams
 
 /// Installs module processor - uses osquery first with bash fallback
 /// Supports both Munki (macOS) and Cimian (cross-platform) managed installs
@@ -1105,7 +1106,8 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     /// Munki catalogs are root-level arrays of pkgsinfo dicts and can be 10-50 MB;
     /// shell-based approaches (PlistBuddy loops, plutil | JSON pipe) are too slow.
     private func collectCatalogMetadata() async throws -> [String: (category: String, developer: String)] {
-        let catalogsPath = "/Library/Managed Installs/catalogs"
+        // Overridable so the parser can be exercised against arbitrary catalogs.
+        let catalogsPath = ProcessInfo.processInfo.environment["REPORTMATE_CATALOGS_DIR"] ?? "/Library/Managed Installs/catalogs"
         var metadata: [String: (category: String, developer: String)] = [:]
         
         guard FileManager.default.fileExists(atPath: catalogsPath),
@@ -1119,9 +1121,17 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             let catalogPath = "\(catalogsPath)/\(catalogFile)"
             let url = URL(fileURLWithPath: catalogPath)
             
-            guard let data = try? Data(contentsOf: url),
-                  let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
-                  let items = plist as? [[String: Any]] else {
+            // Munki repos carry catalogs as plist or YAML; the on-disk copy keeps
+            // whichever the server sent, so accept both.
+            guard let data = try? Data(contentsOf: url) else { continue }
+            var items: [[String: Any]] = []
+            if let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+               let plistItems = plist as? [[String: Any]] {
+                items = plistItems
+            } else if let text = String(data: data, encoding: .utf8),
+                      let yaml = try? Yams.load(yaml: text) as? [[String: Any]] {
+                items = yaml
+            } else {
                 continue
             }
             

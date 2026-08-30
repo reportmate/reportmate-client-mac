@@ -39,6 +39,7 @@ let package = Package(
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.19.0"),
         // SQLite.swift for app usage persistence
         .package(url: "https://github.com/stephencelis/SQLite.swift.git", from: "0.15.4"),
+        .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.0"),
     ],
     targets: [
         .target(
@@ -53,6 +54,7 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "SQLite", package: "SQLite.swift"),
+                .product(name: "Yams", package: "Yams"),
             ],
             path: "Sources",
             exclude: ["Watcher", "App", "ReportMateXPC", "Helper"],
