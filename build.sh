@@ -1470,8 +1470,11 @@ stamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
 echo "[$(stamp)] Munki run finished (runtype: ${1:-none}); collecting installs" >> "$LOG"
 if [ -x "$RUNNER" ]; then
-    "$RUNNER" --run-modules installs >> "$LOG" 2>&1
-    echo "[$(stamp)] installs module exited $?" >> "$LOG"
+    # Munki gives a postflight 60 seconds; collecting and transmitting the installs
+    # module can take longer on a big manifest, so run it detached and return at
+    # once. The module writes its own log; this one records the hand-off.
+    nohup /bin/sh -c '"$0" --run-modules installs >> "$1" 2>&1; echo "[$(date "+%Y-%m-%d %H:%M:%S")] installs module exited $?" >> "$1"' "$RUNNER" "$LOG" >/dev/null 2>&1 &
+    echo "[$(stamp)] installs module started in the background (pid $!)" >> "$LOG"
 else
     echo "[$(stamp)] managedreportsrunner not found; skipping" >> "$LOG"
 fi
