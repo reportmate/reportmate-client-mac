@@ -772,6 +772,12 @@ struct ReportMateClient: AsyncParsableCommand {
             return events
         }
         
+        // Newer Munki builds ship structured sessions; those events carry per-item
+        // name, version and message in the same shape the Windows client sends for Cimian.
+        if munkiData["sessions"] != nil {
+            return generateMunkiSessionEvents(from: munkiData)
+        }
+
         let errorsString = munkiData["errors"] as? String ?? ""
         let warningsString = munkiData["warnings"] as? String ?? ""
         
@@ -859,6 +865,130 @@ struct ReportMateClient: AsyncParsableCommand {
     }
     
     /// Parse semicolon-separated message strings into array, filtering empty entries
+    /// Events from Munki's structured session reports, mirroring the Windows client's
+    /// Cimian events: one success event per action with the item list, an error event
+    /// with `failed_items`, and a warning event with `warning_items` and the nameless
+    /// `operational_warnings`. Every item carries its message so the dashboard can show it.
+    private func generateMunkiSessionEvents(from munkiData: [String: Any]) -> [ReportMateEvent] {
+        var events: [ReportMateEvent] = []
+        let sessionId = munkiData["sessionId"] as? String ?? ""
+        let runType = munkiData["runType"] as? String ?? ""
+        let duration = munkiData["durationSeconds"] as? Int ?? 0
+        let sessionEvents = munkiData["events"] as? [[String: Any]] ?? []
+        let items = munkiData["items"] as? [[String: Any]] ?? []
+        let warningItems = munkiData["warningItems"] as? [[String: Any]] ?? []
+        let errorItems = munkiData["errorItems"] as? [[String: Any]] ?? []
+
+        func pair(_ name: String, _ version: String, _ message: String? = nil) -> [String: String] {
+            var d = ["name": name, "version": version]
+            if let message, !message.isEmpty { d["message"] = message }
+            return d
+        }
+        func baseDetails(_ status: String) -> [String: EventDetailValue] {
+            [
+                "module_status": .string(status),
+                "session_id": .string(sessionId),
+                "run_type": .string(runType),
+                "duration_seconds": .int(duration),
+            ]
+        }
+        func describe(_ list: [[String: String]], verb: String) -> String {
+            if list.count == 1, let first = list.first {
+                let version = first["version"] ?? ""
+                return version.isEmpty ? "\(first["name"] ?? "Unknown") \(verb)" : "\(first["name"] ?? "Unknown") \(version) \(verb)"
+            }
+            return "\(list.count) packages \(verb)"
+        }
+
+        // Successes per action, from the install events of this session.
+        var installed: [[String: String]] = []
+        var updated: [[String: String]] = []
+        var removed: [[String: String]] = []
+        var failed: [[String: String]] = []
+        var seen = Set<String>()
+        for event in sessionEvents where (event["eventType"] as? String) == "install" {
+            let name = event["package"] as? String ?? ""
+            let version = event["version"] as? String ?? ""
+            let action = event["action"] as? String ?? ""
+            let status = event["status"] as? String ?? ""
+            guard !name.isEmpty, seen.insert("\(action)|\(name)|\(status)").inserted else { continue }
+            switch (action, status) {
+            case ("install", "completed"):
+                // Munki has no separate update action; an install event whose target
+                // version differs from what the report says was installed before is an update.
+                let wasUpdate = (event["installedVersion"] as? String).map { !$0.isEmpty && $0 != version } ?? false
+                if wasUpdate { updated.append(pair(name, version)) } else { installed.append(pair(name, version)) }
+            case ("uninstall", "completed"):
+                removed.append(pair(name, version))
+            case (_, "failed"):
+                failed.append(pair(name, version, event["error"] as? String ?? event["message"] as? String))
+            default:
+                break
+            }
+        }
+        for (list, action, verb) in [(installed, "install", "installed"), (updated, "update", "updated"), (removed, "remove", "removed")] where !list.isEmpty {
+            var details = baseDetails("success")
+            details["action"] = .string(action)
+            details["count"] = .int(list.count)
+            details["items"] = .dictArray(list)
+            events.append(ReportMateEvent(moduleId: "installs", eventType: "success", message: describe(list, verb: verb), timestamp: Date(), details: details))
+        }
+
+        // Errors: items that errored plus run-level errors with a name.
+        var failedNames = Set(failed.compactMap { $0["name"] })
+        for item in items where (item["currentStatus"] as? String) == "Error" {
+            let name = item["name"] as? String ?? ""
+            guard !name.isEmpty, failedNames.insert(name).inserted else { continue }
+            failed.append(pair(name, item["version"] as? String ?? "", item["lastError"] as? String))
+        }
+        var operationalErrors: [[String: String]] = []
+        for problem in errorItems {
+            let message = problem["message"] as? String ?? ""
+            if let name = problem["name"] as? String, !name.isEmpty {
+                if failedNames.insert(name).inserted { failed.append(pair(name, problem["version"] as? String ?? "", message)) }
+            } else if !message.isEmpty {
+                operationalErrors.append(["message": message])
+            }
+        }
+        if !failed.isEmpty || !operationalErrors.isEmpty {
+            var details = baseDetails("error")
+            details["count"] = .int(failed.count + operationalErrors.count)
+            if !failed.isEmpty { details["failed_items"] = .dictArray(failed) }
+            if !operationalErrors.isEmpty { details["operational_errors"] = .dictArray(operationalErrors) }
+            let message = failed.isEmpty
+                ? "\(operationalErrors.count) Munki error\(operationalErrors.count == 1 ? "" : "s")"
+                : (failed.count == 1 ? "\(failed[0]["name"] ?? "Unknown") \(failed[0]["version"] ?? "") failed to install".replacingOccurrences(of: "  ", with: " ") : "\(failed.count) failed installs")
+            events.append(ReportMateEvent(moduleId: "installs", eventType: "error", message: message, timestamp: Date(), details: details))
+        }
+
+        // Warnings: attributed ones become warning_items, the rest operational_warnings.
+        var warnings: [[String: String]] = []
+        var operationalWarnings: [[String: String]] = []
+        var warnedNames = Set<String>()
+        for problem in warningItems {
+            let message = problem["message"] as? String ?? ""
+            if let name = problem["name"] as? String, !name.isEmpty {
+                guard !failedNames.contains(name), warnedNames.insert(name).inserted else { continue }
+                warnings.append(pair(name, problem["version"] as? String ?? "", message))
+            } else if !message.isEmpty {
+                operationalWarnings.append(["message": message, "action": "", "event_type": "warning"])
+            }
+        }
+        if !warnings.isEmpty || !operationalWarnings.isEmpty {
+            var details = baseDetails("warning")
+            details["item_warning_count"] = .int(warnings.count)
+            details["operational_warning_count"] = .int(operationalWarnings.count)
+            if !warnings.isEmpty { details["warning_items"] = .dictArray(warnings) }
+            if !operationalWarnings.isEmpty { details["operational_warnings"] = .dictArray(operationalWarnings) }
+            let message = warnings.count == 1 && operationalWarnings.isEmpty
+                ? "\(warnings[0]["name"] ?? "Unknown") warning"
+                : "\(warnings.count + operationalWarnings.count) warning\(warnings.count + operationalWarnings.count == 1 ? "" : "s")"
+            events.append(ReportMateEvent(moduleId: "installs", eventType: "warning", message: message, timestamp: Date(), details: details))
+        }
+
+        return events
+    }
+
     private func parseMessagesFromString(_ input: String) -> [String] {
         guard !input.isEmpty else { return [] }
         return input
