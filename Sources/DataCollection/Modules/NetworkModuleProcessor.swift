@@ -98,14 +98,21 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     private func collectNetworkInfo() async throws -> NetworkInfo {
         // Use osquery for interface data, then enhance with bash for VPN/WiFi/activeConnection
-        let rawData = try await executeWithFallback(
-            osquery: """
-            SELECT interface, address, mask, interface_details.type as type, mac 
-            FROM interface_addresses 
-            JOIN interface_details USING (interface);
-            """,
-            bash: nil
-        )
+        // An osquery failure here must not take the whole module down: the system
+        // fallback below still yields the interface list and the active address.
+        let rawData: [String: Any]
+        do {
+            rawData = try await executeWithFallback(
+                osquery: """
+                SELECT interface, address, mask, interface_details.type as type, mac 
+                FROM interface_addresses 
+                JOIN interface_details USING (interface);
+                """,
+                bash: nil
+            )
+        } catch {
+            rawData = [:]
+        }
         
         // Unwrap logic
         var rawInterfaces: [RawNetworkInterface] = []
@@ -184,6 +191,13 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             }
         }
         
+        // osquery sometimes answers the interface query with no rows (extension not
+        // ready, table timeout). The Mac still has addresses, so ask the system directly
+        // rather than reporting an empty interface list and a blank active IP.
+        if rawInterfaces.isEmpty {
+            rawInterfaces = try await collectInterfacesFromSystem()
+        }
+
         // Filter to only physical interfaces (en*) - exclude bridge, utun, lo, etc.
         let filteredRawInterfaces = rawInterfaces.filter { raw -> Bool in
             let name = raw.name.lowercased()
@@ -201,7 +215,12 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         // Interface naming is NOT a reliable signal: en0 is Wi-Fi on laptops but
         // Ethernet on desktop Macs (iMac/Mac mini/Studio), where Wi-Fi is en1+.
         // CoreWLAN enumerates Wi-Fi hardware without needing Location Services.
-        let wifiInterfaceNames = Set(CWWiFiClient.shared().interfaces()?.compactMap { $0.interfaceName } ?? [])
+        var wifiInterfaceNames = Set(CWWiFiClient.shared().interfaces()?.compactMap { $0.interfaceName } ?? [])
+        if wifiInterfaceNames.isEmpty {
+            // CoreWLAN can come back empty under the root daemon; without it every en*
+            // is typed Ethernet and a Wi-Fi address shows up as a wired one.
+            wifiInterfaceNames = await wifiInterfaceNamesFromHardwarePorts()
+        }
 
         // Map RawNetworkInterface to global NetworkInterface
         let interfaces = filteredRawInterfaces.map { raw -> NetworkInterface in
@@ -236,16 +255,17 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         var physicalIfaceName = activeInterfaceName
         if let activeIface = activeInterfaceName, 
            (activeIface.hasPrefix("utun") || activeIface.hasPrefix("ppp")) {
-            // VPN is active - find the physical interface with an IPv4 address
-            // Prefer en0 (WiFi) or en1 (Ethernet)
-            if let en0 = filteredRawInterfaces.first(where: { $0.name == "en0" && $0.address?.contains(".") == true }) {
-                physicalIfaceName = en0.name
-            } else if let en1 = filteredRawInterfaces.first(where: { $0.name == "en1" && $0.address?.contains(".") == true }) {
-                physicalIfaceName = en1.name
-            } else {
-                // Fall back to any en* with IPv4
-                physicalIfaceName = filteredRawInterfaces.first(where: { $0.address?.contains(".") == true })?.name
+            // VPN is active. Interface names say nothing about the medium (en0 is
+            // Wi-Fi on laptops, Ethernet on desktops), so pick by type: a wired
+            // interface with a routable IPv4 first, then Wi-Fi, then anything with IPv4.
+            func routable(_ raw: RawNetworkInterface) -> Bool {
+                guard let address = raw.address, address.contains(".") else { return false }
+                return !address.hasPrefix("169.254.") && !address.hasPrefix("127.")
             }
+            let candidates = filteredRawInterfaces.filter(routable)
+            physicalIfaceName = candidates.first { !wifiInterfaceNames.contains($0.name) }?.name
+                ?? candidates.first { wifiInterfaceNames.contains($0.name) }?.name
+                ?? candidates.first?.name
         }
         
         if let physicalIface = physicalIfaceName {
@@ -253,10 +273,15 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             let activeIfaceData = filteredRawInterfaces.first { $0.name == physicalIface && $0.address?.contains(".") == true }
             
             let connType = wifiInterfaceNames.contains(physicalIface) ? "WiFi" : "Ethernet"
+
+            var activeAddress = activeIfaceData?.address ?? ""
+            if activeAddress.isEmpty {
+                activeAddress = await ipv4Address(ofInterface: physicalIface)
+            }
             
             activeConnection = ActiveConnection(
                 interface: physicalIface,
-                ipAddress: activeIfaceData?.address ?? "",
+                ipAddress: activeAddress,
                 gateway: gateway,
                 connectionType: connType,
                 isPrimary: true
@@ -272,6 +297,45 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         )
     }
     
+    /// Interface list from ifconfig/ipconfig, used when osquery returns no rows.
+    /// Emits the same shape as the osquery query so the rest of the pipeline is unchanged.
+    private func collectInterfacesFromSystem() async throws -> [RawNetworkInterface] {
+        let output = try await BashService.execute("""
+            for i in $(ifconfig -l 2>/dev/null); do
+                case "$i" in en*) ;; *) continue ;; esac
+                ip=$(ipconfig getifaddr "$i" 2>/dev/null)
+                mask=$(ipconfig getoption "$i" subnet_mask 2>/dev/null)
+                mac=$(ifconfig "$i" 2>/dev/null | awk '/ether/ { print $2; exit }')
+                jq -cn --arg i "$i" --arg ip "$ip" --arg mask "$mask" --arg mac "$mac" \\
+                    '{interface: $i, address: (if $ip == "" then null else $ip end), mask: (if $mask == "" then null else $mask end), mac: (if $mac == "" then null else $mac end), type: null}'
+            done | jq -s .
+        """)
+        guard let data = output.data(using: .utf8),
+              let interfaces = try? JSONDecoder().decode([RawNetworkInterface].self, from: data) else {
+            return []
+        }
+        return interfaces
+    }
+
+    /// Wi-Fi device names from networksetup, e.g. {"en1"}; empty on failure.
+    private func wifiInterfaceNamesFromHardwarePorts() async -> Set<String> {
+        let output = (try? await BashService.execute("""
+            networksetup -listallhardwareports 2>/dev/null | awk '
+                /^Hardware Port:/ { port = substr($0, 16) }
+                /^Device:/ && (port == "Wi-Fi" || port == "AirPort") { print $2 }
+            '
+        """)) ?? ""
+        return Set(output.split(whereSeparator: { $0 == "\n" }).map { String($0).trimmingCharacters(in: .whitespaces) }.filter { $0.hasPrefix("en") })
+    }
+
+    /// The IPv4 address the system currently holds on an interface, or "".
+    private func ipv4Address(ofInterface name: String) async -> String {
+        guard name.hasPrefix("en"), !name.contains(" ") else { return "" }
+        let output = (try? await BashService.execute("ipconfig getifaddr \(name) 2>/dev/null")) ?? ""
+        let address = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return address.contains(".") ? address : ""
+    }
+
     /// Get active connection info from default route
     private func getActiveConnectionInfo() async throws -> [String: Any] {
         let output = try await BashService.execute("""
