@@ -254,9 +254,18 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     if let installed = record["installed_version"] as? String, !installed.isEmpty { i["installedVersion"] = installed }
                     if let lastError = record["last_error"] as? String, !lastError.isEmpty { i["lastError"] = lastError }
                     if let lastWarning = record["last_warning"] as? String, !lastWarning.isEmpty { i["lastWarning"] = lastWarning }
+                    // The install-loop guard reports a held package as two messages:
+                    // what the loop is, then what the package's own checks keep finding.
+                    if let messages = record["warning_messages"] as? [String], !messages.isEmpty {
+                        i["warningMessages"] = messages
+                        i["lastWarning"] = messages.joined(separator: "\n")
+                    }
+                    if let loop = record["install_loop_detected"] as? Bool { i["hasInstallLoop"] = loop }
+                    if let code = record["status_reason_code"] as? String, !code.isEmpty { i["statusReasonCode"] = code }
+                    if let reason = record["status_reason"] as? String, !reason.isEmpty { i["statusReason"] = reason }
                 }
-                if let message = errorByName[name] { i["lastError"] = message }
-                if let message = warningByName[name], (i["lastError"] as? String ?? "").isEmpty { i["lastWarning"] = message }
+                if let message = errorByName[name], (i["lastError"] as? String ?? "").isEmpty { i["lastError"] = message }
+                if let message = warningByName[name], (i["lastError"] as? String ?? "").isEmpty, (i["lastWarning"] as? String ?? "").isEmpty { i["lastWarning"] = message }
                 return i
             }
         }
