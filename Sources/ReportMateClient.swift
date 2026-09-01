@@ -250,6 +250,7 @@ struct ReportMateClient: AsyncParsableCommand {
             return PeripheralsModuleProcessor(configuration: config)
         case "installs": return InstallsModuleProcessor(configuration: config)
         case "identity": return IdentityModuleProcessor(configuration: config)
+        case "logs": return LogsModuleProcessor(configuration: config)
         default: return nil
         }
     }
