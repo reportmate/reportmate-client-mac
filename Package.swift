@@ -29,6 +29,10 @@ let package = Package(
             name: "ReportMateXPC",
             targets: ["ReportMateXPC"]
         ),
+        .library(
+            name: "ReportMateLogging",
+            targets: ["ReportMateLogging"]
+        ),
     ],
     dependencies: [
         // Swift Argument Parser for CLI
@@ -47,9 +51,17 @@ let package = Package(
             dependencies: [],
             path: "Sources/ReportMateXPC"
         ),
+        .target(
+            name: "ReportMateLogging",
+            dependencies: [
+                .product(name: "Logging", package: "swift-log"),
+            ],
+            path: "Sources/ReportMateLogging"
+        ),
         .executableTarget(
             name: "ReportMate",
             dependencies: [
+                "ReportMateLogging",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
@@ -57,7 +69,7 @@ let package = Package(
                 .product(name: "Yams", package: "Yams"),
             ],
             path: "Sources",
-            exclude: ["Watcher", "App", "ReportMateXPC", "Helper"],
+            exclude: ["Watcher", "App", "ReportMateXPC", "Helper", "ReportMateLogging"],
             resources: [
                 .copy("Resources")
             ]
@@ -65,6 +77,7 @@ let package = Package(
         .executableTarget(
             name: "Watcher",
             dependencies: [
+                "ReportMateLogging",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "SQLite", package: "SQLite.swift"),
@@ -80,6 +93,11 @@ let package = Package(
             name: "Helper",
             dependencies: ["ReportMateXPC"],
             path: "Sources/Helper"
+        ),
+        .testTarget(
+            name: "ReportMateLoggingTests",
+            dependencies: ["ReportMateLogging"],
+            path: "Tests/ReportMateLoggingTests"
         ),
     ]
 )

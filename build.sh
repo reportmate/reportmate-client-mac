@@ -801,9 +801,9 @@ EOF
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-hourly.log</string>
+    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.hourly.log</string>
     <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-hourly.error.log</string>
+    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.hourly.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -840,9 +840,9 @@ EOF
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-fourhourly.log</string>
+    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.fourhourly.log</string>
     <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-fourhourly.error.log</string>
+    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.fourhourly.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -890,9 +890,9 @@ EOF
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-daily.log</string>
+    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.daily.log</string>
     <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-daily.error.log</string>
+    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.daily.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -938,9 +938,9 @@ EOF
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-allmodules.log</string>
+    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.allmodules.log</string>
     <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-allmodules.error.log</string>
+    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.allmodules.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -976,9 +976,9 @@ EOF
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-appusage.log</string>
+    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.appusage.log</string>
     <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/reportmate-appusage.error.log</string>
+    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.appusage.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -1196,6 +1196,20 @@ log_message "Starting ReportMate postinstall..."
 mkdir -p "$LOG_DIR"
 chmod 755 "$LOG_DIR"
 
+# Earlier releases let launchd append every run's stdout to these files and
+# nothing ever rotated them. The client now writes its own daily-rolled
+# reportmate.log, so the legacy files only occupy disk. Remove them once.
+for legacy in reportmate-hourly reportmate-4hourly reportmate-fourhourly reportmate-daily \
+              reportmate-allmodules reportmate-boot reportmate-firstrun \
+              munki-postflight reportmate-munki-postflight; do
+    for suffix in .log .error.log; do
+        if [ -f "${LOG_DIR}/${legacy}${suffix}" ]; then
+            log_message "Removing legacy log ${legacy}${suffix}"
+            rm -f "${LOG_DIR}/${legacy}${suffix}"
+        fi
+    done
+done
+
 # ═══════════════════════════════════════════════════════════════════════════
 # INSTALL OSQUERY IF MISSING
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1411,14 +1425,35 @@ if [ -d "$MUNKI_DIR" ]; then
 RUNTYPE="${1:-}"
 POSTFLIGHT_D="/usr/local/munki/postflight.d"
 LOG_DIR="/Library/Managed Reports/logs"
-LOG="${LOG_DIR}/munki-postflight.log"
-
+LOG="${LOG_DIR}/reportmate-postflight.log"
 mkdir -p "$LOG_DIR" 2>/dev/null
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG" 2>/dev/null; }
 
-log "Munki postflight started (runtype: ${RUNTYPE:-none})"
+# Same rules as the client's own log: roll on the first write of a new local
+# day to reportmate-postflight-YYYY-MM-DD.log and keep the newest 30 days.
+roll_log() {
+    [ -s "$LOG" ] || return 0
+    local last today rolled
+    last=$(/usr/bin/stat -f '%Sm' -t '%Y-%m-%d' "$LOG" 2>/dev/null) || return 0
+    today=$(date '+%Y-%m-%d')
+    [[ "$last" < "$today" ]] || return 0
+    rolled="${LOG_DIR}/reportmate-postflight-${last}.log"
+    if [ -e "$rolled" ]; then
+        cat "$LOG" >> "$rolled" 2>/dev/null && rm -f "$LOG"
+    else
+        mv "$LOG" "$rolled" 2>/dev/null
+    fi
+    ls -1 "${LOG_DIR}"/reportmate-postflight-????-??-??.log 2>/dev/null | sort -r | tail -n +31 | \
+        while IFS= read -r old; do rm -f "$old"; done
+}
+roll_log
+log() {
+    local level="$1"; shift
+    printf '[%s] %-5s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$*" >> "$LOG" 2>/dev/null
+}
+
+log INFO "Munki postflight started (runtype: ${RUNTYPE:-none})"
 if [ ! -d "$POSTFLIGHT_D" ]; then
-    log "No postflight.d directory; nothing to run"
+    log INFO "No postflight.d directory; nothing to run"
     exit 0
 fi
 
@@ -1428,23 +1463,26 @@ for script in "$POSTFLIGHT_D"/*; do
     name=$(basename "$script")
     case "$name" in .*) continue ;; esac
     if [ ! -x "$script" ]; then
-        log "Skipping non-executable: $name"
+        log WARN "Skipping non-executable: $name"
         continue
     fi
     # A copy of this wrapper inside the directory it orchestrates would recurse forever
     if grep -q "ReportMate postflight wrapper" "$script" 2>/dev/null; then
-        log "Skipping wrapper copy: $name"
+        log WARN "Skipping wrapper copy: $name"
         continue
     fi
     count=$((count + 1))
-    log "Running: $name"
-    if "$script" "$RUNTYPE" >> "$LOG" 2>&1; then
-        log "  $name completed successfully"
+    log INFO "Running: $name"
+    # Child output is folded into this log line by line so one grammar survives.
+    "$script" "$RUNTYPE" 2>&1 | while IFS= read -r line; do log INFO "  $name: $line"; done
+    rc=${PIPESTATUS[0]}
+    if [ "$rc" -eq 0 ]; then
+        log INFO "  $name completed successfully"
     else
-        log "  $name exited $? (continuing)"
+        log ERROR "  $name exited $rc (continuing)"
     fi
 done
-log "Munki postflight completed ($count script(s))"
+log INFO "Munki postflight completed ($count script(s))"
 exit 0
 WRAPPER_EOF
     chmod 755 "$POSTFLIGHT"
@@ -1464,19 +1502,22 @@ WRAPPER_EOF
 RUNNER="/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner"
 [ -x "$RUNNER" ] || RUNNER="/usr/local/reportmate/managedreportsrunner"
 LOG_DIR="/Library/Managed Reports/logs"
-LOG="${LOG_DIR}/reportmate-munki-postflight.log"
+LOG="${LOG_DIR}/reportmate-postflight.log"
 mkdir -p "$LOG_DIR" 2>/dev/null
-stamp() { date '+%Y-%m-%d %H:%M:%S'; }
+log() {
+    local level="$1"; shift
+    printf '[%s] %-5s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$*" >> "$LOG" 2>/dev/null
+}
 
-echo "[$(stamp)] Munki run finished (runtype: ${1:-none}); collecting installs" >> "$LOG"
+log INFO "Munki run finished (runtype: ${1:-none}); collecting installs"
 if [ -x "$RUNNER" ]; then
     # Munki gives a postflight 60 seconds; collecting and transmitting the installs
     # module can take longer on a big manifest, so run it detached and return at
-    # once. The module writes its own log; this one records the hand-off.
-    nohup /bin/sh -c '"$0" --run-modules installs >> "$1" 2>&1; echo "[$(date "+%Y-%m-%d %H:%M:%S")] installs module exited $?" >> "$1"' "$RUNNER" "$LOG" >/dev/null 2>&1 &
-    echo "[$(stamp)] installs module started in the background (pid $!)" >> "$LOG"
+    # once. The client writes its own reportmate.log; this one records the hand-off.
+    nohup /bin/sh -c '"$0" --run-modules installs >/dev/null 2>&1; rc=$?; printf "[%s] %-5s %s\n" "$(date "+%Y-%m-%d %H:%M:%S")" INFO "installs module exited $rc" >> "$1"' "$RUNNER" "$LOG" >/dev/null 2>&1 &
+    log INFO "installs module started in the background (pid $!)"
 else
-    echo "[$(stamp)] managedreportsrunner not found; skipping" >> "$LOG"
+    log ERROR "managedreportsrunner not found; skipping"
 fi
 exit 0
 REPORTMATE_EOF
@@ -1508,10 +1549,11 @@ plist_set_if_missing ValidateSSL -bool true
 plist_set_if_missing Timeout -integer 300
 plist_set_if_missing EnabledModules -array installs applications system management identity hardware peripherals security network inventory
 
-# Run initial collection immediately so the device appears in ReportMate right away
+# Run initial collection immediately so the device appears in ReportMate right away.
+# The client writes its own log; nothing here needs capturing.
 log_message "Running initial inventory and system collection..."
 nohup /usr/local/reportmate/managedreportsrunner --run-modules inventory,system \
-    >> "$LOG_DIR/reportmate-firstrun.log" 2>&1 &
+    >/dev/null 2>&1 &
 disown
 
 log_message "ReportMate postinstall complete."
