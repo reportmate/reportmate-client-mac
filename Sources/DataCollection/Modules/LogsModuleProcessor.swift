@@ -40,8 +40,8 @@ public enum ManagedLogSurvey {
     public static let maxRoots = 20
     /// Files listed per root (root-level files plus the latest session's files).
     public static let maxFiles = 50
-    /// Logs tailed per root: the primary log plus the next most recent ones.
-    public static let maxTails = 5
+    /// Logs tailed per root: the primary log plus the next most recent ones (session.json included).
+    public static let maxTails = 6
     /// Entries visited while sizing a root. A logs directory can hold tens of
     /// thousands of per-run subdirectories when a tool's retention has failed;
     /// the walk stops here and marks the inventory as a floor.
@@ -188,7 +188,7 @@ public enum ManagedLogSurvey {
 
     static func isTextLog(_ name: String) -> Bool {
         let lower = name.lowercased()
-        return lower.hasSuffix(".log") || lower.hasSuffix(".jsonl") || lower.hasSuffix(".txt")
+        return lower.hasSuffix(".log") || lower.hasSuffix(".jsonl") || lower.hasSuffix(".json") || lower.hasSuffix(".txt")
     }
 
     static func relativePath(of path: String, under base: String) -> String {
