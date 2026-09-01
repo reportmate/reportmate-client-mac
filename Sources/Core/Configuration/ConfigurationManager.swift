@@ -42,7 +42,7 @@ public class ConfigurationManager {
             "EnabledModules": [
                 "hardware", "system", "network", "security",
                 "applications", "management", "inventory",
-                "identity", "peripherals", "installs"
+                "identity", "peripherals", "installs", "logs"
             ]
         ]
         
@@ -218,7 +218,7 @@ public struct ReportMateConfiguration {
     public var enabledModules: [String] = [
         "hardware", "system", "network", "security",
         "applications", "management", "inventory",
-        "identity", "peripherals", "installs"
+        "identity", "peripherals", "installs", "logs"
     ]
     public var osqueryPath: String = "/usr/local/bin/osqueryi"
     

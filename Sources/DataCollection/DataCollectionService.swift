@@ -21,7 +21,8 @@ public class DataCollectionService {
             "applications": ApplicationsModuleProcessor(configuration: configuration, applicationUsageService: applicationUsageService),
             "management": ManagementModuleProcessor(configuration: configuration),
             "inventory": InventoryModuleProcessor(configuration: configuration),
-            "identity": IdentityModuleProcessor(configuration: configuration)
+            "identity": IdentityModuleProcessor(configuration: configuration),
+            "logs": LogsModuleProcessor(configuration: configuration)
         ]
     }
     
@@ -254,6 +255,8 @@ public class DataCollectionService {
                 payload["displays"] = moduleDict
             case "printers":
                 payload["printers"] = moduleDict
+            case "logs":
+                payload["logs"] = moduleDict
             default:
                 // For any unknown modules, add them under their original key
                 payload[moduleId] = moduleDict

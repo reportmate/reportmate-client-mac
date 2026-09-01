@@ -379,6 +379,7 @@ MODULE_FILES[applications]="Sources/DataCollection/Modules/ApplicationsModulePro
 MODULE_FILES[hardware]="Sources/DataCollection/Modules/HardwareModuleProcessor.swift Sources/Models/Modules/HardwareModels.swift"
 MODULE_FILES[identity]="Sources/DataCollection/Modules/IdentityModuleProcessor.swift Sources/Models/Modules/IdentityModels.swift"
 MODULE_FILES[installs]="Sources/DataCollection/Modules/InstallsModuleProcessor.swift Sources/Models/Modules/InstallsModels.swift"
+MODULE_FILES[logs]="Sources/DataCollection/Modules/LogsModuleProcessor.swift Sources/Models/Modules/LogsModels.swift"
 MODULE_FILES[inventory]="Sources/DataCollection/Modules/InventoryModuleProcessor.swift Sources/Models/Modules/InventoryModels.swift"
 MODULE_FILES[management]="Sources/DataCollection/Modules/ManagementModuleProcessor.swift Sources/Models/Modules/ManagementModels.swift"
 MODULE_FILES[network]="Sources/DataCollection/Modules/NetworkModuleProcessor.swift Sources/Models/Modules/NetworkModels.swift"

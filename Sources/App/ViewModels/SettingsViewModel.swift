@@ -108,7 +108,7 @@ final class SettingsViewModel {
         useAltSystemInfo     = dict["UseAltSystemInfo"]   as? Bool   ?? true
 
         let modules = dict["EnabledModules"] as? [String]
-            ?? ["installs", "applications", "system", "management", "identity", "hardware", "peripherals", "security", "network", "inventory"]
+            ?? ["installs", "applications", "system", "management", "identity", "hardware", "peripherals", "security", "network", "inventory", "logs"]
         enabledModules = Set(modules)
     }
 

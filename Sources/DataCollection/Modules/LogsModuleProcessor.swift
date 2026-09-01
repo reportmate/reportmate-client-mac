@@ -1,0 +1,337 @@
+import Foundation
+
+/// Logs module processor - surveys every management tool log root on the Mac.
+///
+/// The convention puts each tool's logs under `/Library/Managed <Tool>/logs`
+/// (Managed Installs for Munki, Managed Bootstrap for BootstrapMate, Managed Reports
+/// for ReportMate, Managed State for Outset, ...). For each root this reports the
+/// file inventory, the latest session summary when the tool writes Cimian-style
+/// `YYYY-MM-DD/HHMM/session.json` directories, error and warning counts, and a
+/// capped tail of the primary log. The Windows client does the same over
+/// `C:\ProgramData\Managed*\logs`, with the same JSON shape.
+public class LogsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
+
+    public init(configuration: ReportMateConfiguration) {
+        super.init(moduleId: "logs", configuration: configuration)
+    }
+
+    public override func collectData() async throws -> ModuleData {
+        let roots = ManagedLogSurvey.surveyAll(libraryPath: "/Library")
+        ConsoleFormatter.writeDebug("Logs module found \(roots.count) Managed log roots")
+        let data = LogsData(roots: roots)
+        let dict = try Self.dictionary(from: data)
+        return BaseModuleData(moduleId: moduleId, data: dict)
+    }
+
+    private static func dictionary(from data: LogsData) throws -> [String: Any] {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let encoded = try encoder.encode(data)
+        let object = try JSONSerialization.jsonObject(with: encoded)
+        return object as? [String: Any] ?? [:]
+    }
+}
+
+/// Pure file-system survey, kept free of the module plumbing so it can be run
+/// against a temporary root in tests.
+public enum ManagedLogSurvey {
+
+    /// Roots reported per device.
+    public static let maxRoots = 20
+    /// Files listed per root (root-level files plus the latest session's files).
+    public static let maxFiles = 50
+    /// Logs tailed per root: the primary log plus the next most recent ones (session.json included).
+    public static let maxTails = 6
+    /// Entries visited while sizing a root. A logs directory can hold tens of
+    /// thousands of per-run subdirectories when a tool's retention has failed;
+    /// the walk stops here and marks the inventory as a floor.
+    public static let walkBudget = 5_000
+    /// Tail limits per root.
+    public static let tailLines = 150
+    public static let tailBytes = 32 * 1024
+
+    static let dayPattern = try! NSRegularExpression(pattern: "^\\d{4}-\\d{2}-\\d{2}$")
+    static let sessionPattern = try! NSRegularExpression(pattern: "^\\d{4}(_\\d)?$")
+    static let errorPattern = try! NSRegularExpression(pattern: "\\b(ERROR|ERR|FAULT|CRITICAL|FATAL)\\b")
+    static let warningPattern = try! NSRegularExpression(pattern: "\\b(WARN|WARNING|WRN)\\b")
+
+    /// Every `Managed*` directory under `libraryPath` that has a `logs` subdirectory.
+    public static func surveyAll(libraryPath: String) -> [LogRoot] {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: libraryPath) else { return [] }
+        var roots: [LogRoot] = []
+        for entry in entries.sorted() where entry.hasPrefix("Managed") {
+            let rootDir = (libraryPath as NSString).appendingPathComponent(entry)
+            guard let logsDir = logsDirectory(in: rootDir) else { continue }
+            if let root = survey(rootDir: rootDir, logsDir: logsDir) {
+                roots.append(root)
+            }
+            if roots.count >= maxRoots { break }
+        }
+        return roots
+    }
+
+    /// `logs` is the convention; `Logs` is accepted for roots that predate it, and
+    /// on a case-sensitive volume the two are different directories.
+    static func logsDirectory(in rootDir: String) -> String? {
+        for name in ["logs", "Logs"] {
+            let candidate = (rootDir as NSString).appendingPathComponent(name)
+            if isDirectory(candidate) { return candidate }
+        }
+        return nil
+    }
+
+    public static func survey(rootDir: String, logsDir: String) -> LogRoot? {
+        let fm = FileManager.default
+        let dirName = (rootDir as NSString).lastPathComponent
+        let tool = toolKey(from: dirName)
+        guard !tool.isEmpty else { return nil }
+
+        // Session layout: logs/YYYY-MM-DD/HHMM/
+        var latestSessionDir: String? = nil
+        var latestSessionId: String? = nil
+        let topEntries = (try? fm.contentsOfDirectory(atPath: logsDir)) ?? []
+        let dayDirs = topEntries
+            .filter { matches(dayPattern, $0) && isDirectory((logsDir as NSString).appendingPathComponent($0)) }
+            .sorted(by: >)
+        for day in dayDirs {
+            let dayPath = (logsDir as NSString).appendingPathComponent(day)
+            let sessions = ((try? fm.contentsOfDirectory(atPath: dayPath)) ?? [])
+                .filter { matches(sessionPattern, $0) && isDirectory((dayPath as NSString).appendingPathComponent($0)) }
+                .sorted(by: >)
+            if let newest = sessions.first {
+                latestSessionDir = (dayPath as NSString).appendingPathComponent(newest)
+                latestSessionId = "\(day)-\(newest)"
+                break
+            }
+        }
+        let layout = latestSessionDir == nil ? "flat" : "sessions"
+
+        // Inventory: root-level files plus the latest session's files, newest first.
+        var files: [LogFileEntry] = []
+        for entry in topEntries {
+            let full = (logsDir as NSString).appendingPathComponent(entry)
+            if let file = fileEntry(fullPath: full, relativePath: entry) { files.append(file) }
+        }
+        if let sessionDir = latestSessionDir {
+            let rel = relativePath(of: sessionDir, under: logsDir)
+            for entry in (try? fm.contentsOfDirectory(atPath: sessionDir)) ?? [] {
+                let full = (sessionDir as NSString).appendingPathComponent(entry)
+                if let file = fileEntry(fullPath: full, relativePath: rel + "/" + entry) { files.append(file) }
+            }
+        }
+        files.sort { ($0.modified ?? "") > ($1.modified ?? "") }
+        if files.count > maxFiles { files = Array(files.prefix(maxFiles)) }
+
+        let sized = sizeTree(logsDir)
+
+        // Latest session summary from session.json (Cimian, the Munki fork, StartSet).
+        var latestSession: LogSessionSummary? = nil
+        if let sessionDir = latestSessionDir {
+            latestSession = readSession(at: (sessionDir as NSString).appendingPathComponent("session.json"), fallbackId: latestSessionId)
+        }
+
+        // Tails: the primary log first, then the next most recent logs in the root.
+        let primary = primaryLog(logsDir: logsDir, sessionDir: latestSessionDir, topEntries: topEntries)
+        var tails: [LogTail] = []
+        var errors = 0
+        var warnings = 0
+        for relative in tailCandidates(primary: primary, files: files) {
+            let full = (logsDir as NSString).appendingPathComponent(relative)
+            let t = readTail(fullPath: full, relativePath: relative)
+            if t.lines.isEmpty && relative != primary { continue }
+            tails.append(t)
+            if tails.count >= maxTails { break }
+        }
+        if let first = tails.first, first.file == primary {
+            for line in first.lines {
+                if matches(errorPattern, line) { errors += 1 } else if matches(warningPattern, line) { warnings += 1 }
+            }
+        }
+
+        return LogRoot(
+            tool: tool,
+            name: dirName,
+            path: logsDir,
+            layout: layout,
+            fileCount: sized.count,
+            totalBytes: sized.bytes,
+            newestModified: sized.newest,
+            inventoryTruncated: sized.truncated,
+            files: files,
+            latestSession: latestSession,
+            primaryLog: primary,
+            errorCount: errors,
+            warningCount: warnings,
+            tails: tails
+        )
+    }
+
+    /// "Managed Installs" -> "installs"; "ManagedInstalls" -> "installs"
+    public static func toolKey(from directoryName: String) -> String {
+        var name = directoryName
+        if name.lowercased().hasPrefix("managed") { name = String(name.dropFirst("managed".count)) }
+        return name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            .replacingOccurrences(of: " ", with: "")
+    }
+
+    /// Text logs worth tailing, primary first, then newest first. `files` is already
+    /// sorted newest first and holds the root-level files plus the latest session's.
+    static func tailCandidates(primary: String?, files: [LogFileEntry]) -> [String] {
+        var ordered: [String] = []
+        if let primary = primary { ordered.append(primary) }
+        for file in files where isTextLog(file.name) && !ordered.contains(file.path) {
+            ordered.append(file.path)
+        }
+        return ordered
+    }
+
+    static func isTextLog(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return lower.hasSuffix(".log") || lower.hasSuffix(".jsonl") || lower.hasSuffix(".json") || lower.hasSuffix(".txt")
+    }
+
+    static func relativePath(of path: String, under base: String) -> String {
+        guard path.hasPrefix(base) else { return path }
+        var rel = String(path.dropFirst(base.count))
+        if rel.hasPrefix("/") { rel.removeFirst() }
+        return rel
+    }
+
+    static func primaryLog(logsDir: String, sessionDir: String?, topEntries: [String]) -> String? {
+        if let sessionDir = sessionDir {
+            let rel = relativePath(of: sessionDir, under: logsDir)
+            let entries = (try? FileManager.default.contentsOfDirectory(atPath: sessionDir)) ?? []
+            for preferred in ["run.log", "install.log", "startset.log", "outset.log", "bootstrap.log"] where entries.contains(preferred) {
+                return rel + "/" + preferred
+            }
+            if let newest = newestLog(in: sessionDir, entries: entries) { return rel + "/" + newest }
+        }
+        let logs = topEntries.filter { $0.lowercased().hasSuffix(".log") }
+        let preferred = logs.filter { !$0.lowercased().hasSuffix(".error.log") }
+        if let newest = newestLog(in: logsDir, entries: preferred.isEmpty ? logs : preferred) { return newest }
+        return nil
+    }
+
+    static func newestLog(in dir: String, entries: [String]) -> String? {
+        var best: (name: String, modified: Date)? = nil
+        for entry in entries where entry.lowercased().hasSuffix(".log") {
+            let full = (dir as NSString).appendingPathComponent(entry)
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: full),
+                  (attrs[.type] as? FileAttributeType) == .typeRegular else { continue }
+            let modified = (attrs[.modificationDate] as? Date) ?? .distantPast
+            if let current = best, current.modified >= modified { continue }
+            best = (entry, modified)
+        }
+        return best?.name
+    }
+
+    static func fileEntry(fullPath: String, relativePath: String) -> LogFileEntry? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: fullPath),
+              (attrs[.type] as? FileAttributeType) == .typeRegular else { return nil }
+        let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+        let modified = (attrs[.modificationDate] as? Date).map(iso8601)
+        return LogFileEntry(name: (relativePath as NSString).lastPathComponent, path: relativePath, bytes: size, modified: modified)
+    }
+
+    /// Walks the whole logs tree with an entry budget.
+    static func sizeTree(_ dir: String) -> (count: Int, bytes: Int64, newest: String?, truncated: Bool) {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(atPath: dir) else { return (0, 0, nil, false) }
+        var count = 0
+        var bytes: Int64 = 0
+        var visited = 0
+        var newest: Date? = nil
+        var truncated = false
+        while enumerator.nextObject() != nil {
+            visited += 1
+            if visited > walkBudget { truncated = true; break }
+            guard let attrs = enumerator.fileAttributes,
+                  (attrs[.type] as? FileAttributeType) == .typeRegular else { continue }
+            count += 1
+            bytes += (attrs[.size] as? NSNumber)?.int64Value ?? 0
+            if let m = attrs[.modificationDate] as? Date, newest == nil || m > newest! { newest = m }
+        }
+        return (count, bytes, newest.map(iso8601), truncated)
+    }
+
+    static func readSession(at path: String, fallbackId: String?) -> LogSessionSummary? {
+        guard let data = FileManager.default.contents(atPath: path),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return fallbackId.map {
+                LogSessionSummary(sessionId: $0, status: nil, startTime: nil, endTime: nil, durationSeconds: nil, runType: nil, errors: nil, warnings: nil)
+            }
+        }
+        func str(_ keys: String...) -> String? {
+            for k in keys {
+                if let s = json[k] as? String { return s }
+                if let n = json[k] as? NSNumber { return n.stringValue }
+            }
+            return nil
+        }
+        func num(_ keys: String...) -> Double? {
+            for k in keys { if let n = json[k] as? NSNumber { return n.doubleValue } }
+            return nil
+        }
+        let summary = json["summary"] as? [String: Any]
+        var errors = (summary?["errors"] as? NSNumber)?.intValue
+        var warnings = (summary?["warnings"] as? NSNumber)?.intValue
+        if errors == nil, let items = json["error_items"] as? [Any] { errors = items.count }
+        if warnings == nil, let items = json["warning_items"] as? [Any] { warnings = items.count }
+        return LogSessionSummary(
+            sessionId: str("session_id", "sessionId") ?? fallbackId,
+            status: str("status"),
+            startTime: str("start_time", "startTime"),
+            endTime: str("end_time", "endTime"),
+            durationSeconds: num("duration_seconds", "durationSeconds"),
+            runType: str("run_type", "runType"),
+            errors: errors,
+            warnings: warnings
+        )
+    }
+
+    /// Last `tailBytes` of the file, split into at most `tailLines` lines.
+    static func readTail(fullPath: String, relativePath: String) -> LogTail {
+        guard let handle = FileHandle(forReadingAtPath: fullPath) else {
+            return LogTail(file: relativePath, lines: [], truncated: false, bytes: 0)
+        }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let start = size > UInt64(tailBytes) ? size - UInt64(tailBytes) : 0
+        try? handle.seek(toOffset: start)
+        let data = (try? handle.readToEnd()) ?? Data()
+        var text = String(decoding: data, as: UTF8.self)
+        var truncated = start > 0
+        if start > 0, let firstNewline = text.firstIndex(of: "\n") {
+            // Drop the partial first line of a mid-file read.
+            text = String(text[text.index(after: firstNewline)...])
+        }
+        var lines = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: "\r")) }
+        while let last = lines.last, last.isEmpty { lines.removeLast() }
+        // A .json file is one document: keep every line within the byte cap so it still parses.
+        let wholeDocument = relativePath.lowercased().hasSuffix(".json")
+        if !wholeDocument && lines.count > tailLines {
+            lines = Array(lines.suffix(tailLines))
+            truncated = true
+        }
+        let bytes = lines.reduce(0) { $0 + $1.utf8.count + 1 }
+        return LogTail(file: relativePath, lines: lines, truncated: truncated, bytes: bytes)
+    }
+
+    static func isDirectory(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
+
+    static func matches(_ regex: NSRegularExpression, _ text: String) -> Bool {
+        regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    }
+
+    static func iso8601(_ date: Date) -> String {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.string(from: date)
+    }
+}
