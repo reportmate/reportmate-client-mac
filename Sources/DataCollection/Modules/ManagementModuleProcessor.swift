@@ -13,7 +13,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
     
     public override func collectData() async throws -> ModuleData {
         // Total collection steps for progress tracking
-        let totalSteps = 8
+        let totalSteps = 9
 
         // Each step is isolated. A collector that throws (or, before the underlying process runners
         // were bounded, hung) must not sink the whole module: a management payload that never
@@ -54,6 +54,7 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
         let remote = await step("remote_mgmt", 6) { try await self.collectRemoteManagement() }
         let profiles = await stepList("profiles", 7) { try await self.collectInstalledProfiles() }
         let policies = await stepList("managed_policies", 8) { try await self.collectManagedPolicies() }
+        let logs = await step("managed_logs", 9) { ManagedLogSurvey.managementSection() }
 
         // Use snake_case for top-level keys to match osquery conventions
         var managementData: [String: Any] = [
@@ -64,7 +65,8 @@ public class ManagementModuleProcessor: BaseModuleProcessor, @unchecked Sendable
             "device_identifiers": ids,
             "remote_management": remote,
             "installed_profiles": profiles,
-            "managed_policies": policies
+            "managed_policies": policies,
+            "logs": logs
         ]
         if !collectionErrors.isEmpty {
             managementData["_collection_errors"] = collectionErrors

@@ -1,6 +1,6 @@
 import Foundation
 
-// Logs module - management tool log roots under /Library/Managed */logs
+// Management module `logs` section - management tool log roots under /Library/Managed */logs
 //
 // Mirrors the Windows client's LogsModels.cs field for field. Keys are
 // camelCase on both platforms so one reader serves both.
@@ -53,22 +53,4 @@ public struct LogRoot: Codable, Sendable {
     public let warningCount: Int
     /// Tails of the root's most relevant logs, primary first; capped per file and per root
     public let tails: [LogTail]
-}
-
-public struct LogsData: ModuleDataModel, Sendable {
-    public var moduleId: String { "logs" }
-    public let collectionTimestamp: Date
-    public let success: Bool
-    public let errorMessage: String?
-
-    public let platform: String
-    public let roots: [LogRoot]
-
-    public init(roots: [LogRoot], success: Bool = true, errorMessage: String? = nil) {
-        self.collectionTimestamp = Date()
-        self.success = success
-        self.errorMessage = errorMessage
-        self.platform = "macOS"
-        self.roots = roots
-    }
 }

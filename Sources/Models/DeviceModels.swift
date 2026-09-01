@@ -229,7 +229,6 @@ public struct UnifiedDevicePayload: Codable, Sendable {
     public let applications: ModuleDataValue?
     public let peripherals: ModuleDataValue?
     public let identity: ModuleDataValue?
-    public let logs: ModuleDataValue?
     
     public init(
         metadata: EventMetadata,
@@ -253,7 +252,6 @@ public struct UnifiedDevicePayload: Codable, Sendable {
         self.applications = modules["applications"].map { ModuleDataValue($0) }
         self.peripherals = modules["peripherals"].map { ModuleDataValue($0) }
         self.identity = modules["identity"].map { ModuleDataValue($0) }
-        self.logs = modules["logs"].map { ModuleDataValue($0) }
     }
 }
 
