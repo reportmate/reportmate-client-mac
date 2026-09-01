@@ -501,7 +501,7 @@ public class CacheService {
             
             // Save top-level module data if present (for flat payload structure)
             let moduleNames = ["hardware", "system", "security", "network", "applications", 
-                            "management", "inventory", "installs", "displays", "printers", "identity"]
+                            "management", "inventory", "installs", "displays", "printers", "identity", "logs"]
             for moduleName in moduleNames {
                 if let moduleData = data[moduleName] as? [String: Any] {
                     try await saveModuleData(moduleData, for: moduleName)

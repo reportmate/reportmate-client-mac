@@ -17,5 +17,6 @@ struct ModuleDefinition: Identifiable, Sendable {
         .init(id: "peripherals", displayName: "Peripherals", systemImage: "cable.connector", description: "USB and Thunderbolt devices"),
         .init(id: "security", displayName: "Security", systemImage: "lock", description: "FileVault, Firewall, SIP, Gatekeeper"),
         .init(id: "network", displayName: "Network", systemImage: "wifi", description: "Interfaces, Wi-Fi, IP addresses"),
+        .init(id: "logs", displayName: "Logs", systemImage: "doc.text.magnifyingglass", description: "Management tool logs under /Library/Managed */logs"),
     ]
 }
