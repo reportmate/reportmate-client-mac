@@ -310,7 +310,9 @@ public enum ManagedLogSurvey {
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: "\r")) }
         while let last = lines.last, last.isEmpty { lines.removeLast() }
-        if lines.count > tailLines {
+        // A .json file is one document: keep every line within the byte cap so it still parses.
+        let wholeDocument = relativePath.lowercased().hasSuffix(".json")
+        if !wholeDocument && lines.count > tailLines {
             lines = Array(lines.suffix(tailLines))
             truncated = true
         }
