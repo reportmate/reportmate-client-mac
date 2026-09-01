@@ -1,40 +1,31 @@
 import Foundation
 
-/// Logs module processor - surveys every management tool log root on the Mac.
+/// Survey of the management tool log roots on the Mac, reported as the `logs`
+/// section of the management module.
 ///
 /// The convention puts each tool's logs under `/Library/Managed <Tool>/logs`
 /// (Managed Installs for Munki, Managed Bootstrap for BootstrapMate, Managed Reports
 /// for ReportMate, Managed State for Outset, ...). For each root this reports the
 /// file inventory, the latest session summary when the tool writes Cimian-style
-/// `YYYY-MM-DD/HHMM/session.json` directories, error and warning counts, and a
-/// capped tail of the primary log. The Windows client does the same over
-/// `C:\ProgramData\Managed*\logs`, with the same JSON shape.
-public class LogsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
-
-    public init(configuration: ReportMateConfiguration) {
-        super.init(moduleId: "logs", configuration: configuration)
-    }
-
-    public override func collectData() async throws -> ModuleData {
-        let roots = ManagedLogSurvey.surveyAll(libraryPath: "/Library")
-        ConsoleFormatter.writeDebug("Logs module found \(roots.count) Managed log roots")
-        let data = LogsData(roots: roots)
-        let dict = try Self.dictionary(from: data)
-        return BaseModuleData(moduleId: moduleId, data: dict)
-    }
-
-    private static func dictionary(from data: LogsData) throws -> [String: Any] {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let encoded = try encoder.encode(data)
-        let object = try JSONSerialization.jsonObject(with: encoded)
-        return object as? [String: Any] ?? [:]
-    }
-}
-
+/// `YYYY-MM-DD/HHMM/session.json` directories, error and warning counts, and capped
+/// tails of the most relevant logs. The Windows client does the same over
+/// `C:\ProgramData\Managed*\logs`, with the same JSON shape under `management.logs`.
 /// Pure file-system survey, kept free of the module plumbing so it can be run
 /// against a temporary root in tests.
 public enum ManagedLogSurvey {
+
+    /// The management module's `logs` section: `{ platform, roots }` as plain
+    /// JSON-compatible dictionaries.
+    public static func managementSection(libraryPath: String = "/Library") -> [String: Any] {
+        let roots = surveyAll(libraryPath: libraryPath)
+        ConsoleFormatter.writeDebug("Managed log survey found \(roots.count) roots")
+        var encodedRoots: [Any] = []
+        if let data = try? JSONEncoder().encode(roots),
+           let array = (try? JSONSerialization.jsonObject(with: data)) as? [Any] {
+            encodedRoots = array
+        }
+        return ["platform": "macOS", "roots": encodedRoots]
+    }
 
     /// Roots reported per device.
     public static let maxRoots = 20
