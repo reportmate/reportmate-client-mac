@@ -1,6 +1,7 @@
 import Foundation
 import ArgumentParser
 import Logging
+import ReportMateLogging
 import AppKit
 
 /// ReportMate Application Usage Watcher command
@@ -34,12 +35,22 @@ struct ReportMateAppUsage: ParsableCommand {
     var stats: Bool = false
     
     func run() throws {
-        // Configure logging
+        // Configure logging: the rolled file is the log. The console only carries
+        // warnings unless -v is given, so launchd's capture of stdout stays small.
         let logLevel: Logger.Level = verbose ? .debug : (quiet ? .warning : .info)
+        let logDirectory = "/Library/Managed Reports/logs"
+        LaunchdLogTrimmer.trim(directory: logDirectory)
+        let logFile = RollingLogFile(
+            path: "\(logDirectory)/reportmate-appusage.log",
+            fallbackPath: RollingLogFile.userFallbackPath(for: "reportmate-appusage.log")
+        )
         LoggingSystem.bootstrap { label in
-            var handler = StreamLogHandler.standardOutput(label: label)
-            handler.logLevel = logLevel
-            return handler
+            var console = StreamLogHandler.standardOutput(label: label)
+            console.logLevel = verbose ? .debug : .warning
+            return MultiplexLogHandler([
+                FileLogHandler(file: logFile, level: logLevel),
+                console,
+            ])
         }
         
         var logger = Logger(label: "com.reportmate.appusage")

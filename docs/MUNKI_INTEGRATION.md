@@ -81,7 +81,7 @@ graph TD
 - Runs executable scripts in alphanumeric order
 - Skips hidden files (`.dotfiles`)
 - Passes `$RUNTYPE` argument to each script
-- Logs execution to `/Library/Managed Reports/logs/munki-postflight.log`
+- Logs execution to `/Library/Managed Reports/logs/reportmate-postflight.log`, rolled daily with the newest 30 days kept
 - Non-blocking: failure in one script doesn't prevent others from running
 
 **Source:** Emitted by the package postinstall (see `build.sh`), so a reinstall always recreates it.
@@ -158,19 +158,20 @@ head -5 /usr/local/munki/postflight
 sudo /usr/local/munki/postflight auto
 
 # Check logs
-tail -50 /Library/Managed Reports/logs/munki-postflight.log
-tail -50 /Library/Managed Reports/logs/reportmate-munki-postflight.log
+tail -50 /Library/Managed Reports/logs/reportmate-postflight.log
+tail -50 /Library/Managed Reports/logs/reportmate.log
 ```
 
 **Expected log output:**
 ```
-[2026-01-22 11:30:00] Munki postflight started (runtype: auto)
-[2026-01-22 11:30:00] Found 2 script(s) in postflight.d
-[2026-01-22 11:30:00] Running: 00-original.sh
-[2026-01-22 11:30:03]   00-original.sh completed successfully
-[2026-01-22 11:30:03] Running: reportmate.sh
-[2026-01-22 11:30:08]   reportmate.sh completed successfully
-[2026-01-22 11:30:08] Munki postflight completed
+[2026-01-22 11:30:00] INFO  Munki postflight started (runtype: auto)
+[2026-01-22 11:30:00] INFO  Running: munkireport.sh
+[2026-01-22 11:30:03] INFO    munkireport.sh completed successfully
+[2026-01-22 11:30:03] INFO  Running: reportmate.sh
+[2026-01-22 11:30:03] INFO  Munki run finished (runtype: auto); collecting installs
+[2026-01-22 11:30:03] INFO  installs module started in the background (pid 4242)
+[2026-01-22 11:30:03] INFO    reportmate.sh completed successfully
+[2026-01-22 11:30:03] INFO  Munki postflight completed (2 script(s))
 ```
 
 ### Verify Data Submission
@@ -259,7 +260,7 @@ sudo chown root:wheel /usr/local/munki/postflight
 **Diagnosis:**
 ```bash
 # Check execution time in logs
-grep "completed" /Library/Managed Reports/logs/munki-postflight.log
+grep "completed" /Library/Managed Reports/logs/reportmate-postflight.log
 ```
 
 **Tuning:**

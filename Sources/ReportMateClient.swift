@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import Logging
+import ReportMateLogging
 
 /// ReportMate macOS Client - Device data collection and reporting
 @main
@@ -68,11 +69,22 @@ struct ReportMateClient: AsyncParsableCommand {
         // -vv (level 2) enables progress bars, -vvv (level 3) enables debug output
         ConsoleFormatter.setVerboseLevel(verbose)
         
-        // Configure logging
+        // Configure logging: the file is the log, the console is only what -v asks for.
+        // The file always carries INFO and up; -vvv lowers it to DEBUG.
+        let logDirectory = "/Library/Managed Reports/logs"
+        LaunchdLogTrimmer.trim(directory: logDirectory)
+        let logFile = RollingLogFile(
+            path: "\(logDirectory)/reportmate.log",
+            fallbackPath: RollingLogFile.userFallbackPath(for: "reportmate.log")
+        )
+        let fileLevel: Logger.Level = verboseLevel == .debug ? .debug : .info
         LoggingSystem.bootstrap { label in
-            var handler = StreamLogHandler.standardOutput(label: label)
-            handler.logLevel = verboseLevel.logLevel
-            return handler
+            var console = StreamLogHandler.standardOutput(label: label)
+            console.logLevel = verboseLevel.logLevel
+            return MultiplexLogHandler([
+                FileLogHandler(file: logFile, level: fileLevel),
+                console,
+            ])
         }
         
         let logger = Logger(label: "reportmate.client")
