@@ -72,8 +72,11 @@ public class ReportMateCore {
                 // Normal collection mode
                 
                 // Check if we should skip collection due to recent cache
+                // An explicit module list is a deliberate request (the Munki
+                // postflight asking for installs), not a scheduled sweep, so it
+                // is never traded away for a cache the hourly daemon just wrote.
                 let shouldSkip = await shouldSkipCollection()
-                if !force && shouldSkip && !collectOnly {
+                if !force && shouldSkip && !collectOnly && modulesToRun == nil {
                     logger.info("Skipping collection - recent cache available")
                     return .success(CollectionSummary(moduleCount: 0, recordCount: 0, cached: true))
                 }
