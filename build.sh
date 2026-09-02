@@ -958,6 +958,48 @@ EOF
 </plist>
 EOF
 
+    # Installs daemon - no schedule of its own. The Munki postflight kickstarts
+    # it so the installs module runs under launchd instead of as a child of
+    # managedsoftwareupdate: Munki's own daemons do not set AbandonProcessGroup,
+    # so launchd kills everything in that process group the moment the Munki
+    # run ends, and a nohup'd runner died before it could log a line.
+    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.installs.plist" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.github.reportmate.installs</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner</string>
+        <string>--run-modules</string>
+        <string>installs</string>
+        <string>--force</string>
+    </array>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.installs.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.installs.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>AssociatedBundleIdentifiers</key>
+    <string>com.github.reportmate</string>
+</dict>
+</plist>
+EOF
+
     # App usage watcher daemon - persistent background process for tracking app launches
     if [ -f "${DIST_DIR}/reportmate-appusage" ]; then
         cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.appusage.plist" << 'EOF'
@@ -1288,6 +1330,7 @@ DAEMONS=(
     "com.github.reportmate.fourhourly.plist"
     "com.github.reportmate.daily.plist"
     "com.github.reportmate.allmodules.plist"
+    "com.github.reportmate.installs.plist"
     "com.github.reportmate.appusage.plist"
 )
 
@@ -1511,11 +1554,18 @@ log() {
 
 log INFO "Munki run finished (runtype: ${1:-none}); collecting installs"
 if [ -x "$RUNNER" ]; then
-    # Munki gives a postflight 60 seconds; collecting and transmitting the installs
-    # module can take longer on a big manifest, so run it detached and return at
-    # once. The client writes its own reportmate.log; this one records the hand-off.
-    nohup /bin/sh -c '"$0" --run-modules installs --force >/dev/null 2>&1; rc=$?; printf "[%s] %-5s %s\n" "$(date "+%Y-%m-%d %H:%M:%S")" INFO "installs module exited $rc" >> "$1"' "$RUNNER" "$LOG" >/dev/null 2>&1 &
-    log INFO "installs module started in the background (pid $!)"
+    # Munki gives a postflight 60 seconds, and launchd kills managedsoftwareupdate's
+    # whole process group when the run ends (Munki's daemons do not set
+    # AbandonProcessGroup), so a child started here cannot outlive the run.
+    # Hand the collection to launchd instead: the installs daemon has no schedule
+    # of its own and runs --run-modules installs --force when kickstarted.
+    if /bin/launchctl kickstart -k system/com.github.reportmate.installs 2>/dev/null; then
+        log INFO "installs module kickstarted via launchd (com.github.reportmate.installs)"
+    else
+        log ERROR "launchctl kickstart of com.github.reportmate.installs failed; running inline"
+        "$RUNNER" --run-modules installs --force >/dev/null 2>&1
+        log INFO "installs module exited $?"
+    fi
 else
     log ERROR "managedreportsrunner not found; skipping"
 fi
