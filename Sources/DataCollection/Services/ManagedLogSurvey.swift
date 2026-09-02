@@ -265,7 +265,10 @@ public enum ManagedLogSurvey {
             return nil
         }
         let summary = json["summary"] as? [String: Any]
+        // The Munki fork's summary carries errors and warnings; Cimian's and
+        // StartSet's carry failures (and no warning count), so fall back to it.
         var errors = (summary?["errors"] as? NSNumber)?.intValue
+            ?? (summary?["failures"] as? NSNumber)?.intValue
         var warnings = (summary?["warnings"] as? NSNumber)?.intValue
         if errors == nil, let items = json["error_items"] as? [Any] { errors = items.count }
         if warnings == nil, let items = json["warning_items"] as? [Any] { warnings = items.count }
