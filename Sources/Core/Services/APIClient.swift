@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// API client for communicating with ReportMate backend
@@ -60,6 +61,28 @@ public class APIClient {
         }
     }
 
+    /// One key per collection, the same on every send of it.
+    ///
+    /// The server accumulates usage deltas on conflict, so a payload that
+    /// reaches it twice books its usage twice. That happens on an ordinary
+    /// retry -- a timeout after the server processed but before the client
+    /// saw the response -- and on `--transmit-only`, which re-sends the cached
+    /// payload of a collection that may already have landed. The key is
+    /// derived from what the payload is (device and collection instant), not
+    /// when it is sent, so every send of one collection carries the same key
+    /// and the server processes it once. A key it has not seen commits with
+    /// the submission; a failed submission rolls its key back, so a genuine
+    /// retry after a failure is still processed.
+    static func idempotencyKey(for payload: [String: Any]) -> String? {
+        guard let metadata = payload["metadata"] as? [String: Any],
+              let serial = metadata["serialNumber"] as? String, !serial.isEmpty,
+              let collectedAt = metadata["collectedAt"] as? String, !collectedAt.isEmpty else {
+            return nil
+        }
+        let digest = SHA256.hash(data: Data("\(serial)|\(collectedAt)".utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
     public func transmitData(_ payload: [String: Any]) async throws -> Result<TransmissionResponse, APIError> {
         guard let apiUrl = configuration.apiUrl,
               let url = URL(string: apiUrl) else {
@@ -88,6 +111,9 @@ public class APIClient {
         // "unidentified", which is a rejection nobody can act on. Headers
         // survive a body that never became readable.
         applyIdentityHeaders(to: &request, from: payload)
+        if let key = Self.idempotencyKey(for: payload) {
+            request.setValue(key, forHTTPHeaderField: "Idempotency-Key")
+        }
 
         do {
             // Encode as JSON dictionary
