@@ -5,7 +5,11 @@ import Foundation
 ///
 /// The convention puts each tool's logs under `/Library/Managed <Tool>/logs`
 /// (Managed Installs for Munki, Managed Bootstrap for BootstrapMate, Managed Reports
-/// for ReportMate, Managed State for Outset, ...). For each root this reports the
+/// for ReportMate, Managed State for Outset, ...). Two kinds of root live outside
+/// it and are surveyed from a fixed table (`knownRoots`): the MDM agent's logs
+/// (Intune's daemon under /Library/Logs/Microsoft/Intune, Jamf's /var/log/jamf.log)
+/// reported as `mdm`, and the OS installer log /var/log/install.log reported as
+/// `installer`. For each root this reports the
 /// file inventory, the latest session summary when the tool writes Cimian-style
 /// `YYYY-MM-DD/HHMM/session.json` directories, error and warning counts, and capped
 /// tails of the most relevant logs. The Windows client does the same over
@@ -16,8 +20,8 @@ public enum ManagedLogSurvey {
 
     /// The management module's `logs` section: `{ platform, roots }` as plain
     /// JSON-compatible dictionaries.
-    public static func managementSection(libraryPath: String = "/Library") -> [String: Any] {
-        let roots = surveyAll(libraryPath: libraryPath)
+    public static func managementSection(libraryPath: String = "/Library", systemRoot: String = "/") -> [String: Any] {
+        let roots = surveyKnown(systemRoot: systemRoot) + surveyAll(libraryPath: libraryPath)
         ConsoleFormatter.writeDebug("Managed log survey found \(roots.count) roots")
         var encodedRoots: [Any] = []
         if let data = try? JSONEncoder().encode(roots),
@@ -45,6 +49,143 @@ public enum ManagedLogSurvey {
     static let sessionPattern = try! NSRegularExpression(pattern: "^\\d{4}(_\\d)?$")
     static let errorPattern = try! NSRegularExpression(pattern: "\\b(ERROR|ERR|FAULT|CRITICAL|FATAL)\\b")
     static let warningPattern = try! NSRegularExpression(pattern: "\\b(WARN|WARNING|WRN)\\b")
+
+    /// How a root's lines carry their severity. Generic logs are classified by
+    /// the ERROR/WARN words; the Intune daemon writes a fixed pipe-separated
+    /// record whose third field is I, W or E.
+    public enum LineFormat: Sendable {
+        case generic
+        case intuneDaemon
+    }
+
+    /// A log root that lives outside `/Library/Managed *`: the MDM agent's logs and
+    /// the OS installer log. Detection is by directory or file existence, so a
+    /// device reports only the roots it actually has. `filePattern` selects the
+    /// files inside `directory` that belong to the root, which lets several roots
+    /// share `/var/log`.
+    public struct KnownRoot: Sendable {
+        public let tool: String
+        public let name: String
+        public let directory: String
+        public let filePattern: NSRegularExpression
+        public let primaryLog: String?
+        public let lineFormat: LineFormat
+    }
+
+    /// Roots surveyed on every device, in report order: MDM agents first, then the
+    /// installer log. One entry per MDM; the first whose files exist is the
+    /// device's MDM (a Mac has one). Only paths verified on a real device belong
+    /// here; add other MDMs once their log location is confirmed.
+    public static let knownRoots: [KnownRoot] = [
+        KnownRoot(tool: "mdm", name: "Intune",
+                  directory: "Library/Logs/Microsoft/Intune",
+                  filePattern: try! NSRegularExpression(pattern: "^IntuneMDMDaemon .*\\.log$"),
+                  primaryLog: nil, lineFormat: .intuneDaemon),
+        KnownRoot(tool: "mdm", name: "Jamf",
+                  directory: "var/log",
+                  filePattern: try! NSRegularExpression(pattern: "^jamf\\.log$"),
+                  primaryLog: "jamf.log", lineFormat: .generic),
+        KnownRoot(tool: "installer", name: "Installer",
+                  directory: "var/log",
+                  filePattern: try! NSRegularExpression(pattern: "^install\\.log(\\.\\d+\\.gz)?$"),
+                  primaryLog: "install.log", lineFormat: .generic),
+    ]
+
+    /// The known roots present on this device. `systemRoot` is "/" in production
+    /// and a temporary directory in tests.
+    public static func surveyKnown(systemRoot: String) -> [LogRoot] {
+        var roots: [LogRoot] = []
+        var seenTools = Set<String>()
+        for known in knownRoots where !seenTools.contains(known.tool) {
+            let dir = (systemRoot as NSString).appendingPathComponent(known.directory)
+            guard isDirectory(dir), let root = surveyKnown(known, directory: dir) else { continue }
+            roots.append(root)
+            seenTools.insert(known.tool)
+        }
+        return roots
+    }
+
+    /// Flat survey of one known root: the matching files in its directory, newest
+    /// first, with tails of the text logs among them. Returns nil when no file
+    /// matches, so an installed-then-removed agent drops out of the report.
+    static func surveyKnown(_ known: KnownRoot, directory: String) -> LogRoot? {
+        let entries = ((try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? [])
+            .filter { matches(known.filePattern, $0) }
+        var files: [LogFileEntry] = []
+        for entry in entries {
+            let full = (directory as NSString).appendingPathComponent(entry)
+            if let file = fileEntry(fullPath: full, relativePath: entry) { files.append(file) }
+        }
+        guard !files.isEmpty else { return nil }
+        files.sort { ($0.modified ?? "") > ($1.modified ?? "") }
+        let totalBytes = files.reduce(Int64(0)) { $0 + $1.bytes }
+        let newest = files.first?.modified
+        let fileCount = files.count
+        if files.count > maxFiles { files = Array(files.prefix(maxFiles)) }
+
+        let primary: String?
+        if let fixed = known.primaryLog, entries.contains(fixed) {
+            primary = fixed
+        } else {
+            primary = newestLog(in: directory, entries: entries)
+        }
+        var tails: [LogTail] = []
+        var errors = 0
+        var warnings = 0
+        for relative in tailCandidates(primary: primary, files: files) {
+            let full = (directory as NSString).appendingPathComponent(relative)
+            let t = readTail(fullPath: full, relativePath: relative)
+            if t.lines.isEmpty && relative != primary { continue }
+            tails.append(t)
+            if tails.count >= maxTails { break }
+        }
+        if let first = tails.first, first.file == primary {
+            for line in first.lines {
+                switch classify(line, format: known.lineFormat) {
+                case .error: errors += 1
+                case .warning: warnings += 1
+                case .plain: break
+                }
+            }
+        }
+        return LogRoot(
+            tool: known.tool,
+            name: known.name,
+            path: directory,
+            layout: "flat",
+            fileCount: fileCount,
+            totalBytes: totalBytes,
+            newestModified: newest,
+            inventoryTruncated: false,
+            files: files,
+            latestSession: nil,
+            primaryLog: primary,
+            errorCount: errors,
+            warningCount: warnings,
+            tails: tails
+        )
+    }
+
+    enum Severity { case error, warning, plain }
+
+    /// Severity of one log line under a root's line format.
+    static func classify(_ line: String, format: LineFormat) -> Severity {
+        switch format {
+        case .generic:
+            if matches(errorPattern, line) { return .error }
+            if matches(warningPattern, line) { return .warning }
+            return .plain
+        case .intuneDaemon:
+            // yyyy-MM-dd HH:mm:ss:SSS | IntuneMDM-Daemon | E | thread | logger | message
+            let fields = line.split(separator: "|", maxSplits: 3, omittingEmptySubsequences: false)
+            guard fields.count >= 3 else { return .plain }
+            switch fields[2].trimmingCharacters(in: .whitespaces) {
+            case "E": return .error
+            case "W": return .warning
+            default: return .plain
+            }
+        }
+    }
 
     /// Every `Managed*` directory under `libraryPath` that has a `logs` subdirectory.
     public static func surveyAll(libraryPath: String) -> [LogRoot] {
