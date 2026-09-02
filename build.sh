@@ -1514,7 +1514,7 @@ if [ -x "$RUNNER" ]; then
     # Munki gives a postflight 60 seconds; collecting and transmitting the installs
     # module can take longer on a big manifest, so run it detached and return at
     # once. The client writes its own reportmate.log; this one records the hand-off.
-    nohup /bin/sh -c '"$0" --run-modules installs >/dev/null 2>&1; rc=$?; printf "[%s] %-5s %s\n" "$(date "+%Y-%m-%d %H:%M:%S")" INFO "installs module exited $rc" >> "$1"' "$RUNNER" "$LOG" >/dev/null 2>&1 &
+    nohup /bin/sh -c '"$0" --run-modules installs --force >/dev/null 2>&1; rc=$?; printf "[%s] %-5s %s\n" "$(date "+%Y-%m-%d %H:%M:%S")" INFO "installs module exited $rc" >> "$1"' "$RUNNER" "$LOG" >/dev/null 2>&1 &
     log INFO "installs module started in the background (pid $!)"
 else
     log ERROR "managedreportsrunner not found; skipping"
