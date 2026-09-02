@@ -41,7 +41,11 @@ public enum ManagedLogSurvey {
     /// thousands of per-run subdirectories when a tool's retention has failed;
     /// the walk stops here and marks the inventory as a floor.
     public static let walkBudget = 5_000
-    /// Tail limits per root.
+    /// Tail limits. The primary log is the run people read top to bottom, so its
+    /// cap fits a whole ordinary run (a Munki or Cimian run.log is 400-600 lines,
+    /// 35-40 KB); the other tails only need their most recent lines.
+    public static let primaryTailLines = 2_000
+    public static let primaryTailBytes = 256 * 1024
     public static let tailLines = 150
     public static let tailBytes = 32 * 1024
 
@@ -134,7 +138,7 @@ public enum ManagedLogSurvey {
         var warnings = 0
         for relative in tailCandidates(primary: primary, files: files) {
             let full = (directory as NSString).appendingPathComponent(relative)
-            let t = readTail(fullPath: full, relativePath: relative)
+            let t = readTail(fullPath: full, relativePath: relative, isPrimary: relative == primary)
             if t.lines.isEmpty && relative != primary { continue }
             tails.append(t)
             if tails.count >= maxTails { break }
@@ -270,7 +274,7 @@ public enum ManagedLogSurvey {
         var warnings = 0
         for relative in tailCandidates(primary: primary, files: files) {
             let full = (logsDir as NSString).appendingPathComponent(relative)
-            let t = readTail(fullPath: full, relativePath: relative)
+            let t = readTail(fullPath: full, relativePath: relative, isPrimary: relative == primary)
             if t.lines.isEmpty && relative != primary { continue }
             tails.append(t)
             if tails.count >= maxTails { break }
@@ -425,14 +429,17 @@ public enum ManagedLogSurvey {
         )
     }
 
-    /// Last `tailBytes` of the file, split into at most `tailLines` lines.
-    static func readTail(fullPath: String, relativePath: String) -> LogTail {
+    /// Last `tailBytes` of the file, split into at most `tailLines` lines; the
+    /// primary log gets the larger caps so a whole run is shown.
+    static func readTail(fullPath: String, relativePath: String, isPrimary: Bool = false) -> LogTail {
+        let maxBytes = isPrimary ? primaryTailBytes : tailBytes
+        let maxLines = isPrimary ? primaryTailLines : tailLines
         guard let handle = FileHandle(forReadingAtPath: fullPath) else {
             return LogTail(file: relativePath, lines: [], truncated: false, bytes: 0)
         }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
-        let start = size > UInt64(tailBytes) ? size - UInt64(tailBytes) : 0
+        let start = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
         try? handle.seek(toOffset: start)
         let data = (try? handle.readToEnd()) ?? Data()
         var text = String(decoding: data, as: UTF8.self)
@@ -447,8 +454,8 @@ public enum ManagedLogSurvey {
         while let last = lines.last, last.isEmpty { lines.removeLast() }
         // A .json file is one document: keep every line within the byte cap so it still parses.
         let wholeDocument = relativePath.lowercased().hasSuffix(".json")
-        if !wholeDocument && lines.count > tailLines {
-            lines = Array(lines.suffix(tailLines))
+        if !wholeDocument && lines.count > maxLines {
+            lines = Array(lines.suffix(maxLines))
             truncated = true
         }
         let bytes = lines.reduce(0) { $0 + $1.utf8.count + 1 }
