@@ -104,7 +104,10 @@ public enum ManagedLogSurvey {
     public static let tailBytes = 32 * 1024
 
     static let dayPattern = try! NSRegularExpression(pattern: "^\\d{4}-\\d{2}-\\d{2}$")
-    static let sessionPattern = try! NSRegularExpression(pattern: "^\\d{4}(_\\d)?$")
+    /// A session directory is `HHMM` or `HHMMSS`, either optionally suffixed
+    /// `_N` by a writer that collided within the same minute. The four-digit
+    /// form predates seconds and stays readable indefinitely.
+    static let sessionPattern = try! NSRegularExpression(pattern: "^\\d{4}(\\d{2})?(_\\d)?$")
     static let errorPattern = try! NSRegularExpression(pattern: "\\b(ERROR|ERR|FAULT|CRITICAL|FATAL)\\b")
     static let warningPattern = try! NSRegularExpression(pattern: "\\b(WARN|WARNING|WRN)\\b")
 
@@ -271,31 +274,51 @@ public enum ManagedLogSurvey {
         return nil
     }
 
+    /// Orders `HHMM` and `HHMMSS` session names against each other by padding the
+    /// time to seconds, so a minute-resolution directory sorts as that minute's
+    /// zero second rather than ahead of every second within it.
+    static func sessionSortKey(_ name: String) -> String {
+        let parts = name.split(separator: "_", maxSplits: 1, omittingEmptySubsequences: false)
+        let time = String(parts[0]).padding(toLength: 6, withPad: "0", startingAt: 0)
+        return parts.count > 1 ? time + "_" + parts[1] : time
+    }
+
     public static func survey(rootDir: String, logsDir: String) -> LogRoot? {
         let fm = FileManager.default
         let dirName = (rootDir as NSString).lastPathComponent
         let tool = toolKey(from: dirName)
         guard !tool.isEmpty else { return nil }
 
-        // Session layout: logs/YYYY-MM-DD/HHMM/
+        // Day-nested layouts: logs/YYYY-MM-DD/HHMMSS/ for a tool that performs
+        // discrete runs, logs/YYYY-MM-DD/ for a utility invoked too often to
+        // justify a directory per invocation.
         var latestSessionDir: String? = nil
         var latestSessionId: String? = nil
+        var layout = "flat"
         let topEntries = (try? fm.contentsOfDirectory(atPath: logsDir)) ?? []
         let dayDirs = topEntries
             .filter { matches(dayPattern, $0) && isDirectory((logsDir as NSString).appendingPathComponent($0)) }
             .sorted(by: >)
         for day in dayDirs {
             let dayPath = (logsDir as NSString).appendingPathComponent(day)
-            let sessions = ((try? fm.contentsOfDirectory(atPath: dayPath)) ?? [])
+            let entries = (try? fm.contentsOfDirectory(atPath: dayPath)) ?? []
+            let sessions = entries
                 .filter { matches(sessionPattern, $0) && isDirectory((dayPath as NSString).appendingPathComponent($0)) }
-                .sorted(by: >)
+                .sorted { sessionSortKey($0) > sessionSortKey($1) }
             if let newest = sessions.first {
                 latestSessionDir = (dayPath as NSString).appendingPathComponent(newest)
                 latestSessionId = "\(day)-\(newest)"
+                layout = "sessions"
+                break
+            }
+            let hasFiles = entries.contains { !isDirectory((dayPath as NSString).appendingPathComponent($0)) }
+            if hasFiles {
+                latestSessionDir = dayPath
+                latestSessionId = day
+                layout = "daily"
                 break
             }
         }
-        let layout = latestSessionDir == nil ? "flat" : "sessions"
 
         // Inventory: root-level files plus the latest session's files, newest first.
         var files: [LogFileEntry] = []
