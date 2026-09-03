@@ -53,4 +53,7 @@ public struct LogRoot: Codable, Sendable {
     public let warningCount: Int
     /// Tails of the root's most relevant logs, primary first; capped per file and per root
     public let tails: [LogTail]
+    /// Version of the tool that owns the root, read from its package receipt or
+    /// app bundle after the survey; nil when the tool has no known source.
+    public var version: String?
 }

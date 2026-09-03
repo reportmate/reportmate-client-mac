@@ -21,7 +21,11 @@ public enum ManagedLogSurvey {
     /// The management module's `logs` section: `{ platform, roots }` as plain
     /// JSON-compatible dictionaries.
     public static func managementSection(libraryPath: String = "/Library", systemRoot: String = "/") -> [String: Any] {
-        let roots = surveyKnown(systemRoot: systemRoot) + surveyAll(libraryPath: libraryPath)
+        let roots = (surveyKnown(systemRoot: systemRoot) + surveyAll(libraryPath: libraryPath)).map { root -> LogRoot in
+            var versioned = root
+            versioned.version = toolVersion(tool: root.tool, name: root.name, systemRoot: systemRoot)
+            return versioned
+        }
         ConsoleFormatter.writeDebug("Managed log survey found \(roots.count) roots")
         var encodedRoots: [Any] = []
         if let data = try? JSONEncoder().encode(roots),
@@ -29,6 +33,56 @@ public enum ManagedLogSurvey {
             encodedRoots = array
         }
         return ["platform": "macOS", "roots": encodedRoots]
+    }
+
+    /// Where a root's tool version comes from. Receipts are read straight from
+    /// `/var/db/receipts/<id>.plist` (no process is spawned); the first id with a
+    /// receipt wins, so a tool that ships several packages lists its core first.
+    /// App bundles are read from their Info.plist for agents that install
+    /// without a receipt we own.
+    public enum VersionSource: Sendable {
+        case receipts([String])
+        case bundle(String)
+    }
+
+    /// Tool key (and, for MDM roots, the agent name) to version source.
+    public static let versionSources: [String: VersionSource] = [
+        "installs": .receipts(["com.googlecode.munki.core", "com.googlecode.munki.admin", "com.googlecode.munki.app_usage"]),
+        "bootstrap": .receipts(["com.github.bootstrapmate"]),
+        "reports": .receipts(["com.github.reportmate"]),
+        "state": .receipts(["io.macadmins.Outset"]),
+        "encryption": .receipts(["com.grahamgilbert.Crypt"]),
+        "users": .receipts(["com.github.rodchristiansen.manageusers"]),
+        "utilities": .receipts(["dockutil.cli.tool"]),
+        "notifications": .receipts(["au.csiro.dialogcli"]),
+        "mdm:intune": .bundle("Library/Intune/Microsoft Intune Agent.app"),
+        "mdm:jamf": .receipts(["com.jamfsoftware.jamf"]),
+    ]
+
+    /// The version of the tool that owns `tool`'s root, or nil. `systemRoot` is
+    /// "/" in production and a temporary directory in tests.
+    public static func toolVersion(tool: String, name: String, systemRoot: String) -> String? {
+        let key = tool == "mdm" ? "mdm:\(name.lowercased())" : tool
+        guard let source = versionSources[key] else { return nil }
+        switch source {
+        case .receipts(let ids):
+            for id in ids {
+                let path = (systemRoot as NSString).appendingPathComponent("var/db/receipts/\(id).plist")
+                if let version = plistString(at: path, key: "PackageVersion") { return version }
+            }
+            return nil
+        case .bundle(let bundlePath):
+            let path = (systemRoot as NSString).appendingPathComponent(bundlePath + "/Contents/Info.plist")
+            return plistString(at: path, key: "CFBundleShortVersionString") ?? plistString(at: path, key: "CFBundleVersion")
+        }
+    }
+
+    static func plistString(at path: String, key: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: path),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let value = plist[key] as? String else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Roots reported per device.
