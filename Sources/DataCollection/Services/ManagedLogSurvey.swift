@@ -289,25 +289,36 @@ public enum ManagedLogSurvey {
         let tool = toolKey(from: dirName)
         guard !tool.isEmpty else { return nil }
 
-        // Session layout: logs/YYYY-MM-DD/HHMM/
+        // Day-nested layouts: logs/YYYY-MM-DD/HHMMSS/ for a tool that performs
+        // discrete runs, logs/YYYY-MM-DD/ for a utility invoked too often to
+        // justify a directory per invocation.
         var latestSessionDir: String? = nil
         var latestSessionId: String? = nil
+        var layout = "flat"
         let topEntries = (try? fm.contentsOfDirectory(atPath: logsDir)) ?? []
         let dayDirs = topEntries
             .filter { matches(dayPattern, $0) && isDirectory((logsDir as NSString).appendingPathComponent($0)) }
             .sorted(by: >)
         for day in dayDirs {
             let dayPath = (logsDir as NSString).appendingPathComponent(day)
-            let sessions = ((try? fm.contentsOfDirectory(atPath: dayPath)) ?? [])
+            let entries = (try? fm.contentsOfDirectory(atPath: dayPath)) ?? []
+            let sessions = entries
                 .filter { matches(sessionPattern, $0) && isDirectory((dayPath as NSString).appendingPathComponent($0)) }
                 .sorted { sessionSortKey($0) > sessionSortKey($1) }
             if let newest = sessions.first {
                 latestSessionDir = (dayPath as NSString).appendingPathComponent(newest)
                 latestSessionId = "\(day)-\(newest)"
+                layout = "sessions"
+                break
+            }
+            let hasFiles = entries.contains { !isDirectory((dayPath as NSString).appendingPathComponent($0)) }
+            if hasFiles {
+                latestSessionDir = dayPath
+                latestSessionId = day
+                layout = "daily"
                 break
             }
         }
-        let layout = latestSessionDir == nil ? "flat" : "sessions"
 
         // Inventory: root-level files plus the latest session's files, newest first.
         var files: [LogFileEntry] = []
