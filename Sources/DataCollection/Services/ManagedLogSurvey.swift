@@ -104,7 +104,10 @@ public enum ManagedLogSurvey {
     public static let tailBytes = 32 * 1024
 
     static let dayPattern = try! NSRegularExpression(pattern: "^\\d{4}-\\d{2}-\\d{2}$")
-    static let sessionPattern = try! NSRegularExpression(pattern: "^\\d{4}(_\\d)?$")
+    /// A session directory is `HHMM` or `HHMMSS`, either optionally suffixed
+    /// `_N` by a writer that collided within the same minute. The four-digit
+    /// form predates seconds and stays readable indefinitely.
+    static let sessionPattern = try! NSRegularExpression(pattern: "^\\d{4}(\\d{2})?(_\\d)?$")
     static let errorPattern = try! NSRegularExpression(pattern: "\\b(ERROR|ERR|FAULT|CRITICAL|FATAL)\\b")
     static let warningPattern = try! NSRegularExpression(pattern: "\\b(WARN|WARNING|WRN)\\b")
 
@@ -271,6 +274,15 @@ public enum ManagedLogSurvey {
         return nil
     }
 
+    /// Orders `HHMM` and `HHMMSS` session names against each other by padding the
+    /// time to seconds, so a minute-resolution directory sorts as that minute's
+    /// zero second rather than ahead of every second within it.
+    static func sessionSortKey(_ name: String) -> String {
+        let parts = name.split(separator: "_", maxSplits: 1, omittingEmptySubsequences: false)
+        let time = String(parts[0]).padding(toLength: 6, withPad: "0", startingAt: 0)
+        return parts.count > 1 ? time + "_" + parts[1] : time
+    }
+
     public static func survey(rootDir: String, logsDir: String) -> LogRoot? {
         let fm = FileManager.default
         let dirName = (rootDir as NSString).lastPathComponent
@@ -288,7 +300,7 @@ public enum ManagedLogSurvey {
             let dayPath = (logsDir as NSString).appendingPathComponent(day)
             let sessions = ((try? fm.contentsOfDirectory(atPath: dayPath)) ?? [])
                 .filter { matches(sessionPattern, $0) && isDirectory((dayPath as NSString).appendingPathComponent($0)) }
-                .sorted(by: >)
+                .sorted { sessionSortKey($0) > sessionSortKey($1) }
             if let newest = sessions.first {
                 latestSessionDir = (dayPath as NSString).appendingPathComponent(newest)
                 latestSessionId = "\(day)-\(newest)"
