@@ -835,17 +835,24 @@ struct ReportMateClient: AsyncParsableCommand {
             } else {
                 message = "\(newlyRemovedItems.count) packages removed"
             }
+            // A removal goes out as `removed_items`, not as a flat name -> version map:
+            // Munki reports no version for a removal, and an empty value in a flat map
+            // is indistinguishable from context, so the dashboard dropped every entry
+            // and rendered "2 packages removed" with nothing under it. `action` also
+            // keeps it from being coloured and labelled as an install.
             events.append(ReportMateEvent(
                 moduleId: "managedinstalls",
                 eventType: "success",
                 message: message,
                 timestamp: Date(),
-                stringDetails: newlyRemovedItems.count <= 5
-                    ? Dictionary(uniqueKeysWithValues: newlyRemovedItems.compactMap { item -> (String, String)? in
+                details: [
+                    "action": .string("remove"),
+                    "count": .int(newlyRemovedItems.count),
+                    "removed_items": .dictArray(newlyRemovedItems.compactMap { item -> [String: String]? in
                         guard let name = item["name"] else { return nil }
-                        return (name, item["version"] ?? "")
-                      })
-                    : ["count": String(newlyRemovedItems.count)]
+                        return ["name": name, "version": item["version"] ?? ""]
+                    }),
+                ]
             ))
         }
         
@@ -942,7 +949,9 @@ struct ReportMateClient: AsyncParsableCommand {
             var details = baseDetails("success")
             details["action"] = .string(action)
             details["count"] = .int(list.count)
-            details["items"] = .dictArray(list)
+            // Removals go under their own key so the dashboard labels them "Removed"
+            // rather than folding them in with the installs.
+            details[action == "remove" ? "removed_items" : "items"] = .dictArray(list)
             events.append(ReportMateEvent(moduleId: "installs", eventType: "success", message: describe(list, verb: verb), timestamp: Date(), details: details))
         }
 
