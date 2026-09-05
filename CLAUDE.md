@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **macadmins osquery extension** (additional macOS-specific tables)
 - **Bash** (shell commands as fallback for data collection)
 
-Any new code or modifications MUST use these technologies only. The legacy `PythonService.swift` exists but should not be extended or used for new functionality.
+Any new code or modifications MUST use these technologies only. No Python remains in the tree; do not reintroduce it.
 
 ### Example: Use `jq` NOT Python for JSON Processing
 
@@ -83,9 +83,6 @@ sudo .build/release/managedreportsrunner --run-module security
 # Run multiple modules
 sudo .build/release/managedreportsrunner --run-modules security,network,hardware
 
-# Test configuration
-sudo .build/release/managedreportsrunner --test
-
 # Collect only (no transmission)
 sudo .build/release/managedreportsrunner --collect-only
 ```
@@ -104,7 +101,7 @@ Sources/
 │   ├── Services/
 │   │   ├── APIClient.swift      # HTTP client for ReportMate API
 │   │   ├── BashService.swift    # Shell command execution
-│   │   └── PythonService.swift  # LEGACY - do not use or extend
+│   │   └── ProcessRunner.swift  # Process execution with timeouts
 │   └── Utils/                   # SystemUtils for device info
 ├── DataCollection/
 │   ├── DataCollectionService.swift  # Coordinates module execution
@@ -132,7 +129,7 @@ Sources/
 1. `ReportMateClient` parses CLI args, initializes `ConfigurationManager`
 2. `ConfigurationManager` loads settings: defaults → plist → environment → CLI args
 3. For each enabled module, creates a `ModuleProcessor` subclass
-4. `ModuleProcessor.executeWithFallback()` tries: osquery → bash (no Python for new code)
+4. `ModuleProcessor.executeWithFallback()` tries: osquery → bash
 5. Results aggregated into `UnifiedDevicePayload` matching Windows client format
 6. `APIClient` transmits to ReportMate API
 
@@ -140,15 +137,16 @@ Sources/
 
 Each module processor extends `BaseModuleProcessor` and implements `collectData()`. The base class provides `executeWithFallback(osquery:bash:)` - use only osquery and bash for data collection.
 
-Available modules: `hardware`, `system`, `network`, `security`, `applications`, `management`, `inventory`, `displays`, `printers`, `peripherals`, `installs`, `profiles`
+Available modules: `hardware`, `system`, `network`, `security`, `applications`, `management`, `inventory`, `identity`, `peripherals`, `installs`. `displays` and `printers` are accepted as aliases of `peripherals`.
 
 ### Configuration Hierarchy (highest to lowest precedence)
 
 1. Command-line arguments
 2. Environment variables (`REPORTMATE_*` prefix)
-3. System plist (`/Library/Application Support/ReportMate/reportmate.plist`)
-4. User plist (`~/Library/Application Support/ReportMate/reportmate.plist`)
-5. Embedded defaults
+3. Managed preferences from an MDM configuration profile (`com.github.reportmate`)
+4. System plist (`/Library/Preferences/com.github.reportmate.plist`)
+5. User plist (`~/Library/Managed Reports/reportmate.plist`)
+6. Embedded defaults
 
 ## Key Dependencies
 
@@ -169,10 +167,12 @@ Available modules: `hardware`, `system`, `network`, `security`, `applications`, 
 ## LaunchDaemons
 
 The installer creates multiple daemons with different schedules:
-- `com.github.reportmate.boot` - Full collection at boot
-- `com.github.reportmate.hourly` - security, profiles, network, management
-- `com.github.reportmate.fourhourly` - applications, inventory, system
-- `com.github.reportmate.daily` - hardware, displays (random offset within the hour after 09:00)
+- `com.github.reportmate.hourly` - security, network, management, hardware (quick storage mode)
+- `com.github.reportmate.fourhourly` - applications, inventory, system, identity, peripherals
+- `com.github.reportmate.daily` - hardware with deep storage analysis (random offset within the hour after 09:00)
+- `com.github.reportmate.allmodules` - full collection, random offset in the 04:00-06:00 window
+- `com.github.reportmate.installs` - installs module, no schedule; kickstarted by the Munki postflight
+- `com.github.reportmate.appusage` - the persistent app usage watcher (RunAtLoad + KeepAlive)
 
 ## Worktrees
 
