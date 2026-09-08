@@ -260,7 +260,13 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                         i["warningMessages"] = messages
                         i["lastWarning"] = messages.joined(separator: "\n")
                     }
-                    if let loop = record["install_loop_detected"] as? Bool { i["hasInstallLoop"] = loop }
+                    // Always report the loop state, under both names Cimian uses.
+                    // Sending it only when the fork happened to set it left the
+                    // field absent from nearly every Mac item, so a dashboard
+                    // that reads it saw no Munki loops at all.
+                    let loop = record["install_loop_detected"] as? Bool ?? false
+                    i["hasInstallLoop"] = loop
+                    i["installLoopDetected"] = loop
                     if let code = record["status_reason_code"] as? String, !code.isEmpty { i["statusReasonCode"] = code }
                     if let reason = record["status_reason"] as? String, !reason.isEmpty { i["statusReason"] = reason }
                 }
