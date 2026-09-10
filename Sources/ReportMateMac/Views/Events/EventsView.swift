@@ -18,6 +18,13 @@ struct EventsView: View {
 
     private static let soloKinds: Set<EventKind> = [.system, .info]
 
+    private var linkQuery: [String: String] {
+        if mode == .failures { return ["failures": "1"] }
+        var q: [String: String] = [:]
+        if model.active != EventsFeedModel.defaultKinds { q["filter"] = model.active.map(\.rawValue).sorted().joined(separator: ",") }
+        return q
+    }
+
     private var filtered: [BundledEvent] {
         var list = EventBundling.bundle(model.events)
         if appState.platformFilter != .all { list = list.filter { appState.platformFilter.includes($0.platform) } }
@@ -85,6 +92,14 @@ struct EventsView: View {
             }
         }
         .onChange(of: model.active) { _, _ in model.scheduleReload(api: appState.api) }
+        .onChange(of: appState.pendingDeepLink, initial: true) { _, _ in
+            guard let link = appState.consumeDeepLink(for: .events) else { return }
+            if case .eventsFailures = link.target { mode = .failures; return }
+            mode = .feed
+            let kinds = (link.query["filter"] ?? "").split(separator: ",").compactMap { EventKind(rawValue: String($0).lowercased()) }
+            if !kinds.isEmpty { model.active = Set(kinds) }
+        }
+        .onChange(of: linkQuery, initial: true) { _, q in appState.linkQuery = q }
         .onChange(of: appState.refreshRequested) { _, _ in Task { await model.reload(api: appState.api) } }
     }
 

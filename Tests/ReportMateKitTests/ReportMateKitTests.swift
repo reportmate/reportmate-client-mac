@@ -375,3 +375,32 @@ import Foundation
         #expect(!LocalReportStore.isAvailable(at: cache.appendingPathComponent("missing")))
     }
 }
+
+@Suite struct DeepLinkTests {
+    @Test func parsesAppLinks() throws {
+        let device = try #require(DeepLink(url: URL(string: "reportmate://device/SAMPLE1?filter=errors#installs")!))
+        #expect(device.target == .device(serial: "SAMPLE1", tab: "installs"))
+        #expect(device.query["filter"] == "errors")
+        #expect(device.url.absoluteString == "reportmate://device/SAMPLE1?tab=installs&filter=errors")
+        let usage = try #require(DeepLink(url: URL(string: "reportmate://applications/usage/Adobe%20Photoshop?days=90")!))
+        #expect(usage.target == .applicationUsage(app: "Adobe Photoshop"))
+        #expect(usage.query["days"] == "90")
+        #expect(DeepLink(url: URL(string: "reportmate://events/failures")!)?.target == .eventsFailures)
+        #expect(DeepLink(url: URL(string: "reportmate://system?osVersion=15.4")!)?.target == .report("system"))
+        #expect(DeepLink(url: URL(string: "reportmate://this-mac")!)?.target == .thisMac)
+        #expect(DeepLink(url: URL(string: "reportmate://")!)?.target == .dashboard)
+        #expect(DeepLink(url: URL(string: "reportmate://nonsense")!) == nil)
+    }
+
+    @Test func acceptsWebURLsAndRoundTrips() throws {
+        let fromWeb = try #require(DeepLink(url: URL(string: "https://reportmate.example.com/device/SAMPLE1?filter=last_run#installs")!))
+        #expect(fromWeb.target == .device(serial: "SAMPLE1", tab: "installs"))
+        let swapped = try #require(DeepLink(url: URL(string: "reportmate://reportmate.example.com/installs?filter=warnings&view=messages")!))
+        #expect(swapped.target == .report("installs"))
+        #expect(swapped.query["view"] == "messages")
+        let web = try #require(fromWeb.webURL(base: URL(string: "https://reportmate.example.com")!))
+        #expect(web.absoluteString == "https://reportmate.example.com/device/SAMPLE1?filter=last_run#installs")
+        let apps = DeepLink(target: .report("applications"), query: ["type": "usage", "apps": "Blender,Zoom", "period": "30"])
+        #expect(DeepLink(url: apps.url)?.query["apps"] == "Blender,Zoom")
+    }
+}

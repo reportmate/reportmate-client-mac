@@ -32,13 +32,25 @@ public struct AppConfiguration: Sendable, Equatable {
     public var apiKey: String
     public var passphrase: String
     public var oidcAudience: String
+    /// The web dashboard, used to build links that fall back to the browser.
+    public var webBaseURL: String
 
-    public init(baseURL: String = "", authMethod: AuthMethod = .apiKey, apiKey: String = "", passphrase: String = "", oidcAudience: String = "") {
+    public static let webBaseURLDefaultsKey = "webBaseURL"
+
+    public init(baseURL: String = "", authMethod: AuthMethod = .apiKey, apiKey: String = "", passphrase: String = "", oidcAudience: String = "", webBaseURL: String = "") {
         self.baseURL = baseURL
         self.authMethod = authMethod
         self.apiKey = apiKey
         self.passphrase = passphrase
         self.oidcAudience = oidcAudience
+        self.webBaseURL = webBaseURL
+    }
+
+    public var normalizedWebURL: URL? {
+        var s = webBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        while s.hasSuffix("/") { s.removeLast() }
+        guard !s.isEmpty, let url = URL(string: s), url.host != nil else { return nil }
+        return url
     }
 
     public var normalizedBaseURL: String {
@@ -75,6 +87,7 @@ public struct AppConfiguration: Sendable, Equatable {
         config.apiKey = keychain.get(.apiKey) ?? ""
         config.passphrase = keychain.get(.passphrase) ?? ""
         config.oidcAudience = keychain.get(.oidcAudience) ?? ""
+        config.webBaseURL = UserDefaults.standard.string(forKey: AppConfiguration.webBaseURLDefaultsKey) ?? ""
         if let m = keychain.get(.authMethod), let method = AuthMethod(rawValue: m) {
             config.authMethod = method
         } else if !config.apiKey.isEmpty {
@@ -86,6 +99,7 @@ public struct AppConfiguration: Sendable, Equatable {
         }
 
         if let v = environment["REPORTMATE_URL"], !v.isEmpty { config.baseURL = v }
+        if let v = environment["REPORTMATE_WEB_URL"], !v.isEmpty { config.webBaseURL = v }
         if let v = environment["REPORTMATE_API_KEY"], !v.isEmpty { config.apiKey = v; config.authMethod = .apiKey }
         if let v = environment["REPORTMATE_PASSPHRASE"], !v.isEmpty, config.apiKey.isEmpty { config.passphrase = v; config.authMethod = .passphrase }
         if let v = environment["REPORTMATE_OIDC_AUDIENCE"], !v.isEmpty {
@@ -101,5 +115,6 @@ public struct AppConfiguration: Sendable, Equatable {
         try keychain.set(passphrase, for: .passphrase)
         try keychain.set(oidcAudience, for: .oidcAudience)
         try keychain.set(authMethod.rawValue, for: .authMethod)
+        UserDefaults.standard.set(webBaseURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: AppConfiguration.webBaseURLDefaultsKey)
     }
 }

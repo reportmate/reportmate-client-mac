@@ -37,6 +37,7 @@ struct ContentView: View {
                 PlatformToggle()
             }
             ToolbarItemGroup(placement: .primaryAction) {
+                CopyLinkMenu()
                 Button { appState.showSearch = true } label: {
                     Label("Search", systemImage: "magnifyingglass")
                 }
@@ -57,6 +58,9 @@ struct ContentView: View {
             }
         }
         .focusedSceneValue(\.appState, appState)
+        .onOpenURL { url in
+            if let link = DeepLink(url: url) { appState.open(deepLink: link) }
+        }
         .sheet(isPresented: $state.showSearch) {
             GlobalSearchView()
                 .environment(appState)
@@ -118,5 +122,41 @@ struct PlatformToggle: View {
         .buttonStyle(.plain)
         .focusable(false)
         .help(active ? "Showing \(help), click to show all" : "Filter to \(help)")
+    }
+}
+
+/// Copy Link: the web handoff URL when a web dashboard is configured (it
+/// opens the app when installed and the web page otherwise), plus the raw
+/// `reportmate://` and web forms.
+struct CopyLinkMenu: View {
+    @Environment(AppState.self) private var appState
+    @State private var copied = false
+
+    private var link: DeepLink { appState.currentDeepLink }
+    private var webBase: URL? { appState.configuration.normalizedWebURL }
+
+    var body: some View {
+        Menu {
+            if let webBase, let handoff = link.handoffURL(webBase: webBase) {
+                Button("Copy Link") { copy(handoff.absoluteString) }
+                Button("Copy Web Link") { copy(link.webURL(base: webBase)?.absoluteString ?? handoff.absoluteString) }
+                Button("Copy App Link") { copy(link.url.absoluteString) }
+            } else {
+                Button("Copy App Link") { copy(link.url.absoluteString) }
+                Text("Set the web dashboard URL in Settings for links that fall back to the browser.")
+            }
+        } label: {
+            Label(copied ? "Copied" : "Copy Link", systemImage: copied ? "checkmark" : "link")
+        } primaryAction: {
+            if let webBase, let handoff = link.handoffURL(webBase: webBase) { copy(handoff.absoluteString) } else { copy(link.url.absoluteString) }
+        }
+        .help("Copy a link to this exact view (⌘⇧C)")
+    }
+
+    private func copy(_ s: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(s, forType: .string)
+        copied = true
+        Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
     }
 }

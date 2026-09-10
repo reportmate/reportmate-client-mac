@@ -117,6 +117,11 @@ struct SystemReportView: View {
         ) { rows in
             table(filtered(rows))
         }
+        .onChange(of: appState.pendingDeepLink, initial: true) { _, _ in
+            guard let link = appState.consumeDeepLink(for: .system) else { return }
+            osVersionFilter = link.query["osVersion"]
+        }
+        .onChange(of: osVersionFilter, initial: true) { _, v in appState.linkQuery = v.map { ["osVersion": $0] } ?? [:] }
         .onReceive(NotificationCenter.default.publisher(for: .systemVersionFilter)) { note in
             if let v = note.object as? String { osVersionFilter = v }
         }

@@ -30,6 +30,11 @@ struct ConnectionSettingsView: View {
                 TextField("API URL", text: $draft.baseURL, prompt: Text("https://reportmate.example.com"))
                     .textContentType(.URL)
                     .autocorrectionDisabled()
+                TextField("Web dashboard URL", text: $draft.webBaseURL, prompt: Text("https://reportmate.example.com"))
+                    .textContentType(.URL)
+                    .autocorrectionDisabled()
+                Text("Optional. Copy Link then produces web links that open in this app when it is installed and in the browser otherwise.")
+                    .appFont(.caption).foregroundStyle(.secondary)
                 Picker("Authentication", selection: $draft.authMethod) {
                     ForEach(AuthMethod.allCases) { Text($0.displayName).tag($0) }
                 }

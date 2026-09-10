@@ -50,6 +50,15 @@ struct DevicesView: View {
         .onReceive(NotificationCenter.default.publisher(for: .devicesSearch)) { note in
             if let q = note.object as? String { search = q }
         }
+        .onChange(of: appState.pendingDeepLink, initial: true) { _, _ in
+            guard let link = appState.consumeDeepLink(for: .devices) else { return }
+            search = link.query["search"] ?? ""
+            func set(_ key: String) -> Set<String> { Set((link.query[key] ?? "").split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }) }
+            selections.statuses = set("status"); selections.usages = set("usage"); selections.catalogs = set("catalog")
+            selections.areas = set("area"); selections.locations = set("location"); selections.fleets = set("fleet")
+            filtersExpanded = !selections.isEmpty
+        }
+        .onChange(of: linkQuery, initial: true) { _, q in appState.linkQuery = q }
         .onReceive(NotificationCenter.default.publisher(for: .devicesStatusFilter)) { note in
             // The dashboard's status legend links to `/devices?status=<status>`.
             guard let status = note.object as? String else { return }
@@ -59,6 +68,17 @@ struct DevicesView: View {
     }
 
     private var isFiltered: Bool { !search.trimmingCharacters(in: .whitespaces).isEmpty || !selections.isEmpty }
+
+    /// The web page's query string for this state, for Copy Link.
+    private var linkQuery: [String: String] {
+        var q: [String: String] = [:]
+        let s = search.trimmingCharacters(in: .whitespaces)
+        if !s.isEmpty { q["search"] = s }
+        func put(_ key: String, _ set: Set<String>) { if !set.isEmpty { q[key] = set.sorted().joined(separator: ",") } }
+        put("status", selections.statuses); put("usage", selections.usages); put("catalog", selections.catalogs)
+        put("area", selections.areas); put("location", selections.locations); put("fleet", selections.fleets)
+        return q
+    }
 
     private var header: some View {
         HStack(alignment: .center) {

@@ -28,6 +28,41 @@ struct ApplicationsReportView: View {
 
     private var platform: PlatformFilter { appState.platformFilter }
 
+    /// The web page's query string for the current report, for Copy Link.
+    private var linkQuery: [String: String] {
+        var q: [String: String] = [:]
+        if !model.searchQuery.isEmpty { q["q"] = model.searchQuery }
+        if let t = model.reportType { q["type"] = t.rawValue }
+        if model.reportType == .usage { q["period"] = String(model.utilizationDays) }
+        if model.reportMode == .missing { q["mode"] = "missing" }
+        if !model.selectedApplications.isEmpty { q["apps"] = model.selectedApplications.joined(separator: ",") }
+        func put(_ key: String, _ set: Set<String>) { if !set.isEmpty { q[key] = set.sorted().joined(separator: ",") } }
+        put("usages", model.selections.usages); put("catalogs", model.selections.catalogs); put("rooms", model.selections.locations)
+        put("fleets", model.selections.fleets); put("areas", model.selections.areas)
+        if !model.selectedVersions.isEmpty { q["versions"] = model.selectedVersions.joined(separator: ",") }
+        return q
+    }
+
+    /// Hydrate the report from a link the way the web page hydrates from its URL.
+    private func applyDeepLink(_ link: DeepLink) {
+        func list(_ key: String) -> [String] { (link.query[key] ?? "").split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }
+        model.reset()
+        model.searchQuery = link.query["q"] ?? ""
+        model.selectedApplications = list("apps")
+        model.selections.usages = Set(list("usages")); model.selections.catalogs = Set(list("catalogs")); model.selections.locations = Set(list("rooms") + list("locations"))
+        model.selections.fleets = Set(list("fleets")); model.selections.areas = Set(list("areas"))
+        model.selectedVersions = list("versions")
+        if let p = Int(link.query["period"] ?? "") { model.utilizationDays = p }
+        if link.query["mode"] == "missing" { model.reportMode = .missing }
+        if model.hasSelections { model.builderExpanded = false }
+        let api = appState.api, platform = platform
+        switch link.query["type"] {
+        case "usage": Task { await model.loadUtilization(api: api, platform: platform) }
+        case "versions": Task { await model.loadVersionsReport(api: api, platform: platform) }
+        default: break
+        }
+    }
+
     var body: some View {
         @Bindable var m = model
         VStack(spacing: 0) {
@@ -56,6 +91,11 @@ struct ApplicationsReportView: View {
             guard model.reportType != nil, !model.loading, model.reportPlatform != new else { return }
             Task { await model.reloadCurrentReport(api: appState.api, platform: new) }
         }
+        .onChange(of: appState.pendingDeepLink, initial: true) { _, _ in
+            guard let link = appState.consumeDeepLink(for: .applications) else { return }
+            applyDeepLink(link)
+        }
+        .onChange(of: linkQuery, initial: true) { _, q in appState.linkQuery = q }
     }
 
     private var filterOptions: DeviceFilterOptions {

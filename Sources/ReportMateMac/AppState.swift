@@ -19,11 +19,15 @@ final class AppState {
     // MARK: Navigation
 
     var section: AppSection = .dashboard {
-        didSet { if section != oldValue { path = NavigationPath(); history.append(.section(oldValue)) } }
+        didSet { if section != oldValue { path = NavigationPath(); history.append(.section(oldValue)); linkQuery = [:] } }
     }
     var path = NavigationPath()
     var showSearch = false
     var refreshRequested = 0
+    /// Query from the last `reportmate://` link, consumed by the page it targets.
+    var pendingDeepLink: DeepLink?
+    /// Filters the visible page contributes to Copy Link.
+    var linkQuery: [String: String] = [:]
 
     private enum HistoryEntry { case section(AppSection) }
     private var history: [HistoryEntry] = []
@@ -80,19 +84,84 @@ final class AppState {
     }
 
     func open(device serial: String, tab: DeviceTab? = nil, filter: String? = nil) {
-        path.append(Route.device(serial: serial, tab: tab, filter: filter))
+        push(Route.device(serial: serial, tab: tab, filter: filter))
     }
 
     func openApplicationUsage(_ appName: String, days: Int = 30, usages: [String] = [], catalogs: [String] = [], locations: [String] = []) {
-        path.append(Route.applicationUsage(appName: appName, days: days, usages: usages, catalogs: catalogs, locations: locations))
+        push(Route.applicationUsage(appName: appName, days: days, usages: usages, catalogs: catalogs, locations: locations))
     }
 
     func openApplicationCoverage() {
-        path.append(Route.applicationCoverage)
+        push(Route.applicationCoverage)
     }
 
     func openThisMac() {
-        path.append(Route.localDevice)
+        push(Route.localDevice)
+    }
+
+    /// Follow a `reportmate://` link (or a pasted web URL).
+    func open(deepLink link: DeepLink) {
+        switch link.target {
+        case .dashboard: section = .dashboard
+        case .devices: section = .devices; pendingDeepLink = link
+        case .device(let serial, let tab):
+            if section == .dashboard || section == .devices { section = .devices }
+            path = NavigationPath()
+            open(device: serial, tab: tab.flatMap(DeviceTab.init(rawValue:)), filter: link.query["filter"])
+        case .events, .eventsFailures: section = .events; pendingDeepLink = link
+        case .report(let name):
+            if let s = AppSection(rawValue: name) { section = s; pendingDeepLink = link }
+        case .applicationUsage(let app):
+            section = .applications
+            let list: (String) -> [String] = { link.query[$0]?.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) } ?? [] }
+            openApplicationUsage(app, days: Int(link.query["days"] ?? "") ?? 30, usages: list("usages"), catalogs: list("catalogs"), locations: list("locations"))
+        case .applicationCoverage: section = .applications; openApplicationCoverage()
+        case .settings: NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        case .thisMac: section = .devices; openThisMac()
+        }
+    }
+
+    /// Take the pending link if it targets `section`.
+    func consumeDeepLink(for section: AppSection) -> DeepLink? {
+        guard let link = pendingDeepLink, self.section == section else { return nil }
+        pendingDeepLink = nil
+        return link
+    }
+
+    /// A link to what is on screen: the pushed route, else the section with its filters.
+    var currentDeepLink: DeepLink {
+        if let route = currentRoute {
+            switch route {
+            case .device(let serial, let tab, let filter):
+                var q: [String: String] = [:]
+                if let filter { q["filter"] = filter }
+                return DeepLink(target: .device(serial: serial, tab: tab?.rawValue), query: q)
+            case .applicationUsage(let app, let days, let usages, let catalogs, let locations):
+                var q = ["days": String(days)]
+                if !usages.isEmpty { q["usages"] = usages.joined(separator: ",") }
+                if !catalogs.isEmpty { q["catalogs"] = catalogs.joined(separator: ",") }
+                if !locations.isEmpty { q["locations"] = locations.joined(separator: ",") }
+                return DeepLink(target: .applicationUsage(app: app), query: q)
+            case .applicationCoverage: return DeepLink(target: .applicationCoverage)
+            case .localDevice: return DeepLink(target: .thisMac)
+            }
+        }
+        switch section {
+        case .dashboard: return DeepLink(target: .dashboard)
+        case .devices: return DeepLink(target: .devices, query: linkQuery)
+        case .events: return DeepLink(target: linkQuery["failures"] == "1" ? .eventsFailures : .events, query: linkQuery.filter { $0.key != "failures" })
+        default: return DeepLink(target: .report(section.rawValue), query: linkQuery)
+        }
+    }
+
+    /// The route on top of the navigation stack, tracked alongside `path`.
+    private(set) var currentRoute: Route?
+    private var routeStack: [Route] = []
+
+    private func push(_ route: Route) {
+        routeStack.append(route)
+        currentRoute = route
+        path.append(route)
     }
 
     func goBack() {

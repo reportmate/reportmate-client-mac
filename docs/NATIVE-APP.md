@@ -104,6 +104,44 @@ Shared behaviour: every report has the platform toggle, the Selections
 accordion (status, usage, catalog, fleet, area, location), search, widget-driven
 filters, sortable columns and a CSV export through the save panel.
 
+## Links
+
+The app registers the `reportmate://` scheme. Links are the web app's routes
+with the scheme swapped, so any web URL becomes an app link by replacing
+`https://<host>` with `reportmate://`, and the app accepts a pasted web URL
+as-is:
+
+```
+reportmate://dashboard
+reportmate://devices?status=active&search=lab
+reportmate://device/<serial>?tab=installs&filter=errors
+reportmate://events?filter=errors
+reportmate://events/failures
+reportmate://installs?filter=warnings&view=messages
+reportmate://applications?type=usage&apps=Blender,Zoom&period=30
+reportmate://applications/usage/<app>?days=30
+reportmate://applications/coverage
+reportmate://system?osVersion=15.4
+reportmate://settings
+reportmate://this-mac
+```
+
+A bare `reportmate://` link does nothing on a machine without the app, so the
+link to share is the web dashboard's handoff form:
+
+```
+https://<web host>/open/device/<serial>?filter=errors#installs
+```
+
+The `/open/...` route on the web app tries the app and, when nothing answers,
+continues to the same page in the browser. No host is built into the app or
+the web app: Settings → Connection takes the web dashboard URL, and **Copy
+Link** in the toolbar (⌘⇧C) copies that handoff form, with the plain web link
+and the raw `reportmate://` link as alternatives. Every page contributes its
+filters, so a copied link reopens the exact view: the device tab and filter,
+the report's selections, the events kinds and date-independent filters, the
+system OS version, and the applications report type, apps, period and mode.
+
 ## This Mac
 
 The device page can also show this Mac's own report without an API

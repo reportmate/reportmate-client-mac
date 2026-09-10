@@ -21,6 +21,18 @@ struct InstallsReportView: View {
 
     private var platform: PlatformFilter { appState.platformFilter }
 
+    static func category(_ raw: String?) -> InstallItems.Category? {
+        switch raw { case "errors": return .error; case "warnings": return .warning; case "pending": return .pending; case "success": return .success; default: return nil }
+    }
+
+    private var linkQuery: [String: String] {
+        var q: [String: String] = [:]
+        switch model.itemsStatusFilter { case .error: q["filter"] = "errors"; case .warning: q["filter"] = "warnings"; case .pending: q["filter"] = "pending"; case .success: q["filter"] = "success"; case nil: break }
+        if model.statusView == .messages, model.itemsStatusFilter != nil { q["view"] = "messages" }
+        if !model.searchQuery.isEmpty { q["q"] = model.searchQuery }
+        return q
+    }
+
     var body: some View {
         @Bindable var m = model
         VStack(spacing: 0) {
@@ -54,6 +66,14 @@ struct InstallsReportView: View {
             model.invalidate()
             Task { await model.loadFilters(api: appState.api, force: true) }
         }
+        .onChange(of: appState.pendingDeepLink, initial: true) { _, _ in
+            guard let link = appState.consumeDeepLink(for: .installs) else { return }
+            model.searchQuery = link.query["q"] ?? ""
+            model.selectStatus(Self.category(link.query["filter"]))
+            model.statusView = link.query["view"] == "messages" ? .messages : .devices
+            if model.itemsStatusFilter != nil { model.selectionsExpanded = false }
+        }
+        .onChange(of: linkQuery, initial: true) { _, q in appState.linkQuery = q }
         .onReceive(NotificationCenter.default.publisher(for: .installsFilter)) { note in
             guard let raw = note.object as? String else { return }
             let category: InstallItems.Category? = raw == "errors" ? .error : raw == "warnings" ? .warning : raw == "pending" ? .pending : raw == "success" ? .success : nil
