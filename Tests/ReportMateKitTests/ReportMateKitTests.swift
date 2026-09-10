@@ -390,6 +390,9 @@ import Foundation
         #expect(DeepLink(url: URL(string: "reportmate://this-mac")!)?.target == .thisMac)
         #expect(DeepLink(url: URL(string: "reportmate://")!)?.target == .dashboard)
         #expect(DeepLink(url: URL(string: "reportmate://nonsense")!) == nil)
+        #expect(DeepLink(url: URL(string: "reportmate://profiles")!)?.target == .report("management"))
+        #expect(DeepLink(url: URL(string: "reportmate://this-device")!)?.target == .thisMac)
+        #expect(DeepLink(url: URL(string: "reportmate://device/SAMPLE1?tab=security#installs")!)?.target == .device(serial: "SAMPLE1", tab: "security"))
     }
 
     @Test func acceptsWebURLsAndRoundTrips() throws {

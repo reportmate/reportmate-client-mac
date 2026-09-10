@@ -598,6 +598,12 @@ struct ManagementLogsSection: View {
 
     private func loadIfNeeded() async {
         guard expanded, let tool = activeTool, tails[tool] == nil else { return }
+        // The runner's own survey (This Mac, or a full module payload) already
+        // carries the tails; only the API's slimmed device record needs a fetch.
+        if let root = logs.roots.first(where: { $0.tool == tool }), !root.tails.isEmpty {
+            tails[tool] = .loaded(root)
+            return
+        }
         let api = appState.api
         tails[tool] = .loading
         do {

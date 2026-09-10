@@ -17,7 +17,7 @@ import Foundation
 ///     reportmate://applications/coverage
 ///     reportmate://system?osVersion=15.4  (and the other reports)
 ///     reportmate://settings
-///     reportmate://this-mac
+///     reportmate://this-mac                                    (this-device, this-pc and local are aliases)
 ///     reportmate://<web host>/device/<serial>#installs   (a pasted web URL, scheme swapped)
 ///     https://<web host>/device/<serial>#installs        (a web URL as-is)
 public struct DeepLink: Sendable, Hashable {
@@ -83,8 +83,13 @@ public struct DeepLink: Sendable, Hashable {
             }
         case "settings":
             target = .settings
-        case "this-mac", "local":
+        case "this-mac", "this-device", "this-pc", "local":
             target = .thisMac
+        case "profiles":
+            // The web nav still links /profiles; the module lives inside management.
+            target = .report("management")
+        case "inventory":
+            target = .devices
         default:
             guard let head, DeepLink.reportNames.contains(head) else { return nil }
             target = .report(head)
