@@ -66,9 +66,6 @@ public class IdentityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             # Collect comprehensive user account data using dscl
             # Matches MunkiReport users module fields
             
-            users_json="["
-            first=true
-            
             # Get all local users with UID >= 500 (excluding system accounts)
             for user in $(dscl . -list /Users UniqueID 2>/dev/null | awk '$2 >= 500 && $2 < 65534 {print $1}'); do
                 user_path="/Users/$user"
@@ -189,45 +186,26 @@ public class IdentityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                     is_disabled="true"
                 fi
                 
-                # Build JSON for this user
-                if [ "$first" = "true" ]; then
-                    first=false
-                else
-                    users_json="$users_json,"
-                fi
-                
-                # Escape quotes in strings
-                real_name_escaped=$(echo "$real_name" | sed 's/"/\\\\"/g')
-                password_hint_escaped=$(echo "$password_hint" | sed 's/"/\\\\"/g')
-                group_memberships_escaped=$(echo "$group_memberships" | sed 's/"/\\\\"/g')
-                
-                users_json="$users_json{"
-                users_json="$users_json\\"username\\": \\"$user\\","
-                users_json="$users_json\\"realName\\": \\"$real_name_escaped\\","
-                users_json="$users_json\\"uid\\": $uid,"
-                users_json="$users_json\\"gid\\": $gid,"
-                users_json="$users_json\\"homeDirectory\\": \\"$home_dir\\","
-                users_json="$users_json\\"shell\\": \\"$shell\\","
-                users_json="$users_json\\"uuid\\": \\"$uuid\\","
-                users_json="$users_json\\"isAdmin\\": $is_admin,"
-                users_json="$users_json\\"sshAccess\\": $ssh_access,"
-                users_json="$users_json\\"screenSharingAccess\\": $screen_sharing,"
-                users_json="$users_json\\"autoLoginEnabled\\": $auto_login,"
-                users_json="$users_json\\"passwordHint\\": \\"$password_hint_escaped\\","
-                users_json="$users_json\\"creationTime\\": \\"$creation_time\\","
-                users_json="$users_json\\"passwordLastSet\\": \\"$password_last_set\\","
-                users_json="$users_json\\"lastLogon\\": \\"$last_logon_iso\\","
-                users_json="$users_json\\"failedLoginCount\\": $failed_login_count,"
-                users_json="$users_json\\"lastFailedLogin\\": \\"$last_failed_login\\","
-                users_json="$users_json\\"linkedAppleId\\": \\"$linked_apple_id\\","
-                users_json="$users_json\\"linkedDate\\": \\"$linked_date\\","
-                users_json="$users_json\\"groupMembership\\": \\"$group_memberships_escaped\\","
-                users_json="$users_json\\"isDisabled\\": $is_disabled"
-                users_json="$users_json}"
-            done
-            
-            users_json="$users_json]"
-            echo "$users_json"
+                # One JSON object per user, built by jq so a hint, name or
+                # group list with quotes, backslashes or an empty numeric field
+                # cannot break the array (hand-built JSON lost every user when it did).
+                jq -cn \\
+                    --arg username "$user" --arg realName "$real_name" --arg uid "$uid" --arg gid "$gid" \\
+                    --arg homeDirectory "$home_dir" --arg shell "$shell" --arg uuid "$uuid" \\
+                    --argjson isAdmin "$is_admin" --argjson sshAccess "$ssh_access" \\
+                    --argjson screenSharingAccess "$screen_sharing" --argjson autoLoginEnabled "$auto_login" \\
+                    --arg passwordHint "$password_hint" --arg creationTime "$creation_time" \\
+                    --arg passwordLastSet "$password_last_set" --arg lastLogon "$last_logon_iso" \\
+                    --arg failedLoginCount "$failed_login_count" --arg lastFailedLogin "$last_failed_login" \\
+                    --arg linkedAppleId "$linked_apple_id" --arg linkedDate "$linked_date" \\
+                    --arg groupMembership "$group_memberships" --argjson isDisabled "$is_disabled" \\
+                    '{username: $username, realName: $realName, uid: ($uid | tonumber? // 0), gid: ($gid | tonumber? // 20),
+                      homeDirectory: $homeDirectory, shell: $shell, uuid: $uuid, isAdmin: $isAdmin, sshAccess: $sshAccess,
+                      screenSharingAccess: $screenSharingAccess, autoLoginEnabled: $autoLoginEnabled, passwordHint: $passwordHint,
+                      creationTime: $creationTime, passwordLastSet: $passwordLastSet, lastLogon: $lastLogon,
+                      failedLoginCount: ($failedLoginCount | tonumber? // 0), lastFailedLogin: $lastFailedLogin,
+                      linkedAppleId: $linkedAppleId, linkedDate: $linkedDate, groupMembership: $groupMembership, isDisabled: $isDisabled}'
+            done | jq -s .
         """
         
         // Only use bash script - osquery users table lacks admin status and other critical fields
