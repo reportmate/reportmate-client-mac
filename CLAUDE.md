@@ -183,3 +183,21 @@ git wt <name> [branch]
 ```
 
 That runs `git worktree add .worktrees/<name> [branch]`. Keep `/.worktrees/` listed in this repo's `.gitignore`.
+
+## Fleet app (ReportMateMac)
+
+`Sources/ReportMateMac` is the native SwiftUI counterpart of the ReportMate web dashboard, built on the `ReportMateKit` library in `Sources/ReportMateKit`. It is an operator app that reads the fleet API; it does not drive the runner. Keep it page-for-page with `reportmate-app-web`: the parity matrix in `docs/NATIVE-APP.md` lists every web page and its native view.
+
+Build the app bundle:
+
+```bash
+make app
+```
+
+If `swift build` fails with a missing `SwiftUIMacros` plugin, the installed SDK lacks it; set `SDKROOT` to a Command Line Tools SDK that has it (the build script does this automatically):
+
+```bash
+export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk
+```
+
+Kit code goes in `ReportMateKit` (API calls, JSON readers, report aggregations, all testable in `Tests/ReportMateKitTests`); views go in `ReportMateMac`. Never commit real device identifiers in fixtures or sample text; use `SAMPLE1`-style values.

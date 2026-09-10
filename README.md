@@ -104,6 +104,16 @@ The build process creates three deployment formats:
    - Use: Distribution and manual installation
    - Deployment: Mount DMG and run Install.sh script
 
+## Fleet app
+
+`ReportMate.app` is the native macOS counterpart of the ReportMate web dashboard: the same dashboard, device list, events feed, device pages, fleet reports and settings, reading the same API. It is built from the `ReportMateMac` product in this package and documented, page by page, in `docs/NATIVE-APP.md`.
+
+Build the app bundle into `.build/app/ReportMate.app`:
+
+```bash
+make app
+```
+
 ## Architecture
 
 ReportMate for macOS follows a modular architecture similar to the Windows client, but optimized for macOS with native Swift async/await patterns:
