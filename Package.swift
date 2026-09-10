@@ -33,6 +33,14 @@ let package = Package(
             name: "ReportMateLogging",
             targets: ["ReportMateLogging"]
         ),
+        .library(
+            name: "ReportMateKit",
+            targets: ["ReportMateKit"]
+        ),
+        .executable(
+            name: "ReportMateMac",
+            targets: ["ReportMateMac"]
+        ),
     ],
     dependencies: [
         // Swift Argument Parser for CLI
@@ -69,7 +77,7 @@ let package = Package(
                 .product(name: "Yams", package: "Yams"),
             ],
             path: "Sources",
-            exclude: ["Watcher", "App", "ReportMateXPC", "Helper", "ReportMateLogging"],
+            exclude: ["Watcher", "App", "ReportMateXPC", "Helper", "ReportMateLogging", "ReportMateKit", "ReportMateMac"],
             resources: [
                 .copy("Resources")
             ]
@@ -93,6 +101,22 @@ let package = Package(
             name: "Helper",
             dependencies: ["ReportMateXPC"],
             path: "Sources/Helper"
+        ),
+        .target(
+            name: "ReportMateKit",
+            dependencies: [],
+            path: "Sources/ReportMateKit"
+        ),
+        .executableTarget(
+            name: "ReportMateMac",
+            dependencies: ["ReportMateKit"],
+            path: "Sources/ReportMateMac",
+            exclude: ["Info.plist"]
+        ),
+        .testTarget(
+            name: "ReportMateKitTests",
+            dependencies: ["ReportMateKit"],
+            path: "Tests/ReportMateKitTests"
         ),
         .testTarget(
             name: "ReportMateLoggingTests",
