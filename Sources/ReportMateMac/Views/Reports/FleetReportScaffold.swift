@@ -101,20 +101,54 @@ struct ReportRow: Identifiable, Hashable {
     }
 }
 
-/// Header, selections and table chrome around a report's rows.
-struct FleetReportContainer<Content: View>: View {
+/// Header, selections, widgets accordion and table chrome around a report's rows.
+///
+/// `toolbar` and `widgets` receive the rows that survive the platform toggle,
+/// the Selections accordion and the search box; `content` receives the same
+/// rows and applies the report's own widget-driven filters on top.
+struct FleetReportContainer<Content: View, Toolbar: View, Widgets: View>: View {
     @Environment(AppState.self) private var appState
     let section: AppSection
     let model: FleetReportModel
     var query: [String: String?] = [:]
-    var searchKeys: (ReportRow) -> [String?] = { [$0.deviceName, $0.serialNumber, $0.inventory.assetTag] }
-    @ViewBuilder var content: ([ReportRow]) -> Content
+    var subtitle: String? = nil
+    var searchPlaceholder = "Search…"
+    var searchKeys: (ReportRow) -> [String?]
+    var toolbar: ([ReportRow]) -> Toolbar
+    var widgets: (([ReportRow]) -> Widgets)?
+    var content: ([ReportRow]) -> Content
+
+    init(section: AppSection, model: FleetReportModel, query: [String: String?] = [:], subtitle: String? = nil, searchPlaceholder: String = "Search…",
+         searchKeys: @escaping (ReportRow) -> [String?] = { [$0.deviceName, $0.serialNumber, $0.inventory.assetTag] },
+         @ViewBuilder toolbar: @escaping ([ReportRow]) -> Toolbar = { _ in EmptyView() },
+         widgets: (([ReportRow]) -> Widgets)?,
+         @ViewBuilder content: @escaping ([ReportRow]) -> Content) {
+        self.section = section
+        self.model = model
+        self.query = query
+        self.subtitle = subtitle
+        self.searchPlaceholder = searchPlaceholder
+        self.searchKeys = searchKeys
+        self.toolbar = toolbar
+        self.widgets = widgets
+        self.content = content
+    }
 
     @State private var search = ""
     @State private var selections = DeviceSelections()
     @State private var filtersExpanded = false
+    @State private var widgetsExpanded = true
 
     private var summaries: [DeviceSummary] { model.rows.map(\.asDeviceSummary) }
+
+    private func subtitleText(_ count: Int) -> String {
+        var parts: [String] = []
+        if let subtitle { parts.append(subtitle) }
+        let total = model.rows.count
+        parts.append(count != total ? "\(count) of \(total) devices" : "\(count) devices")
+        if let at = model.loadedAt { parts.append("loaded \(TimeFormatting.relative(at))") }
+        return parts.joined(separator: " · ")
+    }
 
     private var filtered: [ReportRow] {
         var list = model.rows
@@ -126,22 +160,24 @@ struct FleetReportContainer<Content: View>: View {
     }
 
     var body: some View {
+        let rows = filtered
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(section.title): \(filtered.count)\(filtered.count != model.rows.count ? " of \(model.rows.count)" : "") devices").appFont(.title3, weight: .semibold)
-                    if let at = model.loadedAt { Text("Loaded \(TimeFormatting.relative(at))").appFont(.caption).foregroundStyle(.secondary) }
+                    Text(section.title).appFont(.title3, weight: .semibold)
+                    Text(subtitleText(rows.count)).appFont(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if model.loading { ProgressView().controlSize(.small) }
+                toolbar(rows)
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Search…", text: $search).textFieldStyle(.plain)
+                    TextField(searchPlaceholder, text: $search).textFieldStyle(.plain)
                     if !search.isEmpty { Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }.buttonStyle(.plain) }
                 }
                 .padding(.horizontal, 10).padding(.vertical, 6)
                 .background(Color.subtleBackground, in: RoundedRectangle(cornerRadius: 8))
-                .frame(width: 260)
+                .frame(width: 240)
             }
             .padding(.horizontal, 16).padding(.vertical, 12)
             .overlay(alignment: .bottom) { Divider() }
@@ -155,12 +191,40 @@ struct FleetReportContainer<Content: View>: View {
                 EmptyStateView(title: "No data", message: "No devices have reported \(section.title.lowercased()) data yet.", systemImage: section.systemImage)
                 Spacer()
             } else {
-                content(filtered)
+                if let widgets {
+                    VStack(spacing: 0) {
+                        Button { withAnimation { widgetsExpanded.toggle() } } label: {
+                            HStack {
+                                Text("Widgets").appFont(.callout, weight: .medium)
+                                Spacer()
+                                Image(systemName: "chevron.down").rotationEffect(.degrees(widgetsExpanded ? 180 : 0)).foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 16).padding(.vertical, 8)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        if widgetsExpanded {
+                            ScrollView(.horizontal) { widgets(rows).padding(.horizontal, 16).padding(.bottom, 12) }
+                        }
+                    }
+                    .overlay(alignment: .bottom) { Divider() }
+                }
+                content(rows)
             }
         }
         .navigationTitle(section.title)
         .task(id: appState.configuration) { await model.load(api: appState.api, query: query) }
         .onChange(of: appState.refreshRequested) { _, _ in Task { await model.load(api: appState.api, query: query, force: true) } }
+    }
+}
+
+extension FleetReportContainer where Widgets == EmptyView {
+    /// A report without a Widgets accordion.
+    init(section: AppSection, model: FleetReportModel, query: [String: String?] = [:], subtitle: String? = nil, searchPlaceholder: String = "Search…",
+         searchKeys: @escaping (ReportRow) -> [String?] = { [$0.deviceName, $0.serialNumber, $0.inventory.assetTag] },
+         @ViewBuilder toolbar: @escaping ([ReportRow]) -> Toolbar = { _ in EmptyView() },
+         @ViewBuilder content: @escaping ([ReportRow]) -> Content) {
+        self.init(section: section, model: model, query: query, subtitle: subtitle, searchPlaceholder: searchPlaceholder, searchKeys: searchKeys, toolbar: toolbar, widgets: nil, content: content)
     }
 }
 
@@ -179,5 +243,37 @@ struct DeviceLink: View {
         }
         .buttonStyle(.plain)
         .help(row.serialNumber)
+    }
+}
+
+/// Scrolling table body with a sticky header row above it.
+struct ReportTable<Header: View, Rows: View>: View {
+    @ViewBuilder var header: Header
+    @ViewBuilder var rows: Rows
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) { header }
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                .background(Color.subtleBackground)
+            Divider()
+            ScrollView {
+                LazyVStack(spacing: 0) { rows }
+            }
+        }
+    }
+}
+
+/// Centered "nothing matched" message for a report table.
+struct ReportEmptyRows: View {
+    let title: String
+    var message = "Try adjusting your search or filter criteria."
+    var systemImage = "tray"
+    var body: some View {
+        VStack(spacing: 6) {
+            Image(systemName: systemImage).font(.system(size: 28)).foregroundStyle(.tertiary)
+            Text(title).appFont(.callout, weight: .medium)
+            Text(message).appFont(.caption).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity).padding(40)
     }
 }

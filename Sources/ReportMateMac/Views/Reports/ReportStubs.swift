@@ -31,13 +31,6 @@ struct GenericFleetReport: View {
 
 struct InstallsReportView: View { var body: some View { GenericFleetReport(section: .installs, path: "/installs") } }
 struct ApplicationsReportView: View { var body: some View { GenericFleetReport(section: .applications, path: "/applications") } }
-struct SystemReportView: View { var body: some View { GenericFleetReport(section: .system, path: "/system") } }
-struct ManagementReportView: View { var body: some View { GenericFleetReport(section: .management, path: "/management") } }
-struct IdentityReportView: View { var body: some View { GenericFleetReport(section: .identity, path: "/identity") } }
-struct HardwareReportView: View { var body: some View { GenericFleetReport(section: .hardware, path: "/hardware") } }
-struct PeripheralsReportView: View { var body: some View { GenericFleetReport(section: .peripherals, path: "/peripherals") } }
-struct SecurityReportView: View { var body: some View { GenericFleetReport(section: .security, path: "/security") } }
-struct NetworkReportView: View { var body: some View { GenericFleetReport(section: .network, path: "/network") } }
 
 struct ApplicationUsageDetailView: View {
     let appName: String
