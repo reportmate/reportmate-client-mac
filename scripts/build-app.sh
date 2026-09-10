@@ -14,6 +14,15 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# Command Line Tools on a macOS beta can ship an SDK whose SwiftUI macros
+# plugin is missing; the previous SDK still builds the app. Prefer an explicit
+# SDKROOT, then the newest SDK that carries the plugin.
+if [ -z "${SDKROOT:-}" ] && [ ! -d "$(xcrun --show-sdk-path 2>/dev/null)/../../../../usr/lib/swift/host/plugins" ]; then
+    for sdk in /Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk /Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk; do
+        if [ -d "$sdk" ]; then export SDKROOT="$sdk"; break; fi
+    done
+fi
+
 CONFIG="release"
 OPEN=0
 SIGN=0

@@ -290,3 +290,63 @@ import Foundation
         #expect(ApplicationsReport.duration(seconds: 7500) == "2h 5m")
     }
 }
+
+@Suite struct LastRunSummaryTests {
+    @Test func readsCountsAndFailedItems() throws {
+        let payload = try JSONValue.parse(Data(#"{"run_type":"auto","success_count":2,"error_count":1,"failed_items":["Blender"],"full_installs_data":{"cimian":{"items":[{"itemName":"Blender","installedVersion":"4.1","currentStatus":"Error"},{"itemName":"Zoom","installedVersion":"6.0","currentStatus":"Installed"}]}}}"#.utf8))
+        let s = try #require(LastRunSummary.parse(payload))
+        #expect(s.runType == "auto")
+        #expect(s.successCount == 2)
+        #expect(s.items.map(\.name) == ["Blender"])
+        #expect(s.items.first?.status == "Error")
+        #expect(s.hasIssues)
+        #expect(s.title == "Packages with Issues")
+    }
+
+    @Test func fallsBackToNonStableItemsAndText() throws {
+        let unstable = try JSONValue.parse(Data(#"{"module_status":"ok","full_installs_data":{"munki":{"items":[{"name":"Slack","version":"4.3","status":"pending"},{"name":"Zoom","status":"installed"}]}}}"#.utf8))
+        #expect(LastRunSummary.parse(unstable)?.items.map(\.name) == ["Slack"])
+        let text = try JSONValue.parse(Data(#"{"module_status":"ok","full_installs_data":{"items":[{"name":"Zoom","status":"installed"}]},"warnings":"WARNING: Download of Excel failed for Excel; WARNING: Package com.foo.BarBaz references are: [\"BarBaz\", \"Bar Baz Long\"]"}"#.utf8))
+        let items = try #require(LastRunSummary.parse(text)?.items)
+        #expect(items.map(\.name).contains("Excel"))
+        #expect(items.map(\.name).contains("BarBaz"))
+        #expect(LastRunSummary.parse(.object(["kind": .string("info")])) == nil)
+    }
+}
+
+@Suite struct InstallsReportTests {
+    @Test func classifiesRecordStatuses() {
+        #expect(InstallStatusClass.classify("Install Failed") == .error)
+        #expect(InstallStatusClass.classify("will-be-installed") == .pending)
+        #expect(InstallStatusClass.classify("Installed") == .installed)
+        #expect(InstallStatusClass.bucket(recordStatus: "warning") == .warning)
+        #expect(InstallStatusClass.removed.matches(recordStatus: "removal-requested"))
+        #expect(!InstallStatusClass.installed.matches(recordStatus: "pending"))
+    }
+
+    @Test func buildsRecordsFromBulkRows() throws {
+        let rows = try JSONValue.parse(Data(#"[{"id":"1","deviceId":"d1","deviceName":"Lab-01","serialNumber":"SAMPLE1","itemName":"Blender","currentStatus":"Installed","installedVersion":"4.1","usage":"Shared","catalog":"Curriculum","location":"Lab 101","platform":"Windows NT","source":"cimian"},{"id":"2","deviceId":"d1","deviceName":"Lab-01","serialNumber":"SAMPLE1","itemName":"managed_apps","currentStatus":"Installed","source":"cimian"},{"id":"3","deviceId":"d2","deviceName":"Studio","serialNumber":"SAMPLE2","itemName":"Blender","currentStatus":"pending","latestVersion":"4.2","usage":"Assigned","platform":"Darwin","source":"munki"}]"#.utf8))
+            .elements.map(InstallRecord.init(json:))
+        let all = InstallsReport.records(from: rows, selectedInstalls: ["blender"], usages: [], catalogs: [], rooms: [], fleets: [], areas: [], manifests: ["SAMPLE1": "lab-manifest"])
+        #expect(all.count == 2)
+        #expect(all.first?.manifest == "lab-manifest")
+        #expect(all.first?.platform == "Windows")
+        #expect(all.last?.platform == "Macintosh")
+        #expect(all.last?.version == "4.2")
+        let shared = InstallsReport.records(from: rows, selectedInstalls: [], usages: ["shared"], catalogs: [], rooms: [], fleets: [], areas: [], manifests: [:])
+        #expect(shared.map(\.serialNumber) == ["SAMPLE1"])
+    }
+
+    @Test func configRowCountsFromItems() throws {
+        let device = InstallsDevice(json: try JSONValue.parse(Data(#"{"serialNumber":"SAMPLE1","lastSeen":"2026-09-09T10:00:00Z","modules":{"inventory":{"deviceName":"Lab-01","usage":"Shared"},"installs":{"cimian":{"version":"25.9.1","config":{"ClientIdentifier":"lab","SoftwareRepoURL":"https://repo.example"},"items":[{"itemName":"A","currentStatus":"Installed"},{"itemName":"B","currentStatus":"Install Failed","lastError":"boom"},{"itemName":"C","currentStatus":"will-be-installed"}]}}}}"#.utf8)))
+        let row = try #require(ConfigReportRow(device: device))
+        #expect(row.configType == "Cimian")
+        #expect(row.installedCount == 1 && row.errorCount == 1 && row.pendingCount == 1)
+        #expect(row.clientIdentifier == "lab")
+        #expect(device.platform == .windows)
+        let cats = InstallsReport.categorize([device])
+        #expect(cats.errors.count == 1 && cats.pending.count == 1)
+        #expect(InstallsReport.itemCounts([device], .error).first?.name == "B")
+        #expect(InstallsReport.aggregateMessages([device], errors: true).first?.message == "boom")
+    }
+}

@@ -1,7 +1,7 @@
 # ReportMate macOS Client Makefile
 # Provides convenient build targets
 
-.PHONY: all build clean test install release notarize help
+.PHONY: all build clean test install release notarize help app app-open
 
 # Configuration
 PROJECT_NAME = ReportMate
@@ -23,6 +23,8 @@ help:
 	@echo "  package   - Create distribution packages"
 	@echo "  sign      - Build and code sign"
 	@echo "  notarize  - Build, sign, and notarize for distribution"
+	@echo "  app       - Build the ReportMate fleet app (.build/app/ReportMate.app)"
+	@echo "  app-open  - Build the fleet app and launch it"
 	@echo "  help      - Show this help message"
 	@echo ""
 	@echo "Variables:"
@@ -36,6 +38,13 @@ build:
 release:
 	@echo "Building $(PROJECT_NAME) in release mode..."
 	@./build.sh --skip-pkg --skip-zip --skip-dmg
+
+# Fleet app (the SwiftUI counterpart of the web dashboard)
+app:
+	@scripts/build-app.sh --version=$(VERSION)
+
+app-open:
+	@scripts/build-app.sh --version=$(VERSION) --open
 
 # Test targets
 test:
