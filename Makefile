@@ -1,7 +1,7 @@
 # ReportMate macOS Client Makefile
 # Provides convenient build targets
 
-.PHONY: all build clean test install release notarize help app app-open
+.PHONY: all build clean test install release notarize help app app-open app-dmg
 
 # Configuration
 PROJECT_NAME = ReportMate
@@ -25,6 +25,7 @@ help:
 	@echo "  notarize  - Build, sign, and notarize for distribution"
 	@echo "  app       - Build the ReportMate fleet app (.build/app/ReportMate.app)"
 	@echo "  app-open  - Build the fleet app and launch it"
+	@echo "  app-dmg   - Build the fleet app and a disk image for distribution"
 	@echo "  help      - Show this help message"
 	@echo ""
 	@echo "Variables:"
@@ -45,6 +46,9 @@ app:
 
 app-open:
 	@scripts/build-app.sh --version=$(VERSION) --open
+
+app-dmg:
+	@scripts/build-app.sh --version=$(VERSION) --dmg
 
 # Test targets
 test:

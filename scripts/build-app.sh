@@ -8,6 +8,7 @@ set -euo pipefail
 #   scripts/build-app.sh --debug    debug build
 #   scripts/build-app.sh --open     build, then launch
 #   scripts/build-app.sh --sign     codesign with SIGNING_IDENTITY_APP from .env
+#   scripts/build-app.sh --dmg      also write .build/app/ReportMate-<version>.dmg
 #
 # The Managed Reports Runner (the per-device client) is built by build.sh;
 # this script only produces the operator app.
@@ -26,12 +27,14 @@ fi
 CONFIG="release"
 OPEN=0
 SIGN=0
+DMG=0
 VERSION="${VERSION:-$(date +%Y.%m.%d.%H%M)}"
 for arg in "$@"; do
     case "$arg" in
         --debug) CONFIG="debug" ;;
         --open) OPEN=1 ;;
         --sign) SIGN=1 ;;
+        --dmg) DMG=1 ;;
         --version=*) VERSION="${arg#--version=}" ;;
     esac
 done
@@ -51,6 +54,9 @@ cp "$BIN" "$APP/Contents/MacOS/ReportMate"
 chmod +x "$APP/Contents/MacOS/ReportMate"
 sed -e "s|<string>0.1.0</string>|<string>$VERSION</string>|" Sources/ReportMateMac/Info.plist > "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
+if [ ! -f "Sources/ReportMateMac/Resources/AppIcon.icns" ] && command -v iconutil >/dev/null; then
+    swift scripts/make-app-icon.swift "Sources/ReportMateMac/Resources/AppIcon.icns" >/dev/null || true
+fi
 if [ -f "Sources/ReportMateMac/Resources/AppIcon.icns" ]; then
     cp "Sources/ReportMateMac/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
@@ -64,6 +70,19 @@ if [ "$SIGN" = "1" ]; then
     codesign --verify --verbose=2 "$APP"
 else
     codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+fi
+
+if [ "$DMG" = "1" ] && command -v hdiutil >/dev/null; then
+    STAGE=".build/app/dmg"
+    rm -rf "$STAGE"
+    mkdir -p "$STAGE"
+    cp -R "$APP" "$STAGE/"
+    ln -s /Applications "$STAGE/Applications"
+    DMG_PATH=".build/app/ReportMate-$VERSION.dmg"
+    rm -f "$DMG_PATH"
+    hdiutil create -volname "ReportMate $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG_PATH" >/dev/null
+    rm -rf "$STAGE"
+    echo "Wrote $DMG_PATH"
 fi
 
 echo "Built $APP ($CONFIG, $VERSION)"
