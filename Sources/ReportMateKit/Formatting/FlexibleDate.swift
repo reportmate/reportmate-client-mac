@@ -33,7 +33,7 @@ public enum FlexibleDate {
         "MM/dd/yyyy",
     ]
 
-    nonisolated(unsafe) private static let formatters: [DateFormatter] = formats.map { format in
+    private static let formatters: [DateFormatter] = formats.map { format in
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone(secondsFromGMT: 0)

@@ -49,12 +49,9 @@ struct GenericSectionCard: View {
     var body: some View {
         Card {
             VStack(spacing: 0) {
-                CardHeader(title, subtitle: subtitle, tone: tone) {
-                    Button { withAnimation { expanded.toggle() } } label: {
-                        Image(systemName: "chevron.down").rotationEffect(.degrees(expanded ? 0 : -90)).foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
+                CardHeader(title, subtitle: subtitle, tone: tone, action: { withAnimation { expanded.toggle() } }, trailing: {
+                    Image(systemName: "chevron.down").rotationEffect(.degrees(expanded ? 0 : -90)).foregroundStyle(.secondary)
+                })
                 if expanded {
                     Group {
                         if let arr = value.array {

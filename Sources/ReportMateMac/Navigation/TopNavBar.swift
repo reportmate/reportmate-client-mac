@@ -60,7 +60,7 @@ struct TopNavBar: View {
         }
         .buttonStyle(.plain)
         .focusable(false)
-        .help("\(section.title) (⌘\(section.keyEquivalent.character))")
+        .help("\(section.title) (⌘\(String(section.keyEquivalent.character)))")
     }
 
     private var reportsMenu: some View {

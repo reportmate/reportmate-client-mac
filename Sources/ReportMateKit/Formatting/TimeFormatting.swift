@@ -77,21 +77,21 @@ public enum TimeFormatting {
         return "\(Int(hours.rounded()))h"
     }
 
-    nonisolated(unsafe) private static let exactFormatter: DateFormatter = {
+    private static let exactFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy.MM.dd HH:mm:ss"
         return f
     }()
 
-    nonisolated(unsafe) private static let mediumFormatter: DateFormatter = {
+    private static let mediumFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US")
         f.dateFormat = "MMM d, yyyy h:mm a"
         return f
     }()
 
-    nonisolated(unsafe) private static let shortDateFormatter: DateFormatter = {
+    private static let shortDateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US")
         f.dateFormat = "MMM d, yyyy"
@@ -121,7 +121,7 @@ public enum ByteFormatting {
         countFormatter.string(from: NSNumber(value: n)) ?? String(n)
     }
 
-    nonisolated(unsafe) private static let countFormatter: NumberFormatter = {
+    private static let countFormatter: NumberFormatter = {
         let f = NumberFormatter()
         f.numberStyle = .decimal
         return f

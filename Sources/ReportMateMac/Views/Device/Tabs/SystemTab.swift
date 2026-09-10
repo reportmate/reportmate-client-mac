@@ -346,9 +346,9 @@ struct SystemTabView: View {
         }
         return Card {
             VStack(spacing: 0) {
-                CardHeader("Privileged Helper Tools", subtitle: "Background services installed by applications (\(filtered.count) of \(tools.count) tools)") {
+                CardHeader("Privileged Helper Tools", subtitle: "Background services installed by applications (\(filtered.count) of \(tools.count) tools)", trailing: {
                     TextField("Search helpers...", text: $helperSearch).textFieldStyle(.roundedBorder).frame(width: 220)
-                }
+                })
                 tableHeader([("Name", nil), ("Team ID", 140), ("Signed", 90), ("Bundle ID", 260)])
                 ScrollView {
                     LazyVStack(spacing: 0) {

@@ -391,6 +391,12 @@ import Foundation
         #expect(DeepLink(url: URL(string: "reportmate://")!)?.target == .dashboard)
         #expect(DeepLink(url: URL(string: "reportmate://nonsense")!) == nil)
         #expect(DeepLink(url: URL(string: "reportmate://profiles")!)?.target == .report("management"))
+        #expect(DeepLink(url: URL(string: "reportmate://inventory")!)?.target == .devices)
+        #expect(DeepLink(url: URL(string: "https://host.example.org/open/device/SAMPLE1?filter=errors#installs")!)?.target == .device(serial: "SAMPLE1", tab: "installs"))
+        #expect(DeepLink(url: URL(string: "reportmate://devices?status=active&usage=&catalog=")!)?.query == ["status": "active"])
+        #expect(DeepLink(url: URL(string: "mailto:someone@example.org")!) == nil)
+        #expect(DeepLink(target: .device(serial: "SAMPLE1", tab: "installs")).webURL(base: URL(string: "https://host.example.org/")!)?.absoluteString == "https://host.example.org/device/SAMPLE1#installs")
+        #expect(DeepLink(target: .device(serial: "SAMPLE1", tab: "installs")).handoffURL(webBase: URL(string: "https://host.example.org")!)?.absoluteString == "https://host.example.org/open/device/SAMPLE1#installs")
         #expect(DeepLink(url: URL(string: "reportmate://this-device")!)?.target == .thisMac)
         #expect(DeepLink(url: URL(string: "reportmate://device/SAMPLE1?tab=security#installs")!)?.target == .device(serial: "SAMPLE1", tab: "security"))
     }

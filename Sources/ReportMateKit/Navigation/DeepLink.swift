@@ -57,6 +57,8 @@ public struct DeepLink: Sendable, Hashable {
             segments.append(host)
         }
         segments += comps.path.split(separator: "/").map { String($0).removingPercentEncoding ?? String($0) }.filter { !$0.isEmpty }
+        // The web handoff route wraps the real path: /open/device/X -> /device/X.
+        if segments.first?.lowercased() == "open" { segments.removeFirst() }
         var query: [String: String] = [:]
         for item in comps.queryItems ?? [] { if let v = item.value, !v.isEmpty { query[item.name] = v } }
         let fragment = comps.fragment?.trimmingCharacters(in: .whitespaces)

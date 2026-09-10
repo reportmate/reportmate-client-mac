@@ -410,9 +410,9 @@ struct DeviceEventsTabView: View {
         let bundled = EventBundling.bundle(model.events).filter { !hidden.contains($0.kind) }
         Card {
             VStack(spacing: 0) {
-                CardHeader("Events", subtitle: "\(model.events.count) most recent events for this device", systemImage: "clock", tone: .gray) {
+                CardHeader("Events", subtitle: "\(model.events.count) most recent events for this device", systemImage: "clock", tone: .gray, trailing: {
                     EventTypeFilterMenu(hidden: $hidden, defaultHidden: [])
-                }
+                })
                 if model.eventsLoading, !model.eventsLoaded {
                     LoadingView(message: "Loading events…").frame(height: 200)
                 } else if bundled.isEmpty {
