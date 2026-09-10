@@ -5,6 +5,7 @@ import ReportMateKit
 struct ReportMateMacApp: App {
     @State private var appState = AppState()
     @AppStorage(AppFontScale.storageKey) private var fontScale: Double = AppFontScale.default
+    @AppStorage(AppAppearance.storageKey) private var appearance: String = AppAppearance.system.rawValue
 
     init() {
         NSApplication.shared.setActivationPolicy(.regular)
@@ -18,6 +19,7 @@ struct ReportMateMacApp: App {
             ContentView()
                 .environment(appState)
                 .appFontScale(fontScale)
+                .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
                 .frame(minWidth: 960, minHeight: 620)
         }
         .defaultSize(width: 1380, height: 900)
@@ -29,6 +31,7 @@ struct ReportMateMacApp: App {
             SettingsView()
                 .environment(appState)
                 .appFontScale(fontScale)
+                .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
         }
     }
 }

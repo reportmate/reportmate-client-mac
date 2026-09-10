@@ -352,8 +352,9 @@ public final class ReportMateAPI: Sendable {
         _ = try await sendJSON("/device/\(encode(serial))", method: "DELETE")
     }
 
-    public func clearInstallErrors() async throws -> JSONValue {
-        try await sendJSON("/admin/installs/clear-errors", method: "DELETE")
+    /// Clears install errors and warnings from devices silent for `days` or more (0 = every device).
+    public func clearInstallErrors(days: Int = 10) async throws -> JSONValue {
+        try await sendJSON("/admin/installs/clear-errors", method: "DELETE", query: ["days": String(days)])
     }
 
     public func apiKeys() async throws -> JSONValue {
