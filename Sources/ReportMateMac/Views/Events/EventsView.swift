@@ -1,8 +1,10 @@
 import SwiftUI
 import ReportMateKit
 
-/// The fleet events feed (`/events`) with a type filter, search, paging and
-/// the ingest-failures report (`/events/failures`) as a second mode.
+/// The fleet events feed (`/events`) and the ingest-failures report
+/// (`/events/failures`) as a second mode. Port of `ClientEventsPage.tsx`:
+/// a date range, kind chips (success, warnings and errors by default;
+/// System and Info show alone), search, infinite scroll and a live refresh.
 struct EventsView: View {
     enum Mode: String, CaseIterable, Identifiable {
         case feed = "Events", failures = "Check-in Failures"
@@ -11,43 +13,56 @@ struct EventsView: View {
 
     @Environment(AppState.self) private var appState
     @State private var mode: Mode = .feed
-    @State private var events: [FleetEvent] = []
-    @State private var total = 0
-    @State private var loading = false
-    @State private var error: String?
+    @State private var model = EventsFeedModel()
     @State private var search = ""
-    private static let defaultHidden: Set<EventKind> = [.info, .system]
-    @State private var hidden: Set<EventKind> = EventsView.defaultHidden
-    @State private var pageSize = 200
 
-    private var bundled: [BundledEvent] {
-        var list = EventBundling.bundle(events)
-        if !hidden.isEmpty { list = list.filter { !hidden.contains($0.kind) } }
+    private static let soloKinds: Set<EventKind> = [.system, .info]
+
+    private var filtered: [BundledEvent] {
+        var list = EventBundling.bundle(model.events)
         if appState.platformFilter != .all { list = list.filter { appState.platformFilter.includes($0.platform) } }
+        list = list.filter { e in
+            let kinds = e.bundledKinds.isEmpty ? [e.kind] : e.bundledKinds
+            return kinds.contains { model.active.contains($0) }
+        }
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
         if !q.isEmpty {
             list = list.filter { e in
-                e.message.lowercased().contains(q) || e.device.lowercased().contains(q) || (e.deviceName ?? "").lowercased().contains(q) || (e.assetTag ?? "").lowercased().contains(q)
+                e.id.lowercased().contains(q) || e.device.lowercased().contains(q) || e.bundledKinds.contains { $0.rawValue.contains(q) }
+                    || e.message.lowercased().contains(q) || (e.deviceName ?? "").lowercased().contains(q) || (e.assetTag ?? "").lowercased().contains(q)
             }
         }
         return list
     }
 
     var body: some View {
+        @Bindable var m = model
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 12) {
                 Picker("", selection: $mode) { ForEach(Mode.allCases) { Text($0.rawValue).tag($0) } }
                     .pickerStyle(.segmented).fixedSize()
-                Spacer()
                 if mode == .feed {
-                    EventTypeFilterMenu(hidden: $hidden, defaultHidden: EventsView.defaultHidden)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Events Feed").appFont(.callout, weight: .semibold)
+                        Text("Real-time activity from fleet").appFont(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    HStack(spacing: 6) {
+                        Text("Date Range:").appFont(.caption).foregroundStyle(.secondary)
+                        DatePicker("", selection: $m.startDate, in: ...m.endDate, displayedComponents: .date).labelsHidden()
+                        Text("–").foregroundStyle(.secondary)
+                        DatePicker("", selection: $m.endDate, in: m.startDate..., displayedComponents: .date).labelsHidden()
+                    }
                     HStack(spacing: 6) {
                         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                        TextField("Search events…", text: $search).textFieldStyle(.plain)
+                        TextField("Search events...", text: $search).textFieldStyle(.plain)
+                        if !search.isEmpty { Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }.buttonStyle(.plain) }
                     }
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(Color.subtleBackground, in: RoundedRectangle(cornerRadius: 8))
                     .frame(width: 240)
+                } else {
+                    Spacer()
                 }
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
@@ -59,64 +74,194 @@ struct EventsView: View {
             }
         }
         .navigationTitle("Events")
-        .task(id: appState.configuration) { await load() }
-        .onChange(of: appState.refreshRequested) { _, _ in Task { await load() } }
+        .task(id: "\(appState.configuration.normalizedBaseURL)|\(model.startDate.timeIntervalSince1970)|\(model.endDate.timeIntervalSince1970)") {
+            await model.reload(api: appState.api)
+        }
+        .task(id: appState.configuration.normalizedBaseURL) {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard !Task.isCancelled else { break }
+                await model.refreshLatest(api: appState.api)
+            }
+        }
+        .onChange(of: model.active) { _, _ in model.scheduleReload(api: appState.api) }
+        .onChange(of: appState.refreshRequested) { _, _ in Task { await model.reload(api: appState.api) } }
+    }
+
+    private var chips: some View {
+        HStack(spacing: 6) {
+            ForEach(EventKind.filterOrder, id: \.self) { kind in
+                let on = model.active.contains(kind)
+                Button { toggle(kind) } label: {
+                    HStack(spacing: 5) {
+                        EventKindIcon(kind: kind).scaleEffect(0.75).frame(width: 16, height: 16)
+                        Text(chipLabel(kind)).appFont(.caption, weight: .medium)
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .background(on ? chipColor(kind).opacity(0.22) : chipColor(kind).opacity(0.08), in: Capsule())
+                    .overlay(Capsule().stroke(on ? chipColor(kind).opacity(0.7) : Color.clear))
+                    .foregroundStyle(chipColor(kind))
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+            }
+            Spacer()
+            Text(model.events.count < model.loadedTotal || model.hasMore ? "\(filtered.count) shown" : "Showing all \(model.events.count) events")
+                .appFont(.caption).foregroundStyle(.secondary)
+            if model.loading || model.loadingMore { ProgressView().controlSize(.small) }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(Color.subtleBackground)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func chipLabel(_ kind: EventKind) -> String {
+        switch kind {
+        case .warning: return "Warnings"
+        case .error: return "Errors"
+        default: return kind.displayName
+        }
+    }
+
+    private func chipColor(_ kind: EventKind) -> Color {
+        switch kind {
+        case .success: return .green
+        case .warning: return .yellow
+        case .error: return .red
+        case .info: return .blue
+        case .system: return .purple
+        }
+    }
+
+    /// System and Info show alone; the other three toggle together.
+    private func toggle(_ kind: EventKind) {
+        if Self.soloKinds.contains(kind) {
+            if model.active.contains(kind), model.active.count == 1 { model.active = EventsFeedModel.defaultKinds } else { model.active = [kind] }
+            return
+        }
+        var next = model.active.subtracting(Self.soloKinds)
+        if next.contains(kind) { next.remove(kind) } else { next.insert(kind) }
+        model.active = next
     }
 
     @ViewBuilder
     private var feed: some View {
-        if loading, events.isEmpty {
+        if model.loading, model.events.isEmpty {
             LoadingView(message: "Loading events…")
-        } else if let error, events.isEmpty {
-            ErrorBanner(message: error) { Task { await load() } }.padding()
+        } else if let error = model.error, model.events.isEmpty {
+            ErrorBanner(message: error) { Task { await model.reload(api: appState.api) } }.padding()
             Spacer()
         } else {
+            chips
             ScrollView {
                 VStack(spacing: 0) {
-                    HStack {
-                        Text("\(bundled.count) of \(total) events").appFont(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        if events.count < total {
-                            Button("Load more") { Task { await loadMore() } }.appFont(.caption).disabled(loading)
-                        }
-                        if loading { ProgressView().controlSize(.small) }
-                    }
-                    .padding(.horizontal, 16).padding(.vertical, 8)
-                    if bundled.isEmpty {
-                        EmptyStateView(title: "No events match", message: "Adjust the type filter or search.", systemImage: "clock")
+                    if filtered.isEmpty {
+                        EmptyStateView(title: model.events.isEmpty ? "No events yet" : "No events match the current filter",
+                                       message: model.events.isEmpty ? "Waiting for fleet activity" : "Adjust the type filter, date range or search.", systemImage: "clock")
                     } else {
-                        EventsTableView(events: bundled, autoFetchRows: 80, maxRows: 500)
+                        EventsTableView(events: filtered, style: .feed, autoFetchRows: 80, maxRows: 2000, onNearEnd: { model.loadMore(api: appState.api) })
+                    }
+                    if model.loadingMore {
+                        ProgressView().controlSize(.small).padding(12)
+                    } else if !model.hasMore, !model.events.isEmpty {
+                        Text("Showing all \(model.events.count.formatted()) events").appFont(.caption).foregroundStyle(.secondary).padding(12)
                     }
                 }
             }
         }
     }
+}
 
-    private func load() async {
+/// Paged, live-refreshing event cache for the feed.
+@MainActor
+@Observable
+final class EventsFeedModel {
+    static let defaultKinds: Set<EventKind> = [.success, .warning, .error]
+    static let pageSize = 100
+
+    var events: [FleetEvent] = []
+    var active: Set<EventKind> = EventsFeedModel.defaultKinds
+    var startDate: Date = Calendar.current.startOfDay(for: Date().addingTimeInterval(-48 * 3600))
+    var endDate: Date = Calendar.current.startOfDay(for: Date())
+    var loading = false
+    var loadingMore = false
+    var hasMore = true
+    var loadedTotal = 0
+    var error: String?
+    private var offset = 0
+    private var reloadTask: Task<Void, Never>?
+    private var moreTask: Task<Void, Never>?
+
+    private var rangeStart: Date { Calendar.current.startOfDay(for: startDate) }
+    private var rangeEnd: Date { Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: endDate))!.addingTimeInterval(-0.001) }
+
+    private func merge(_ incoming: [FleetEvent]) {
+        var byId: [String: FleetEvent] = [:]
+        for e in events { byId[e.id] = e }
+        for e in incoming { byId[e.id] = e }
+        events = byId.values.sorted { ($0.ts ?? .distantPast) > ($1.ts ?? .distantPast) }
+    }
+
+    private func fetch(api: ReportMateAPI, offset: Int) async throws -> EventsPage {
+        try await api.events(limit: Self.pageSize, offset: offset, kinds: active.sorted { $0.rawValue < $1.rawValue }, startDate: rangeStart, endDate: rangeEnd)
+    }
+
+    func reload(api: ReportMateAPI) async {
+        reloadTask?.cancel()
         loading = true
         error = nil
+        events = []
+        offset = 0
+        hasMore = true
         do {
-            let page = try await appState.api.events(limit: pageSize)
-            events = page.events
-            total = page.total
+            let page = try await fetch(api: api, offset: 0)
+            merge(page.events)
+            loadedTotal = page.total
+            hasMore = page.events.count >= Self.pageSize
+            offset = page.events.count
         } catch {
             self.error = error.localizedDescription
-            appState.note(error)
         }
         loading = false
     }
 
-    private func loadMore() async {
-        loading = true
-        do {
-            let page = try await appState.api.events(limit: pageSize, offset: events.count)
-            let known = Set(events.map(\.id))
-            events.append(contentsOf: page.events.filter { !known.contains($0.id) })
-            total = page.total
-        } catch {
-            self.error = error.localizedDescription
+    /// Debounced reload after the chips change (the web waits 300 ms).
+    func scheduleReload(api: ReportMateAPI) {
+        reloadTask?.cancel()
+        guard !active.isEmpty else { return }
+        reloadTask = Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            await reload(api: api)
         }
-        loading = false
+    }
+
+    func loadMore(api: ReportMateAPI) {
+        guard hasMore, !loading, !loadingMore, moreTask == nil else { return }
+        loadingMore = true
+        moreTask = Task {
+            defer { moreTask = nil; loadingMore = false }
+            do {
+                let page = try await fetch(api: api, offset: offset)
+                merge(page.events)
+                loadedTotal = page.total
+                hasMore = page.events.count >= Self.pageSize
+                offset += page.events.count
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    /// Pull the newest page and merge it, the way the web refreshes every minute.
+    func refreshLatest(api: ReportMateAPI) async {
+        guard !loading else { return }
+        let today = Calendar.current.startOfDay(for: Date())
+        if endDate < today, Calendar.current.isDate(endDate, inSameDayAs: today.addingTimeInterval(-86400)) {
+            endDate = today
+            return
+        }
+        if let page = try? await fetch(api: api, offset: 0) { merge(page.events); loadedTotal = page.total }
     }
 }
 

@@ -50,6 +50,12 @@ struct DevicesView: View {
         .onReceive(NotificationCenter.default.publisher(for: .devicesSearch)) { note in
             if let q = note.object as? String { search = q }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .devicesStatusFilter)) { note in
+            // The dashboard's status legend links to `/devices?status=<status>`.
+            guard let status = note.object as? String else { return }
+            selections.statuses = [status]
+            filtersExpanded = true
+        }
     }
 
     private var isFiltered: Bool { !search.trimmingCharacters(in: .whitespaces).isEmpty || !selections.isEmpty }

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ReportMateKit
 
 /// Payload cache shared by every events list so a row's details load once.
@@ -114,21 +115,37 @@ struct EventInlineLinesView: View {
     }
 }
 
+/// Loads every payload behind a row (one per bundled event id).
+@MainActor
+@Observable
+final class EventPayloads {
+    var payloads: [String: JSONValue] = [:]
+    var loading = false
+
+    func load(_ ids: [String], api: ReportMateAPI) async {
+        loading = true
+        for id in ids {
+            if let p = await EventPayloadCache.shared.load(id, api: api) { payloads[id] = p }
+        }
+        loading = false
+    }
+}
+
 /// Expanded detail under an event row: every line of the payload, then the raw JSON.
 struct EventDetailsView: View {
     @Environment(AppState.self) private var appState
     let event: BundledEvent
-    @State private var payloads: [String: JSONValue] = [:]
-    @State private var loading = false
+    var includeRaw = true
+    @State private var store = EventPayloads()
     @State private var showRaw = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if loading, payloads.isEmpty {
+            if store.loading, store.payloads.isEmpty {
                 ProgressView().controlSize(.small)
             }
             ForEach(event.eventIds, id: \.self) { id in
-                if let p = payloads[id] {
+                if let p = store.payloads[id] {
                     let details = EventInlineDetails.extract(p)
                     if !details.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
@@ -140,29 +157,25 @@ struct EventDetailsView: View {
                     metadata(p)
                 }
             }
-            if !payloads.isEmpty {
-                DisclosureGroup("Raw payload", isExpanded: $showRaw) {
-                    ScrollView(.horizontal) {
-                        Text(payloads.count == 1 ? (payloads.values.first?.prettyPrinted ?? "") : JSONValue.array(event.eventIds.compactMap { payloads[$0] }).prettyPrinted)
-                            .appFont(.caption, design: .monospaced)
-                            .textSelection(.enabled)
-                            .padding(8)
+            if includeRaw {
+                if !store.payloads.isEmpty {
+                    DisclosureGroup("Raw payload", isExpanded: $showRaw) {
+                        ScrollView(.horizontal) {
+                            Text(EventPayloadText.format(event: event, payloads: store.payloads))
+                                .appFont(.caption, design: .monospaced)
+                                .textSelection(.enabled)
+                                .padding(8)
+                        }
+                        .frame(maxHeight: 320)
+                        .background(Color.subtleBackground, in: RoundedRectangle(cornerRadius: 6))
                     }
-                    .frame(maxHeight: 320)
-                    .background(Color.subtleBackground, in: RoundedRectangle(cornerRadius: 6))
+                    .appFont(.caption)
+                } else if !store.loading {
+                    Text("No payload recorded for this event.").appFont(.caption).foregroundStyle(.secondary)
                 }
-                .appFont(.caption)
-            } else if !loading {
-                Text("No payload recorded for this event.").appFont(.caption).foregroundStyle(.secondary)
             }
         }
-        .task(id: event.id) {
-            loading = true
-            for id in event.eventIds {
-                if let p = await EventPayloadCache.shared.load(id, api: appState.api) { payloads[id] = p }
-            }
-            loading = false
-        }
+        .task(id: event.id) { await store.load(event.eventIds, api: appState.api) }
     }
 
     private func detailLine(_ line: InlineLine, _ tone: Color) -> some View {
@@ -194,21 +207,215 @@ struct EventDetailsView: View {
     }
 }
 
+/// The web `formatFullPayload`: a bundle summary followed by each event's JSON.
+enum EventPayloadText {
+    static func format(event: BundledEvent, payloads: [String: JSONValue]) -> String {
+        if event.isBundle {
+            var modules = Set<String>()
+            for id in event.eventIds {
+                guard let p = payloads[id] else { continue }
+                EventBundling.moduleNames(in: p).forEach { modules.insert($0) }
+                if !p["full_installs_data"].isNull || !p["module_status"].isNull || (!p["session_id"].isNull && (!p["success_count"].isNull || !p["error_count"].isNull)) {
+                    modules.insert("installs")
+                }
+            }
+            var out = "Bundle Summary:\n- Event Count: \(event.count)\n"
+            if !modules.isEmpty { out += "- Modules: \(modules.map { $0.prefix(1).uppercased() + $0.dropFirst() }.sorted().joined(separator: ", "))\n" }
+            out += "- Event Types: \(event.bundledKinds.map(\.rawValue).joined(separator: ", "))\n"
+            out += "- Message: \(event.message)\n\nIndividual Event Payloads:\n\(String(repeating: "=", count: 50))\n\n"
+            for (i, id) in event.eventIds.enumerated() {
+                out += "Event \(i + 1) (ID: \(id)):\n\(String(repeating: "-", count: 30))\n"
+                if let p = payloads[id] {
+                    if !p["full_installs_data"].isNull || !p["module_status"].isNull {
+                        out += "Module(s): Installs\n"
+                        if let rt = p.firstString("run_type", "runType") { out += "Run Type: \(rt)\n" }
+                        if let sid = p.firstString("session_id", "sessionId") { out += "Session ID: \(sid)\n" }
+                        out += "\n--- Installs Data ---\n"
+                    }
+                    out += p.string ?? p.prettyPrinted
+                } else {
+                    out += "Error: payload unavailable"
+                }
+                out += "\n\n"
+            }
+            return out
+        }
+        guard let p = payloads[event.id] ?? event.payload else { return "No payload available" }
+        return p.string ?? p.prettyPrinted
+    }
+
+    /// Lines matching `search` (case-insensitive) with one line of context
+    /// either side, the match highlighted; the whole text when not searching.
+    static func highlighted(_ text: String, search: String) -> AttributedString {
+        let q = search.trimmingCharacters(in: .whitespaces)
+        guard q.count >= 2 else { return AttributedString(text) }
+        let lines = text.components(separatedBy: "\n")
+        var keep = Set<Int>()
+        for (i, line) in lines.enumerated() where line.range(of: q, options: .caseInsensitive) != nil {
+            if i > 0 { keep.insert(i - 1) }
+            keep.insert(i)
+            if i < lines.count - 1 { keep.insert(i + 1) }
+        }
+        if keep.isEmpty { return AttributedString("No lines match \"\(q)\".") }
+        var out = AttributedString()
+        var last = -2
+        for i in keep.sorted() {
+            if i > last + 1, !out.characters.isEmpty {
+                var gap = AttributedString("…\n")
+                gap.foregroundColor = .secondary
+                out += gap
+            }
+            out += highlightLine(lines[i], q)
+            out += AttributedString("\n")
+            last = i
+        }
+        return out
+    }
+
+    private static func highlightLine(_ line: String, _ q: String) -> AttributedString {
+        var out = AttributedString()
+        var rest = line[...]
+        while let r = rest.range(of: q, options: .caseInsensitive) {
+            out += AttributedString(String(rest[..<r.lowerBound]))
+            var hit = AttributedString(String(rest[r]))
+            hit.backgroundColor = Color.yellow.opacity(0.5)
+            hit.inlinePresentationIntent = .stronglyEmphasized
+            out += hit
+            rest = rest[r.upperBound...]
+        }
+        out += AttributedString(String(rest))
+        return out
+    }
+}
+
+/// "Last Run Summary" / "Packages with Issues" above an installs event's details.
+struct LastRunSummaryView: View {
+    let summary: LastRunSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(summary.title).appFont(.callout, weight: .semibold)
+                if let rt = summary.runType { Pill(rt, tone: .gray) }
+                if let s = summary.successCount, s > 0 { Pill("\(s) succeeded", tone: .green) }
+                if let e = summary.errorCount, e > 0 { Pill("\(e) failed", tone: .red) }
+            }
+            if summary.hasItems {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                    GridRow {
+                        Text("PACKAGE").appFont(.caption2, weight: .semibold).foregroundStyle(.secondary)
+                        Text("VERSION").appFont(.caption2, weight: .semibold).foregroundStyle(.secondary)
+                        Text("STATUS").appFont(.caption2, weight: .semibold).foregroundStyle(.secondary)
+                    }
+                    ForEach(summary.items) { item in
+                        GridRow {
+                            Text(item.name).appFont(.caption, weight: .medium).lineLimit(1)
+                            Text(item.version.isEmpty ? "-" : item.version).appFont(.caption, design: .monospaced).foregroundStyle(.secondary)
+                            Pill(item.status, tone: tone(item.status))
+                        }
+                    }
+                }
+            } else if summary.hasCounts {
+                Text("No individual package details available in this event payload.").appFont(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.cardBorder))
+    }
+
+    private func tone(_ status: String) -> Tone {
+        switch status.lowercased() {
+        case "installed", "success", "completed", "up to date": return .green
+        case "pending", "pending update", "available": return .cyan
+        case "warning": return .yellow
+        case "error", "failed": return .red
+        case "removed": return .purple
+        default: return .gray
+        }
+    }
+}
+
+/// The events page's expanded row: id and time, the run summary, details,
+/// and the raw payload with copy and search.
+struct EventExpandedPanel: View {
+    @Environment(AppState.self) private var appState
+    let event: BundledEvent
+    @State private var store = EventPayloads()
+    @State private var search = ""
+
+    private var summary: LastRunSummary? {
+        for id in event.eventIds { if let p = store.payloads[id], let s = LastRunSummary.parse(p), !s.isEmpty { return s } }
+        return nil
+    }
+
+    var body: some View {
+        let text = EventPayloadText.format(event: event, payloads: store.payloads)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Text(event.isBundle ? "Bundle of \(event.count)" : "#\(event.id)").appFont(.caption, design: .monospaced).foregroundStyle(.secondary)
+                    .help(event.isBundle ? "Bundle: \(event.eventIds.joined(separator: ", "))" : "#\(event.id)")
+                Text(TimeFormatting.exact(event.ts)).appFont(.caption).foregroundStyle(.secondary)
+                if store.loading { ProgressView().controlSize(.mini) }
+            }
+            if let summary { LastRunSummaryView(summary: summary) }
+            EventDetailsView(event: event, includeRaw: false)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(store.payloads.isEmpty ? "Raw Payload (from events list)" : "Raw Payload").appFont(.callout, weight: .semibold)
+                    Spacer()
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                        TextField("Search payload...", text: $search).textFieldStyle(.plain)
+                        if !search.isEmpty { Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }.buttonStyle(.plain) }
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(Color.subtleBackground, in: RoundedRectangle(cornerRadius: 6))
+                    .frame(width: 220)
+                    CopyButton(value: text)
+                }
+                if store.loading, store.payloads.isEmpty {
+                    Text("Loading full payload...").appFont(.caption).foregroundStyle(.secondary)
+                } else {
+                    ScrollView([.horizontal, .vertical]) {
+                        Text(EventPayloadText.highlighted(text, search: search))
+                            .appFont(.caption, design: .monospaced)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                    }
+                    .frame(maxHeight: 360)
+                    .background(Color.subtleBackground, in: RoundedRectangle(cornerRadius: 6))
+                }
+            }
+        }
+        .task(id: event.id) { await store.load(event.eventIds, api: appState.api) }
+    }
+}
+
 /// The events table body shared by the dashboard widget, the fleet feed and
 /// the per-device Events tab.
 struct EventsTableView: View {
+    enum Style { case compact, feed }
+
     @Environment(AppState.self) private var appState
     let events: [BundledEvent]
+    var style: Style = .compact
     var showDevice = true
     var autoFetchRows = 60
     var maxRows = 250
     var onOpenDevice: ((BundledEvent) -> Void)? = nil
+    /// Called when the reader is a few rows from the end (infinite scroll).
+    var onNearEnd: (() -> Void)? = nil
     @State private var expanded: Set<String> = []
 
+    private var deviceWidth: CGFloat { style == .feed ? 230 : 190 }
+
     var body: some View {
+        let shown = Array(events.prefix(maxRows).enumerated())
         LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
             Section {
-                ForEach(Array(events.prefix(maxRows).enumerated()), id: \.element.id) { index, event in
+                ForEach(shown, id: \.element.id) { index, event in
                     let isOpen = expanded.contains(event.id)
                     VStack(spacing: 0) {
                         HStack(alignment: .top, spacing: 10) {
@@ -218,29 +425,37 @@ struct EventsTableView: View {
                                 EventKindIcon(kind: event.kind, removal: event.isRemoval)
                             }
                             .frame(width: 52, alignment: .leading)
+                            if style == .feed, showDevice { deviceCell(event) }
                             EventInlineLinesView(event: event, autoFetch: index < autoFetchRows)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                            if showDevice {
-                                Button {
-                                    if let onOpenDevice { onOpenDevice(event) } else { open(event) }
-                                } label: {
-                                    Text(deviceName(event)).appFont(.body, weight: .medium).lineLimit(1).truncationMode(.middle)
-                                }
-                                .buttonStyle(.link)
-                                .frame(width: 190, alignment: .leading)
-                            }
+                            if style == .compact, showDevice { deviceCell(event) }
                             Text(TimeFormatting.relative(event.ts)).appFont(.body).foregroundStyle(.secondary)
                                 .frame(width: 120, alignment: .leading)
                                 .help(TimeFormatting.exact(event.ts))
+                            if style == .feed {
+                                Button { toggle(event.id) } label: {
+                                    Image(systemName: isOpen ? "chevron.up.circle" : "doc.text.magnifyingglass").foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .help(isOpen ? "Collapse" : "Show payload")
+                                .frame(width: 40, alignment: .center)
+                            }
                         }
                         .padding(.horizontal, 12).padding(.vertical, 8)
                         .contentShape(Rectangle())
                         .onTapGesture { toggle(event.id) }
+                        .onAppear { if let onNearEnd, index >= shown.count - 5 { onNearEnd() } }
                         if isOpen {
-                            EventDetailsView(event: event)
-                                .padding(.horizontal, 24).padding(.vertical, 10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.subtleBackground)
+                            Group {
+                                if style == .feed {
+                                    EventExpandedPanel(event: event)
+                                } else {
+                                    EventDetailsView(event: event)
+                                }
+                            }
+                            .padding(.horizontal, 24).padding(.vertical, 10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.subtleBackground)
                         }
                         Divider()
                     }
@@ -248,9 +463,11 @@ struct EventsTableView: View {
             } header: {
                 HStack(spacing: 10) {
                     Text("TYPE").frame(width: 52, alignment: .leading)
+                    if style == .feed, showDevice { Text("DEVICE").frame(width: deviceWidth, alignment: .leading) }
                     Text("MESSAGE").frame(maxWidth: .infinity, alignment: .leading)
-                    if showDevice { Text("DEVICE").frame(width: 190, alignment: .leading) }
+                    if style == .compact, showDevice { Text("DEVICE").frame(width: deviceWidth, alignment: .leading) }
                     Text("TIME").frame(width: 120, alignment: .leading)
+                    if style == .feed { Text("PAYLOAD").frame(width: 40, alignment: .center) }
                 }
                 .appFont(.caption2, weight: .semibold).foregroundStyle(.secondary).kerning(0.5)
                 .padding(.horizontal, 12).padding(.vertical, 8)
@@ -258,6 +475,25 @@ struct EventsTableView: View {
                 .overlay(alignment: .bottom) { Divider() }
             }
         }
+    }
+
+    private func deviceCell(_ event: BundledEvent) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Button {
+                if let onOpenDevice { onOpenDevice(event) } else { open(event) }
+            } label: {
+                Text(deviceName(event)).appFont(.body, weight: .medium).lineLimit(1).truncationMode(.middle)
+            }
+            .buttonStyle(.link)
+            .help(event.deviceName ?? event.device)
+            if style == .feed {
+                HStack(spacing: 6) {
+                    Text(event.device).appFont(.caption2, design: .monospaced).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    if let tag = event.assetTag { Pill(tag, tone: .gray) }
+                }
+            }
+        }
+        .frame(width: deviceWidth, alignment: .leading)
     }
 
     private func toggle(_ id: String) {
