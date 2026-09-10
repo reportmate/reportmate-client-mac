@@ -80,8 +80,19 @@ final class InstallsReportModel {
         do {
             if bulkRows == nil {
                 loadingMessage = "Retrieving install records..."
-                reportProgress = 0.3
-                bulkRows = try await api.installRecords()
+                reportProgress = 0.1
+                var rows: [InstallRecord] = []
+                var offset = 0
+                let pageSize = 5000
+                while true {
+                    let page = try await api.installRecords(limit: pageSize, offset: offset)
+                    rows.append(contentsOf: page)
+                    offset += page.count
+                    loadingMessage = "Retrieving install records (\(rows.count.formatted()) so far)..."
+                    reportProgress = min(0.65, 0.1 + Double(rows.count) / 150_000 * 0.55)
+                    if page.count < pageSize { break }
+                }
+                bulkRows = rows
             }
             reportProgress = 0.7
             loadingMessage = "Filtering results..."

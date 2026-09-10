@@ -312,9 +312,10 @@ public final class ReportMateAPI: Sendable {
         return InstallsFilterOptions(json: json)
     }
 
-    /// Every (device, package) row for the fleet; filtering happens client-side.
-    public func installRecords(includeArchived: Bool = false) async throws -> [InstallRecord] {
-        let json = try await getJSON("/installs", query: ["includeArchived": includeArchived ? "true" : nil])
+    /// (device, package) rows for the fleet, one page at a time (the API caps a
+    /// page at 5000; the whole list is well over 100k rows). Filtering happens client-side.
+    public func installRecords(includeArchived: Bool = false, limit: Int = 5000, offset: Int = 0) async throws -> [InstallRecord] {
+        let json = try await getJSON("/installs", query: ["includeArchived": includeArchived ? "true" : nil, "limit": String(limit), "offset": offset > 0 ? String(offset) : nil])
         let rows = json.array ?? json["devices"].array ?? json["data"].array
         guard let rows else { throw APIError.decoding(json["error"].string ?? json["message"].string ?? "Received invalid data format from API") }
         return rows.map(InstallRecord.init(json:))
