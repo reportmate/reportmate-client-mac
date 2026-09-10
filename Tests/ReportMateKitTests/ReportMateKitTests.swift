@@ -129,6 +129,25 @@ import Foundation
         #expect(d.successes == ["Managed Safari 15.6.1"])
     }
 
+    @Test func inlineDetailsRemovals() {
+        let removal: JSONValue = ["action": "remove", "removed_items": [["name": "Zoom", "version": "6.1"]]]
+        let r = EventInlineDetails.extract(removal)
+        #expect(r.isRemoval)
+        #expect(r.successes == ["Zoom 6.1"])
+        // Old Munki clients report a removal as blank flat pairs.
+        let blank: JSONValue = ["Zoom": "", "Slack": ""]
+        let b = EventInlineDetails.extract(blank)
+        #expect(b.isRemoval)
+        #expect(b.successes == ["Slack", "Zoom"])
+        // One blank value among versions is a context field, not a package.
+        let mixed: JSONValue = ["Zoom": "6.1", "note": ""]
+        let m = EventInlineDetails.extract(mixed)
+        #expect(!m.isRemoval)
+        #expect(m.successes == ["Zoom 6.1"])
+        let installed: JSONValue = ["installed_items": ["Firefox"]]
+        #expect(EventInlineDetails.extract(installed).successes == ["Firefox"])
+    }
+
     @Test func eventLinks() {
         #expect(EventLinks.moduleId(kind: .warning, message: "2 Munki warnings", payload: nil) == "installs")
         #expect(EventLinks.moduleId(kind: .info, message: "Hardware data reported", payload: nil) == "hardware")
@@ -200,6 +219,23 @@ import Foundation
         #expect(InstallItems.isPending(["currentStatus": "will-be-installed"]))
         #expect(InstallItems.isSuccess(["status": "install_succeeded"]))
         #expect(InstallItems.itemName(fromMessage: "Download of Excel failed: error -1005") == "Excel")
+    }
+
+    @Test func categoryLadder() {
+        // The API's stored verdict wins outright.
+        #expect(InstallItems.category(of: ["reportmateStatus": "installed", "currentStatus": "Failed"]) == .success)
+        // A good verdict with an install loop is a warning, not a success.
+        #expect(InstallItems.category(of: ["currentStatus": "Installed", "hasInstallLoop": true]) == .warning)
+        // "not installed" is a warning even though it contains "installed".
+        #expect(InstallItems.category(of: ["currentStatus": "Not Installed"]) == .warning)
+        // Spelling variants normalise to one state.
+        #expect(InstallItems.category(of: ["currentStatus": "Update Available"]) == .pending)
+        #expect(InstallItems.category(of: ["currentStatus": "update_available"]) == .pending)
+        // Installed with a stale lastError: the run did not report it, so it stays good.
+        #expect(InstallItems.category(of: ["currentStatus": "Installed", "lastError": "old"], hasSessions: true) == nil)
+        #expect(InstallItems.category(of: ["status": "pending", "lastError": "boom"], hasSessions: true) == .pending)
+        #expect(InstallItems.category(of: ["status": "pending", "lastError": "boom", "lastSeenInSession": "s1"], hasSessions: true) == .error)
+        #expect(InstallItems.category(of: ["status": "pending", "lastError": "boom"]) == .error)
     }
 }
 

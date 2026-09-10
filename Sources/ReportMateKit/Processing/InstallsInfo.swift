@@ -629,26 +629,25 @@ public enum SystemProblems {
         if !munki.isNull {
             let sessions = munki["sessions"].elements
             if !sessions.isEmpty {
+                // Only the latest session is read: a run's problems describe the
+                // state that run found, and the next clean run supersedes them.
+                let session = sessions[0]
                 let itemless = munki["items"].elements.isEmpty
-                let latestFailed = (sessions[0]["status"].string ?? "").lowercased() == "failed"
-                let cutoff = now.addingTimeInterval(-recentWindow)
-                for session in sessions.prefix(maxSessions) {
-                    let time = session.firstString("endTime", "end_time", "startTime", "start_time") ?? ""
-                    if !time.isEmpty, let d = FlexibleDate.parse(time), d < cutoff { break }
-                    var problems: [SystemProblem] = []
-                    for (keys, isError) in [(["errorItems", "error_items"], true), (["warningItems", "warning_items"], false)] {
-                        let list = keys.map { session[$0] }.first { !$0.isNull }?.elements ?? []
-                        for problem in list where problem["name"].nonEmptyString == nil {
-                            let message = LogText.cleanMultiline(problem["message"].string ?? "")
-                            if !message.isEmpty, !problems.contains(where: { $0.message == message }) { problems.append(SystemProblem(isError: isError, message: message)) }
-                        }
-                    }
-                    if !problems.isEmpty {
-                        return SystemProblemsSummary(problems: problems, sessionId: session.firstString("sessionId", "session_id"), time: time, failedWithoutItems: latestFailed && itemless)
+                let failedWithoutItems = (session["status"].string ?? "").lowercased() == "failed" && itemless
+                var problems: [SystemProblem] = []
+                for (keys, isError) in [(["errorItems", "error_items"], true), (["warningItems", "warning_items"], false)] {
+                    let list = keys.map { session[$0] }.first { !$0.isNull }?.elements ?? []
+                    for problem in list where problem["name"].nonEmptyString == nil {
+                        let message = LogText.cleanMultiline(problem["message"].string ?? "")
+                        if !message.isEmpty, !problems.contains(where: { $0.message == message }) { problems.append(SystemProblem(isError: isError, message: message)) }
                     }
                 }
-                empty.failedWithoutItems = latestFailed && itemless
-                return empty
+                if problems.isEmpty {
+                    empty.failedWithoutItems = failedWithoutItems
+                    return empty
+                }
+                return SystemProblemsSummary(problems: problems, sessionId: session.firstString("sessionId", "session_id"),
+                                             time: session.firstString("endTime", "end_time", "startTime", "start_time") ?? "", failedWithoutItems: failedWithoutItems)
             }
             let errors = systemLines(munki["errors"])
             let warnings = systemLines(munki["warnings"])
@@ -698,15 +697,43 @@ public enum InstallItems {
         return installs["munki"]["items"].elements
     }
 
-    static func statusCategory(_ item: JSONValue) -> Category? {
-        let status = (item.firstString("currentStatus", "current_status", "status") ?? "").lowercased()
+    /// The state the API computed at ingest (`reportmateStatus`), when present.
+    static func storedCategory(_ item: JSONValue) -> Category? {
+        switch item.firstString("reportmateStatus", "reportmate_status")?.lowercased() {
+        case "error": return .error
+        case "warning": return .warning
+        case "pending": return .pending
+        case "installed": return .success
+        default: return nil
+        }
+    }
+
+    /// One state is spelled three ways across live payloads ("Update Available",
+    /// "update-available", "update_available"), so normalise before matching.
+    static func normalizedStatus(_ raw: String?) -> String {
+        (raw ?? "").lowercased().replacingOccurrences(of: " ", with: "-").replacingOccurrences(of: "_", with: "-")
+    }
+
+    static func statusCategory(_ raw: String?) -> Category? {
+        let status = normalizedStatus(raw)
         if status.isEmpty { return nil }
-        if ["install_succeeded", "install-succeeded", "completed"].contains(status) { return .success }
-        if status.contains("error") || status.contains("failed") || status.contains("problem") || status == "needs_reinstall" { return .error }
-        if status.contains("warning") || status == "needs-attention" { return .warning }
-        if status.contains("will-be-installed") || status.contains("update-available") || status.contains("update_available") || status.contains("will-be-removed")
-            || status.contains("pending") || status.contains("scheduled") || status == "managed-update-available" { return .pending }
+        if status.contains("error") || status.contains("failed") || status.contains("problem") || status == "needs-reinstall" { return .error }
+        // "not-installed" contains "installed" and means the opposite: managed, expected, absent.
+        if status.contains("warning") || status.contains("install-loop") || status == "needs-attention" || status == "not-installed" { return .warning }
+        if status.contains("pending") || status.contains("will-be-installed") || status.contains("update-available") || status.contains("will-be-removed")
+            || status.contains("scheduled") || status.contains("available") || status.contains("downloading") || status.contains("installing")
+            || status == "skipped" || status == "unknown" { return .pending }
+        // An install that ran and completed in the most recent run, not merely present.
+        if status == "install-succeeded" || status == "completed" || status == "success" { return .success }
         return nil
+    }
+
+    /// Whether the tool's verdict says the item is fine: Installed and Removed are
+    /// judgements written after the run.
+    static func verdictIsGood(_ item: JSONValue) -> Bool {
+        let status = normalizedStatus(item.firstString("currentStatus", "current_status", "mappedStatus", "mapped_status"))
+        if status.isEmpty || status == "not-installed" { return false }
+        return ["installed", "removed", "uninstalled", "install-succeeded", "completed", "success"].contains(status)
     }
 
     static func attemptCategory(_ item: JSONValue) -> Category? {
@@ -717,18 +744,40 @@ public enum InstallItems {
         return nil
     }
 
-    public static func isError(_ item: JSONValue) -> Bool {
-        if let c = statusCategory(item) ?? attemptCategory(item) { return c == .error }
-        return item.firstString("lastError", "last_error") != nil
+    /// A package that reinstalls every run is not healthy, however it reports.
+    static func hasInstallLoop(_ item: JSONValue) -> Bool {
+        item.first("hasInstallLoop", "has_install_loop").boolish || item.first("installLoopDetected", "install_loop_detected").boolish
     }
 
-    public static func isWarning(_ item: JSONValue) -> Bool {
-        if let c = statusCategory(item) ?? attemptCategory(item) { return c == .warning }
-        return item.firstString("lastError", "last_error") == nil && item.firstString("lastWarning", "last_warning") != nil
+    /// Whether the run itself attributed a message (stamped `lastSeenInSession`),
+    /// rather than the client scraping it from the run log.
+    static func runReported(_ item: JSONValue, hasSessions: Bool) -> Bool {
+        !hasSessions || item.firstString("lastSeenInSession", "last_seen_in_session") != nil
     }
 
-    public static func isPending(_ item: JSONValue) -> Bool { statusCategory(item) == .pending }
-    public static func isSuccess(_ item: JSONValue) -> Bool { statusCategory(item) == .success }
+    /// The item's state, by the same ladder the API applies at ingest
+    /// (`itemCategory` in `installs/status.ts`).
+    public static func category(of item: JSONValue, hasSessions: Bool = false) -> Category? {
+        if let stored = storedCategory(item) { return stored }
+        let verdict = statusCategory(item.firstString("currentStatus", "current_status", "mappedStatus", "mapped_status"))
+        if verdict == .error || verdict == .warning { return verdict }
+        if verdictIsGood(item) { return hasInstallLoop(item) ? .warning : verdict }
+        let presence = statusCategory(item["status"].string)
+        if presence == .error || presence == .warning { return presence }
+        let attempt = attemptCategory(item)
+        if attempt == .error || attempt == .warning { return attempt }
+        if runReported(item, hasSessions: hasSessions) {
+            if item.firstString("lastError", "last_error") != nil { return .error }
+            if item.firstString("lastWarning", "last_warning") != nil { return .warning }
+        }
+        if hasInstallLoop(item) { return .warning }
+        return verdict ?? presence
+    }
+
+    public static func isError(_ item: JSONValue) -> Bool { category(of: item) == .error }
+    public static func isWarning(_ item: JSONValue) -> Bool { category(of: item) == .warning }
+    public static func isPending(_ item: JSONValue) -> Bool { category(of: item) == .pending }
+    public static func isSuccess(_ item: JSONValue) -> Bool { category(of: item) == .success }
 
     public static func matches(_ item: JSONValue, _ category: Category?) -> Bool {
         guard let category else { return true }

@@ -193,7 +193,10 @@ public enum EventInlineDetails {
             }
         }
 
-        if let items = p["items"].array {
+        // `removed_items` and `installed_items` share the shape; a removal run
+        // carries its packages under removed_items so the row colours them as a removal.
+        for key in ["items", "removed_items", "installed_items"] {
+            guard let items = p[key].array else { continue }
             for item in items {
                 if let s = item.string, item.object == nil {
                     let t = s.trimmingCharacters(in: .whitespaces)
@@ -220,13 +223,24 @@ public enum EventInlineDetails {
             out.warnings.append(InlineLine(text: rec, isMessage: true))
         }
 
+        // Older clients send a run's packages as a flat "Name": "version" map.
+        // Munki reports no version for a removal, so those pairs arrive blank; a
+        // blank value is a package only when every pair is blank, otherwise it is
+        // a context field that happens to be empty.
         if let obj = p.object {
-            for (key, value) in obj.sorted(by: { $0.key < $1.key }) {
-                if reservedKeys.contains(key) || key.lowercased().hasSuffix("count") { continue }
-                if case .string(let s) = value, let first = s.trimmingCharacters(in: .whitespaces).first, first.isNumber {
-                    out.successes.append("\(key) \(s.trimmingCharacters(in: .whitespaces))")
+            let flatPairs: [(String, String)] = obj.sorted { $0.key < $1.key }.compactMap { key, value in
+                guard !reservedKeys.contains(key), !key.lowercased().hasSuffix("count"), case .string(let s) = value else { return nil }
+                return (key, s.trimmingCharacters(in: .whitespaces))
+            }
+            let allBlank = !flatPairs.isEmpty && flatPairs.allSatisfy { $0.1.isEmpty }
+            for (key, value) in flatPairs {
+                if value.isEmpty {
+                    if allBlank { out.successes.append(key) }
+                } else if value.first?.isNumber == true {
+                    out.successes.append("\(key) \(value)")
                 }
             }
+            if allBlank { out.isRemoval = true }
         }
 
         func dedupe(_ lines: [InlineLine]) -> [InlineLine] {
