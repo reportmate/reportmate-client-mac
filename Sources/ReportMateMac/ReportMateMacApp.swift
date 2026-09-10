@@ -57,6 +57,14 @@ struct AppCommands: Commands {
                 .keyboardShortcut("k", modifiers: .command)
             Button("Refresh") { appState?.refreshRequested += 1 }
                 .keyboardShortcut("r", modifiers: .command)
+            Button("Copy Link") {
+                guard let appState else { return }
+                let link = appState.currentDeepLink
+                let text = appState.configuration.normalizedWebURL.flatMap { link.handoffURL(webBase: $0)?.absoluteString } ?? link.url.absoluteString
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
+            .keyboardShortcut("c", modifiers: [.command, .shift])
             Divider()
             Button("Show All Platforms") { appState?.platformFilter = .all }
                 .keyboardShortcut("0", modifiers: [.command, .shift])
