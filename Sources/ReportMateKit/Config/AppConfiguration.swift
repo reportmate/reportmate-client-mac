@@ -34,6 +34,8 @@ public struct AppConfiguration: Sendable, Equatable {
     public var oidcAudience: String
     /// The web dashboard, used to build links that fall back to the browser.
     public var webBaseURL: String
+    /// True when the API URL came from the runner's configuration on this Mac rather than the app's own settings.
+    public var inheritedFromRunner = false
 
     public static let webBaseURLDefaultsKey = "webBaseURL"
 
@@ -88,6 +90,17 @@ public struct AppConfiguration: Sendable, Equatable {
         config.passphrase = keychain.get(.passphrase) ?? ""
         config.oidcAudience = keychain.get(.oidcAudience) ?? ""
         config.webBaseURL = UserDefaults.standard.string(forKey: AppConfiguration.webBaseURLDefaultsKey) ?? ""
+        // A Mac whose runner already reports has an API URL and credential in the
+        // runner's domain (managed profile or /Library/Preferences); the app
+        // inherits them so a configured device never says "No API is configured".
+        if config.baseURL.isEmpty, let runner = AppConfiguration.fromRunner() {
+            config.baseURL = runner.baseURL
+            config.inheritedFromRunner = true
+            if config.apiKey.isEmpty, config.passphrase.isEmpty, config.oidcAudience.isEmpty {
+                config.apiKey = runner.apiKey
+                config.passphrase = runner.passphrase
+            }
+        }
         if let m = keychain.get(.authMethod), let method = AuthMethod(rawValue: m) {
             config.authMethod = method
         } else if !config.apiKey.isEmpty {
@@ -106,6 +119,22 @@ public struct AppConfiguration: Sendable, Equatable {
             config.oidcAudience = v
             if config.apiKey.isEmpty, config.passphrase.isEmpty { config.authMethod = .entraBearer }
         }
+        return config
+    }
+
+    /// The runner's own configuration on this Mac: the `com.github.reportmate`
+    /// preference domain, which covers a managed configuration profile and
+    /// `/Library/Preferences/com.github.reportmate.plist`. Nil when no API URL is set.
+    public static func fromRunner(domain: String = "com.github.reportmate") -> AppConfiguration? {
+        func read(_ key: String) -> String? {
+            guard let v = CFPreferencesCopyAppValue(key as CFString, domain as CFString) as? String else { return nil }
+            let t = v.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.isEmpty ? nil : t
+        }
+        guard let url = read("ApiUrl") else { return nil }
+        var config = AppConfiguration(baseURL: url)
+        if let key = read("ApiKey") { config.apiKey = key; config.authMethod = .apiKey }
+        else if let pass = read("Passphrase") { config.passphrase = pass; config.authMethod = .passphrase }
         return config
     }
 

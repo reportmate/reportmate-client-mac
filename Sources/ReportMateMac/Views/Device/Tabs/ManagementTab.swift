@@ -22,7 +22,7 @@ struct ManagementTabView: View {
                     enrollmentCard(m).frame(maxWidth: .infinity)
                     if m.isEnrolled { certificateCard(m).frame(width: 340) }
                 }
-                if let logs = m.logs, !logs.roots.isEmpty { ManagementLogsSection(serialNumber: device.serialNumber, logs: logs) }
+                if let logs = m.logs, !logs.roots.isEmpty { ManagementLogsSection(serialNumber: device.serialNumber, logs: logs, installs: device.asJSON["modules"]["installs"]) }
                 if !m.profiles.isEmpty { profilesSection(m) }
                 if m.isMac, !m.managedPolicies.isEmpty { policiesSection(m) }
             }
@@ -130,21 +130,11 @@ struct ManagementTabView: View {
                         yesNo("ADE Capable", mdm["dep_capable"].boolish || mdm["depCapable"].boolish)
                         pillRow("Identity Certificate", m.enrollmentMethod ?? "Unknown", tone: m.enrollmentMethod == nil ? .gray : .green, small: true)
                     }
+                    if let v = m.deviceIdentifiers["uuid"].nonEmptyString { CodeRow(label: "UUID", value: v) }
                     if let url = m.serverUrl { CodeRow(label: "Server URL", value: url) }
                     if let checkin = mdm.firstString("checkin_url", "checkinUrl") { CodeRow(label: "Check-in URL", value: checkin) }
                 }
 
-                if m.isMac, m.hasDeviceIdentifiers {
-                    let ids = m.deviceIdentifiers
-                    sectionHeading("Device Identifiers")
-                    VStack(alignment: .leading, spacing: 8) {
-                        if let v = ids["uuid"].nonEmptyString { CodeRow(label: "UUID", value: v) }
-                        if let v = ids.firstString("hardware_serial", "serialNumber", "serial_number") { CodeRow(label: "Serial Number", value: v) }
-                        if let v = ids.firstString("hardware_model", "model") { labeled("Model", v) }
-                        if let v = ids.firstString("asset_tag", "assetTag") { labeled("Asset Tag", v) }
-                        if let v = ids["provisioning_udid"].nonEmptyString { CodeRow(label: "Provisioning UDID", value: v) }
-                    }
-                }
 
                 if m.isEnrolled, m.isMac, let topic = m.certificate.pushTopic {
                     sectionHeading("Push Notification")
@@ -519,85 +509,84 @@ struct ManagementTabView: View {
 
 // MARK: - Logs
 
-/// Collapsible management-tool logs: one tab per root, a log picker and a
-/// viewer that renders JSONL as records, JSON pretty-printed, text with
-/// error and warning lines tinted. Port of `ManagementLogsSection.tsx`.
+/// Management-tool logs: one tab per root, a log picker and a viewer that
+/// shows every text log as event rows (JSONL by record, structured lines by
+/// their parsers), `.json` tails as a tree, with level filters and tag pills.
+/// Port of `ManagementLogsSection.tsx`.
 struct ManagementLogsSection: View {
     @Environment(AppState.self) private var appState
     let serialNumber: String
     let logs: LogsInfo
+    /// The installs module: a root's version falls back to its tool's installed version here.
+    var installs: JSONValue = .null
 
     enum TailState { case loading, loaded(LogsInfo.Root), error(String) }
 
-    @State private var expanded = false
     @State private var activeTool: String? = nil
     @State private var tails: [String: TailState] = [:]
     @State private var selectedFile: [String: String] = [:]
     @State private var filter = ""
+    @State private var levelFilter = LogsInfo.LevelFilter()
     @State private var copied = false
+    @State private var retryNonce = 0
 
     var body: some View {
         let roots = logs.roots
         Card {
-            VStack(spacing: 0) {
-                Button { expanded.toggle() } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "doc.text").foregroundStyle(.secondary)
-                        Text("Management Logs").appFont(.title3, weight: .semibold)
-                        if !expanded {
-                            FlowLayout(spacing: 4) {
-                                ForEach(roots) { root in
-                                    HStack(spacing: 4) {
-                                        Text(root.productName(platform: logs.platform)).appFont(.caption2, weight: .medium)
-                                        if (root.errorCount ?? 0) > 0 { Circle().fill(Color.red).frame(width: 6, height: 6) }
-                                        else if (root.warningCount ?? 0) > 0 { Circle().fill(Color.orange).frame(width: 6, height: 6) }
-                                    }
-                                    .padding(.horizontal, 7).padding(.vertical, 2)
-                                    .background(Color.subtleBackground, in: RoundedRectangle(cornerRadius: 5))
-                                }
-                            }
-                        }
-                        Spacer()
-                        if logs.totalErrors > 0 { Text("\(logs.totalErrors) errors").appFont(.caption, weight: .medium).foregroundStyle(.red) }
-                        if logs.totalWarnings > 0 { Text("\(logs.totalWarnings) warnings").appFont(.caption, weight: .medium).foregroundStyle(.orange) }
-                        if let at = logs.collectedAt { Text(TimeFormatting.exact(at)).appFont(.caption).foregroundStyle(.secondary) }
-                        Image(systemName: "chevron.down").rotationEffect(.degrees(expanded ? 180 : 0)).foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 16).padding(.vertical, 12)
-                    .contentShape(Rectangle())
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Management Tools Logs").appFont(.title3, weight: .semibold)
+                    Text(summaryLine(roots)).appFont(.callout).foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
-                if expanded {
-                    Divider()
-                    FlowLayout(spacing: 6) {
+                .padding(.horizontal, 16).padding(.vertical, 12)
+                Divider()
+                if roots.count > 1 {
+                    HStack(spacing: 8) {
                         ForEach(roots) { root in
                             let active = root.tool == activeTool
-                            Button { activeTool = root.tool; filter = "" } label: {
-                                HStack(spacing: 6) {
-                                    Text(root.productName(platform: logs.platform)).appFont(.callout, weight: .medium)
-                                    if let e = root.errorCount, e > 0 { Text("\(e)").appFont(.caption2, weight: .semibold).padding(.horizontal, 5).padding(.vertical, 1).background(Color.red.opacity(active ? 0.9 : 0.15), in: RoundedRectangle(cornerRadius: 4)).foregroundStyle(active ? Color.white : Color.red) }
-                                    if let w = root.warningCount, w > 0 { Text("\(w)").appFont(.caption2, weight: .semibold).padding(.horizontal, 5).padding(.vertical, 1).background(Color.orange.opacity(active ? 0.9 : 0.15), in: RoundedRectangle(cornerRadius: 4)).foregroundStyle(active ? Color.white : Color.orange) }
-                                }
-                                .padding(.horizontal, 10).padding(.vertical, 6)
-                                .background(active ? Color.primary : Color.clear, in: RoundedRectangle(cornerRadius: 6))
-                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(active ? Color.clear : Color.cardBorder))
-                                .foregroundStyle(active ? Color(nsColor: .windowBackgroundColor) : Color.primary)
+                            Button { selectTool(root.tool) } label: {
+                                Text(root.productName(platform: logs.platform))
+                                    .appFont(.callout, weight: .medium)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 30)
+                                    .background(active ? Color.primary : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(active ? Color.clear : Color.cardBorder))
+                                    .foregroundStyle(active ? Color(nsColor: .windowBackgroundColor) : Color.primary)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                         }
                     }
                     .padding(.horizontal, 16).padding(.top, 12)
-                    if let root = roots.first(where: { $0.tool == activeTool }) { rootDetail(root) }
                 }
+                if let root = roots.first(where: { $0.tool == activeTool }) { rootDetail(root) }
             }
         }
         .onAppear { if activeTool == nil { activeTool = roots.first?.tool } }
         .onChange(of: serialNumber) { tails = [:]; activeTool = roots.first?.tool }
-        .task(id: "\(expanded)-\(activeTool ?? "")") { await loadIfNeeded() }
+        .task(id: "\(activeTool ?? "")-\(retryNonce)") { await loadIfNeeded() }
+    }
+
+    private func summaryLine(_ roots: [LogsInfo.Root]) -> String {
+        var parts = ["\(roots.count) \(roots.count == 1 ? "tool" : "tools")", "\(logs.totalFiles) files"]
+        if logs.totalBytes > 0 { parts.append(LogsInfo.formatBytes(logs.totalBytes)) }
+        if let at = logs.collectedAt { parts.append("collected \(TimeFormatting.exact(at))") }
+        return "Logs collected from the management tools on this device (\(parts.joined(separator: ", ")))"
+    }
+
+    private func selectTool(_ tool: String) {
+        activeTool = tool
+        filter = ""
+        levelFilter = LogsInfo.LevelFilter()
+        if case .error = tails[tool] { retryNonce += 1 }
     }
 
     private func loadIfNeeded() async {
-        guard expanded, let tool = activeTool, tails[tool] == nil else { return }
+        guard let tool = activeTool else { return }
+        if let existing = tails[tool] {
+            if case .error = existing {} else { return }
+        }
         // The runner's own survey (This Mac, or a full module payload) already
         // carries the tails; only the API's slimmed device record needs a fetch.
         if let root = logs.roots.first(where: { $0.tool == tool }), !root.tails.isEmpty {
@@ -621,13 +610,17 @@ struct ManagementLogsSection: View {
         let available = loaded?.tails.filter { $0.file != nil } ?? []
         let currentFile = selectedFile[root.tool].flatMap { f in available.contains { $0.file == f } ? f : nil } ?? available.first?.file
         let currentTail = available.first { $0.file == currentFile }
-        let lines = currentTail?.lines ?? []
+        let lines = LogsInfo.stitchCmTrace(currentTail?.lines ?? [])
         let needle = filter.trimmingCharacters(in: .whitespaces).lowercased()
-        let visible = needle.isEmpty ? lines : lines.filter { $0.lowercased().contains(needle) }
-        let isJsonl = (currentFile ?? "").lowercased().hasSuffix(".jsonl")
         let isJson = (currentFile ?? "").lowercased().hasSuffix(".json")
-        let pretty: String? = isJson && !lines.isEmpty ? JSONValue.parse(lines.joined(separator: "\n"))?.prettyPrinted : nil
+        let classified = LogsInfo.classify(lines: lines, file: currentFile)
+        let counts = LogsInfo.levelCounts(classified)
+        let visible = classified.filter { levelFilter.passes($0.level) && (needle.isEmpty || $0.line.lowercased().contains(needle)) }
+        let filtering = !needle.isEmpty || levelFilter.isActive
+        let uniform = LogsInfo.uniformComponent(classified)
+        let document: JSONValue? = isJson && !lines.isEmpty ? JSONValue.parse(lines.joined(separator: "\n")) : nil
         let withoutTails = root.files.filter { f in !available.contains { $0.file == f.path } }
+        let version = root.version ?? LogsInfo.installedVersion(for: root.tool, platform: logs.platform, installs: installs)
 
         return VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 28) {
@@ -662,52 +655,64 @@ struct ManagementLogsSection: View {
                         }
                     }
                 }
+                Spacer()
+                if let version {
+                    VStack(alignment: .trailing, spacing: 3) {
+                        SectionLabel("Version")
+                        Text(version).appFont(.callout, design: .monospaced)
+                    }
+                }
             }
             HStack(alignment: .top, spacing: 12) {
+                // Picker: fills the column and scrolls inside.
                 VStack(alignment: .leading, spacing: 0) {
                     Text("LOGS").appFont(.caption2, weight: .semibold).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading).background(Color.subtleBackground)
                     Divider()
-                    if let loaded {
-                        ForEach(loaded.tails) { tail in
-                            let entry = root.files.first { $0.path == tail.file }
-                            let current = tail.file == currentFile
-                            Button { if let f = tail.file { selectedFile[root.tool] = f; filter = "" } } label: {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(tail.file ?? "").appFont(.caption2, design: .monospaced)
-                                    Text([entry.map { LogsInfo.formatBytes($0.bytes) }, entry?.modified.map { TimeFormatting.exact($0) }].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).appFont(.caption2).foregroundStyle(.secondary)
-                                }
-                                .padding(.horizontal, 10).padding(.vertical, 6)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(current ? Color.subtleBackground : Color.clear)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            Divider()
-                        }
-                    } else if case .error(let msg) = state {
-                        Text("Failed to load: \(msg)").appFont(.caption2).foregroundStyle(.secondary).padding(10)
-                    } else {
-                        Text("Loading...").appFont(.caption2).foregroundStyle(.secondary).padding(10)
-                    }
-                    if !withoutTails.isEmpty {
-                        DisclosureGroup("\(withoutTails.count) more files") {
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    ForEach(withoutTails) { f in
-                                        VStack(alignment: .leading, spacing: 1) {
-                                            Text(f.path).appFont(.caption2, design: .monospaced).foregroundStyle(.secondary)
-                                            Text([LogsInfo.formatBytes(f.bytes), f.modified.map { TimeFormatting.exact($0) }].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).appFont(.caption2).foregroundStyle(.tertiary)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            if let loaded {
+                                ForEach(loaded.tails) { tail in
+                                    let entry = root.files.first { $0.path == tail.file }
+                                    let current = tail.file == currentFile
+                                    let flags = LogsInfo.fileFlags(tail)
+                                    Button { if let f = tail.file { selectFile(root.tool, f) } } label: {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            HStack(alignment: .top, spacing: 6) {
+                                                Text(tail.file ?? "").appFont(.caption2, design: .monospaced)
+                                                if flags.errors { Circle().fill(Color.red).frame(width: 6, height: 6).padding(.top, 4).help("Errors in this log") }
+                                                if flags.warnings { Circle().fill(Color.orange).frame(width: 6, height: 6).padding(.top, 4).help("Warnings in this log") }
+                                            }
+                                            Text([entry.map { LogsInfo.formatBytes($0.bytes) }, entry?.modified.map { TimeFormatting.exact($0) }].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).appFont(.caption2).foregroundStyle(.secondary)
                                         }
+                                        .padding(.horizontal, 10).padding(.vertical, 6)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .background(current ? Color.subtleBackground : Color.clear)
+                                        .contentShape(Rectangle())
                                     }
+                                    .buttonStyle(.plain)
+                                    Divider()
+                                }
+                            } else if case .error(let msg) = state {
+                                Text("Failed to load: \(msg)").appFont(.caption2).foregroundStyle(.secondary).padding(10)
+                            } else {
+                                Text("Loading...").appFont(.caption2).foregroundStyle(.secondary).padding(10)
+                            }
+                            if !withoutTails.isEmpty {
+                                Text("NOT TAILED").appFont(.caption2, weight: .medium).foregroundStyle(.tertiary).padding(.horizontal, 10).padding(.vertical, 5).frame(maxWidth: .infinity, alignment: .leading).background(Color.subtleBackground.opacity(0.6))
+                                ForEach(withoutTails) { f in
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(f.path).appFont(.caption2, design: .monospaced).foregroundStyle(.secondary)
+                                        Text([LogsInfo.formatBytes(f.bytes), f.modified.map { TimeFormatting.exact($0) }].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).appFont(.caption2).foregroundStyle(.tertiary)
+                                    }
+                                    .padding(.horizontal, 10).padding(.vertical, 4)
+                                    Divider()
                                 }
                             }
-                            .frame(maxHeight: 200)
                         }
-                        .appFont(.caption2)
-                        .padding(10)
                     }
                 }
                 .frame(width: 260)
+                .frame(maxHeight: .infinity)
                 .background(Color.cardBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.cardBorder))
@@ -724,10 +729,17 @@ struct ManagementLogsSection: View {
                         Button { saveTail(root: root, file: currentFile, lines: lines) } label: { Image(systemName: "arrow.down.to.line") }
                             .buttonStyle(.bordered).disabled(lines.isEmpty).help("Save")
                         TextField("Filter lines", text: $filter).textFieldStyle(.roundedBorder).frame(width: 170)
+                        if !isJson, !lines.isEmpty {
+                            HStack(spacing: 6) {
+                                levelToggle("Errors", count: counts.error, on: levelFilter.errors, tone: .red, title: levelFilter.errors ? "Showing errors" : "Show only errors") { levelFilter.errors.toggle() }
+                                levelToggle("Warnings", count: counts.warning, on: levelFilter.warnings, tone: .orange, title: levelFilter.warnings ? "Showing warnings" : "Show only warnings") { levelFilter.warnings.toggle() }
+                                levelToggle("Debug", count: counts.debug, on: levelFilter.debug, tone: .gray, title: levelFilter.debug ? "Hiding debug lines on next click" : "Show debug lines") { levelFilter.debug.toggle() }
+                            }
+                        }
                         HStack(spacing: 6) {
                             Text(currentFile ?? "").appFont(.caption2, design: .monospaced)
                             if !lines.isEmpty {
-                                Text((needle.isEmpty ? "last \(lines.count) lines" : "\(visible.count) of \(lines.count) lines") + ((currentTail?.truncated ?? false) ? ", truncated" : "")).appFont(.caption2)
+                                Text((filtering ? "\(visible.count) of \(lines.count) lines" : "last \(lines.count) lines") + ((currentTail?.truncated ?? false) ? ", truncated" : "")).appFont(.caption2)
                             }
                         }
                         .foregroundStyle(.secondary).lineLimit(1)
@@ -740,28 +752,49 @@ struct ManagementLogsSection: View {
                         if state == nil || { if case .loading = state { return true }; return false }() {
                             Text("Loading log...").appFont(.callout).foregroundStyle(.secondary).padding(24).frame(maxWidth: .infinity)
                         } else if case .error(let msg) = state {
-                            Text("Failed to load log: \(msg)").appFont(.callout).foregroundStyle(.red).padding(24).frame(maxWidth: .infinity)
+                            VStack(spacing: 10) {
+                                Text("Failed to load log: \(msg)").appFont(.callout).foregroundStyle(.red)
+                                Button("Retry") { retryNonce += 1 }.buttonStyle(.bordered)
+                            }
+                            .padding(24).frame(maxWidth: .infinity)
                         } else if lines.isEmpty {
                             Text("No log lines reported").appFont(.callout).foregroundStyle(.secondary).padding(24).frame(maxWidth: .infinity)
-                        } else if let pretty, needle.isEmpty {
-                            LogPane { Text(pretty).appFont(.caption2, design: .monospaced).textSelection(.enabled) }
-                        } else if isJsonl {
+                        } else if let document, needle.isEmpty {
+                            ScrollView {
+                                LogJsonTree(value: document, name: nil, depth: 0)
+                                    .appFont(.caption2, design: .monospaced)
+                                    .padding(12)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(maxHeight: 560)
+                        } else if visible.isEmpty {
+                            Text("No lines match the current filters").appFont(.callout).foregroundStyle(.secondary).padding(24).frame(maxWidth: .infinity)
+                        } else if !isJson {
                             ScrollView {
                                 LazyVStack(alignment: .leading, spacing: 0) {
-                                    ForEach(Array(visible.enumerated()), id: \.offset) { i, line in
-                                        JsonlEventRow(event: LogsInfo.JsonlEvent(index: i, line: line))
+                                    ForEach(visible) { entry in
+                                        if let event = entry.event, event.parsed != nil {
+                                            LogEventRow(event: event, hideComponent: uniform)
+                                        } else {
+                                            Text(entry.line.isEmpty ? " " : entry.line)
+                                                .appFont(.caption2, design: .monospaced)
+                                                .foregroundStyle(rawColor(entry.level))
+                                                .textSelection(.enabled)
+                                                .padding(.horizontal, 12).padding(.vertical, 6)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                        }
                                         Divider()
                                     }
                                 }
                             }
-                            .frame(maxHeight: 500)
+                            .frame(maxHeight: 560)
                         } else {
                             LogPane {
                                 LazyVStack(alignment: .leading, spacing: 0) {
-                                    ForEach(Array(visible.enumerated()), id: \.offset) { _, line in
-                                        Text(line.isEmpty ? " " : line)
+                                    ForEach(visible) { entry in
+                                        Text(entry.line.isEmpty ? " " : entry.line)
                                             .appFont(.caption2, design: .monospaced)
-                                            .foregroundStyle(lineColor(LogsInfo.lineTone(line)))
+                                            .foregroundStyle(paneColor(entry.level))
                                             .textSelection(.enabled)
                                     }
                                 }
@@ -774,8 +807,33 @@ struct ManagementLogsSection: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.cardBorder))
             }
+            .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
+    }
+
+    private func selectFile(_ tool: String, _ file: String) {
+        selectedFile[tool] = file
+        filter = ""
+        levelFilter = LogsInfo.LevelFilter()
+    }
+
+    private func levelToggle(_ label: String, count: Int, on: Bool, tone: Color, title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Text(label).appFont(.caption2, weight: .medium)
+                Text("\(count)").appFont(.caption2, design: .monospaced).foregroundStyle(on ? tone : Color.secondary)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .background(on ? tone.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(on ? tone.opacity(0.5) : Color.cardBorder))
+            .foregroundStyle(on ? tone : Color.primary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(count == 0)
+        .opacity(count == 0 ? 0.4 : 1)
+        .help(title)
     }
 
     private func sessionTone(_ t: LogsInfo.SessionSummary.Tone) -> Tone {
@@ -788,10 +846,22 @@ struct ManagementLogsSection: View {
         }
     }
 
-    private func lineColor(_ tone: LogsInfo.LineTone) -> Color {
-        switch tone {
+    /// Row colours for an unparsed line on the light surface.
+    private func rawColor(_ level: LogsInfo.LineLevel) -> Color {
+        switch level {
+        case .error: return .red
+        case .warning: return .orange
+        case .debug: return .secondary
+        case .plain: return .primary
+        }
+    }
+
+    /// Line colours on the dark pane.
+    private func paneColor(_ level: LogsInfo.LineLevel) -> Color {
+        switch level {
         case .error: return Color(red: 1.0, green: 0.55, blue: 0.55)
         case .warning: return Color(red: 1.0, green: 0.8, blue: 0.4)
+        case .debug: return Color(white: 0.55)
         case .plain: return Color(white: 0.9)
         }
     }
@@ -814,48 +884,198 @@ struct LogPane<Content: View>: View {
         ScrollView([.vertical, .horizontal]) {
             content.padding(12).frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxHeight: 500)
+        .frame(maxHeight: 560)
         .background(Color(white: 0.12))
     }
 }
 
-/// One JSONL record: time, level, event type, item, message; whole record on expand.
-struct JsonlEventRow: View {
+/// One event row: time, level, tag pill, component, item, message; the whole
+/// message and every field the line carried on expand.
+struct LogEventRow: View {
     let event: LogsInfo.JsonlEvent
+    var hideComponent = false
     @State private var open = false
 
     var body: some View {
-        if let parsed = event.parsed {
-            VStack(alignment: .leading, spacing: 6) {
-                Button { open.toggle() } label: {
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text(TimeFormatting.exact(event.timestamp)).appFont(.caption2, design: .monospaced).foregroundStyle(.secondary)
-                        if let level = event.level {
-                            let tone = LogsInfo.levelTone(level)
-                            Pill(level.uppercased(), tone: tone == .error ? .red : tone == .warning ? .orange : .gray)
-                        }
-                        if let t = event.eventType { Text(t.replacingOccurrences(of: "_", with: " ")).appFont(.caption2).foregroundStyle(.secondary) }
-                        if let item = event.item {
-                            HStack(spacing: 3) {
-                                Text(item).appFont(.caption2, weight: .medium)
-                                if let v = event.version { Text(v).appFont(.caption2).foregroundStyle(.secondary) }
-                            }
-                        }
-                        if let m = event.message { Text(m).appFont(.caption2).lineLimit(open ? nil : 2) }
-                        Spacer()
+        VStack(alignment: .leading, spacing: 6) {
+            Button { open.toggle() } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(eventTime).appFont(.caption2, design: .monospaced).foregroundStyle(.secondary).lineLimit(1)
+                    if let level = event.level {
+                        let tone = LogsInfo.levelTone(level)
+                        Text(level.uppercased()).appFont(fixed: 10, weight: .semibold)
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(levelColor(tone).opacity(tone == .plain || tone == .debug ? 0.12 : 0.18), in: RoundedRectangle(cornerRadius: 4))
+                            .foregroundStyle(tone == .plain ? Color.primary : levelColor(tone))
                     }
-                    .contentShape(Rectangle())
+                    if let tag = event.tag {
+                        let tone = tagColor(LogsInfo.tagTone(tag))
+                        Text(tag).appFont(fixed: 10, weight: .medium).lineLimit(1)
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(tone.opacity(0.1), in: RoundedRectangle(cornerRadius: 4))
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(tone.opacity(0.4)))
+                            .foregroundStyle(tone == Color.secondary ? Color.primary : tone)
+                    }
+                    if let t = event.eventType, !hideComponent { Text(t.replacingOccurrences(of: "_", with: " ")).appFont(.caption2).foregroundStyle(.secondary).lineLimit(1) }
+                    if let item = event.item {
+                        HStack(spacing: 3) {
+                            Text(item).appFont(.caption2, weight: .medium)
+                            if let v = event.version { Text(v).appFont(.caption2).foregroundStyle(.secondary) }
+                        }
+                        .lineLimit(1)
+                    }
+                    if let m = event.message { Text(m).appFont(.caption2).lineLimit(1).truncationMode(.tail) }
+                    Spacer(minLength: 0)
                 }
-                .buttonStyle(.plain)
-                if open {
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open {
+                if let m = event.message {
+                    Text(m).appFont(.caption2).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                }
+                if let parsed = event.parsed {
                     Text(parsed.prettyPrinted).appFont(.caption2, design: .monospaced).foregroundStyle(Color(white: 0.9)).textSelection(.enabled)
                         .padding(10).frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 6))
                 }
             }
-            .padding(.horizontal, 12).padding(.vertical, 6)
-        } else {
-            Text(event.raw).appFont(.caption2, design: .monospaced).textSelection(.enabled).padding(.horizontal, 12).padding(.vertical, 6)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 6)
+    }
+
+    private var eventTime: String {
+        guard let ts = event.timestamp else { return "" }
+        if let date = FlexibleDate.parse(ts) {
+            return date.formatted(date: .omitted, time: .standard)
+        }
+        return ts
+    }
+
+    private func levelColor(_ tone: LogsInfo.LineLevel) -> Color {
+        switch tone {
+        case .error: return .red
+        case .warning: return .orange
+        case .debug: return .secondary
+        case .plain: return .gray
+        }
+    }
+
+    private func tagColor(_ tone: LogsInfo.TagTone) -> Color {
+        switch tone {
+        case .success: return .green
+        case .retry: return .orange
+        case .failure: return .red
+        case .neutral: return .secondary
+        }
+    }
+}
+
+/// A .json tail (session.json, status.json) as a tree: objects and arrays
+/// open by default with their size, scalars keyed and coloured by type.
+/// Short lists of scalars are shown inline; long ones open in columns.
+struct LogJsonTree: View {
+    let value: JSONValue
+    let name: String?
+    let depth: Int
+    @State private var open: Bool
+
+    init(value: JSONValue, name: String?, depth: Int) {
+        self.value = value
+        self.name = name
+        self.depth = depth
+        _open = State(initialValue: depth < 2 || LogJsonTree.isScalarList(value))
+    }
+
+    static func isScalarList(_ v: JSONValue) -> Bool {
+        guard let a = v.array else { return false }
+        return a.allSatisfy { $0.object == nil && $0.array == nil }
+    }
+
+    var body: some View {
+        switch value {
+        case .null:
+            row { Text("null").italic().foregroundStyle(.tertiary) }
+        case .bool(let b):
+            row { Text(b ? "true" : "false").foregroundStyle(b ? Color.green : Color.secondary) }
+        case .number(let n):
+            row { Text(n == n.rounded() && abs(n) < 1e15 ? String(Int(n)) : String(n)).foregroundStyle(Color.blue) }
+        case .string(let s):
+            row {
+                if s.isEmpty { Text("empty").italic().foregroundStyle(.tertiary) } else { Text(s).textSelection(.enabled) }
+            }
+        case .array(let items):
+            if items.isEmpty {
+                row { Text("empty list").italic().foregroundStyle(.tertiary) }
+            } else if LogJsonTree.isScalarList(value) {
+                let inline = items.map { $0.string ?? $0.prettyPrinted }.joined(separator: ", ")
+                if items.count <= 8, inline.count <= 120 {
+                    row {
+                        Text(inline).textSelection(.enabled)
+                        Text("\(items.count)").foregroundStyle(.tertiary)
+                    }
+                } else {
+                    branch(summary: "\(items.count) items") {
+                        LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 2) {
+                            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                                Text(item.string ?? item.prettyPrinted).textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+            } else {
+                branch(summary: "\(items.count) items") {
+                    ForEach(Array(items.enumerated()), id: \.offset) { i, item in
+                        LogJsonTree(value: item, name: String(i), depth: depth + 1)
+                    }
+                }
+            }
+        case .object(let obj):
+            let entries = obj.sorted { $0.key < $1.key }
+            if entries.isEmpty {
+                row { Text("empty").italic().foregroundStyle(.tertiary) }
+            } else if name == nil {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(entries, id: \.key) { key, child in
+                        LogJsonTree(value: child, name: key, depth: depth + 1)
+                    }
+                }
+            } else {
+                branch(summary: "\(entries.count) fields") {
+                    ForEach(entries, id: \.key) { key, child in
+                        LogJsonTree(value: child, name: key, depth: depth + 1)
+                    }
+                }
+            }
+        }
+    }
+
+    private func row<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if let name { Text(name).foregroundStyle(.secondary).lineLimit(1) }
+            content()
+        }
+        .padding(.vertical, 1)
+    }
+
+    private func branch<Content: View>(summary: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button { open.toggle() } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "chevron.right").rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(.tertiary).appFont(fixed: 8)
+                    if let name { Text(name).foregroundStyle(.secondary) }
+                    Text(summary).foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.vertical, 1)
+            if open {
+                VStack(alignment: .leading, spacing: 0) { content() }
+                    .padding(.leading, 12)
+                    .overlay(alignment: .leading) { Rectangle().fill(Color.cardBorder).frame(width: 1) }
+                    .padding(.leading, 6)
+            }
         }
     }
 }

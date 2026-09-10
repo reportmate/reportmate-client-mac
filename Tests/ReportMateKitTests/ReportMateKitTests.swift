@@ -449,3 +449,90 @@ import Foundation
         #expect(DeepLink(url: apps.url)?.query["apps"] == "Blender,Zoom")
     }
 }
+
+@Suite struct ManagementLogsTests {
+    @Test func ordersRootsAndNamesProducts() {
+        let modules: JSONValue = ["management": ["logs": ["platform": "macOS", "roots": [
+            ["tool": "installs", "name": "Managed Installs", "path": "/Library/Managed Installs/logs"],
+            ["tool": "installer", "name": "Installer", "path": "/var/log"],
+            ["tool": "mdm", "name": "Intune", "path": "/Library/Logs/Microsoft"],
+            ["tool": "notifications", "name": "Managed Notifications", "path": "/Library/Managed Notifications/logs", "version": "2.5.0"],
+        ]]]]
+        let info = LogsInfo(modules: modules)!
+        #expect(info.roots.map(\.tool) == ["mdm", "installs", "notifications", "installer"])
+        #expect(info.roots[0].productName(platform: "macOS") == "Intune")
+        #expect(info.roots[1].productName(platform: "Windows") == "Cimian")
+        #expect(info.roots[2].productName(platform: "macOS") == "swiftDialog")
+        #expect(info.roots[2].productName(platform: "Windows") == "csharpDialog")
+        #expect(info.roots[2].version == "2.5.0")
+        let encryption = LogsInfo.Root(json: ["tool": "encryption", "name": "Managed Encryption"])!
+        #expect(encryption.productName(platform: "Windows") == "Crypt")
+    }
+
+    @Test func parsesStructuredLines() {
+        let convention = LogsInfo.parseStructured(index: 0, line: "[2026-09-02 14:27:03] ERROR  Download failed: CRITICAL path")
+        #expect(convention.level == "ERROR")
+        #expect(convention.timestamp == "2026-09-02T14:27:03")
+        #expect(convention.message == "Download failed: CRITICAL path")
+        // An INFO line that mentions CRITICAL stays INFO.
+        #expect(LogsInfo.lineTone("[2026-09-02 14:27:03] INFO   CRITICAL word") == .plain)
+
+        let bracket = LogsInfo.parseStructured(index: 1, line: "[2026-09-01 03:02:27.255] [Debug] Checking enrolment")
+        #expect(bracket.level == "DEBUG")
+        #expect(bracket.message == "Checking enrolment")
+
+        let cm = LogsInfo.parseStructured(index: 2, line: #"<![LOG[Policy applied]LOG]!><time="14:52:59.1234567" date="8-25-2026" component="IntuneManagementExtension" context="" type="2" thread="12" file="">"#)
+        #expect(cm.level == "WARN")
+        #expect(cm.eventType == "IntuneManagementExtension")
+        #expect(cm.timestamp == "2026-08-25T14:52:59.1234567")
+
+        let daemon = LogsInfo.parseStructured(index: 3, line: "2026-09-02 14:27:03:123 | IntuneMDM-Daemon | E | 0x1 | Flighting | [Flighting] Fetch failed")
+        #expect(daemon.level == "ERROR")
+        #expect(daemon.eventType == "Flighting")
+        let lifted = daemon.liftingTag()
+        #expect(lifted.tag == "Flighting")
+        #expect(lifted.message == "Fetch failed")
+
+        let munki = LogsInfo.parseStructured(index: 4, line: "Sep 02 2026 14:27:03 -0700 WARNING: Could not process item")
+        #expect(munki.timestamp == "2026-09-02T14:27:03")
+        #expect(munki.level == "WARN")
+
+        let syslog = LogsInfo.parseStructured(index: 5, line: "2026-09-02 14:27:03-07 host installd[123]: Installed package")
+        #expect(syslog.eventType == "installd")
+        #expect(syslog.message == "Installed package")
+
+        #expect(LogsInfo.parseStructured(index: 6, line: "plain text").parsed == nil)
+    }
+
+    @Test func stitchesCmTraceAndFiltersLevels() {
+        let lines = ["<![LOG[first line", "second line]LOG]!><time=\"1\" date=\"2\" component=\"c\" context=\"\" type=\"1\" thread=\"1\" file=\"\">", "other"]
+        let stitched = LogsInfo.stitchCmTrace(lines)
+        #expect(stitched.count == 2)
+        #expect(stitched[0].contains("\n"))
+
+        var filter = LogsInfo.LevelFilter()
+        #expect(filter.passes(.plain))
+        #expect(!filter.passes(.debug))
+        filter.errors = true
+        #expect(filter.passes(.error))
+        #expect(!filter.passes(.plain))
+        filter.errors = false
+        filter.debug = true
+        #expect(filter.passes(.debug) && filter.passes(.plain))
+
+        #expect(LogsInfo.tagTone("SUCCESS") == .success)
+        #expect(LogsInfo.tagTone("Retrying") == .retry)
+        #expect(LogsInfo.tagTone("FAILED") == .failure)
+        #expect(LogsInfo.tagTone("PROGRESS") == .neutral)
+
+        let classified = LogsInfo.classify(lines: ["[2026-09-02 14:27:03] WARN  one", "{\"level\":\"error\",\"message\":\"boom\"}", "noise"], file: "run.log")
+        #expect(LogsInfo.levelCounts(classified).warning == 1)
+    }
+
+    @Test func fallsBackToInstalledVersion() {
+        let installs: JSONValue = ["munki": ["items": [["name": "munkitools", "installedVersion": "6.6.5"]]], "cimian": ["items": [["itemName": "CimianTools", "currentStatus": "Installed", "latestVersion": "2026.9.1"]]]]
+        #expect(LogsInfo.installedVersion(for: "installs", platform: "macOS", installs: installs) == "6.6.5")
+        #expect(LogsInfo.installedVersion(for: "installs", platform: "Windows", installs: installs) == "2026.9.1")
+        #expect(LogsInfo.installedVersion(for: "mdm", platform: "macOS", installs: installs) == nil)
+    }
+}

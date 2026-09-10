@@ -77,6 +77,12 @@ struct ConnectionSettingsView: View {
 
             Section {
                 LabeledContent("Stored credential", value: appState.configuration.credentialSummary)
+                if appState.configuration.inheritedFromRunner {
+                    LabeledContent("Source") {
+                        Text("Inherited from the ReportMate runner's configuration on this Mac (com.github.reportmate). Save to keep a copy in the app's Keychain.")
+                            .appFont(.caption).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
+                    }
+                }
                 LabeledContent("Environment overrides") {
                     Text("REPORTMATE_URL, REPORTMATE_API_KEY, REPORTMATE_PASSPHRASE, REPORTMATE_OIDC_AUDIENCE")
                         .appFont(.caption).foregroundStyle(.secondary).multilineTextAlignment(.trailing)

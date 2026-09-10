@@ -194,7 +194,7 @@ struct InstallsRunStatusView: View {
             let isError = summary.failedWithoutItems || summary.problems.contains(where: \.isError)
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    Pill(isError ? "Last run failed" : "Last run warnings", tone: isError ? .red : .yellow)
+                    Pill(isError ? (summary.failedWithoutItems ? "Last run failed" : "Last run errors") : "Last run warnings", tone: isError ? .red : .yellow)
                     if summary.failedWithoutItems { Text("The run did not complete, so no items were reported.").appFont(.callout).foregroundStyle(.secondary) }
                     Spacer()
                     Text([summary.sessionId, summary.time.flatMap { FlexibleDate.parse($0) }.map { TimeFormatting.relative($0) }].compactMap { $0 }.joined(separator: " · "))
