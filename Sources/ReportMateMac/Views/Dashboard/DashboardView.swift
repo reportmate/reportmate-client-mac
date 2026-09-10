@@ -73,7 +73,15 @@ final class DashboardModel {
     private func runLive(api: ReportMateAPI) async {
         while !Task.isCancelled {
             let negotiated: NegotiateResult
-            do { negotiated = try await api.negotiate() } catch { settle(); return }
+            do {
+                negotiated = try await withThrowingTaskGroup(of: NegotiateResult.self) { group in
+                    group.addTask { try await api.negotiate() }
+                    group.addTask { try await Task.sleep(for: .seconds(10)); throw CancellationError() }
+                    let first = try await group.next()!
+                    group.cancelAll()
+                    return first
+                }
+            } catch { settle(); return }
             guard negotiated.error == nil, let url = negotiated.url else { settle(); return }
             do {
                 for try await frame in LiveEventStream.frames(url: url) {

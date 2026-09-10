@@ -612,9 +612,6 @@ extension LogText {
 
 /// Port of `installs/systemProblems.ts`.
 public enum SystemProblems {
-    static let recentWindow: TimeInterval = 24 * 3600
-    static let maxSessions = 8
-
     static func systemLines(_ raw: JSONValue) -> [String] {
         guard let s = raw.string else { return [] }
         return LogText.cleanMultiline(s).components(separatedBy: CharacterSet(charactersIn: ";\n"))
