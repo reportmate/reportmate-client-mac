@@ -30,11 +30,3 @@ struct GenericFleetReport: View {
 }
 
 struct InstallsReportView: View { var body: some View { GenericFleetReport(section: .installs, path: "/installs") } }
-struct ApplicationsReportView: View { var body: some View { GenericFleetReport(section: .applications, path: "/applications") } }
-
-struct ApplicationUsageDetailView: View {
-    let appName: String
-    var body: some View {
-        EmptyStateView(title: appName, message: "Application usage detail is being ported.", systemImage: "app.badge")
-    }
-}

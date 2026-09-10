@@ -83,8 +83,12 @@ final class AppState {
         path.append(Route.device(serial: serial, tab: tab, filter: filter))
     }
 
-    func openApplicationUsage(_ appName: String) {
-        path.append(Route.applicationUsage(appName: appName))
+    func openApplicationUsage(_ appName: String, days: Int = 30, usages: [String] = [], catalogs: [String] = [], locations: [String] = []) {
+        path.append(Route.applicationUsage(appName: appName, days: days, usages: usages, catalogs: catalogs, locations: locations))
+    }
+
+    func openApplicationCoverage() {
+        path.append(Route.applicationCoverage)
     }
 
     func goBack() {

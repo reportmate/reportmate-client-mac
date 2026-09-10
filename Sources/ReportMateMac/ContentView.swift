@@ -18,8 +18,10 @@ struct ContentView: View {
                         switch route {
                         case .device(let serial, let tab, let filter):
                             DeviceDetailView(serial: serial, initialTab: tab, initialFilter: filter)
-                        case .applicationUsage(let appName):
-                            ApplicationUsageDetailView(appName: appName)
+                        case .applicationUsage(let appName, let days, let usages, let catalogs, let locations):
+                            ApplicationUsageDetailView(appName: appName, initialDays: days, usages: usages, catalogs: catalogs, locations: locations)
+                        case .applicationCoverage:
+                            ApplicationCoverageView()
                         }
                     }
             }

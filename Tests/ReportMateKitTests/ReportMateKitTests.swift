@@ -221,3 +221,72 @@ import Foundation
         #expect(ApplicationsInfo.formatDuration(3720) == "1h 2m")
     }
 }
+
+@Suite struct ApplicationsReportTests {
+    @Test func normalizesNames() {
+        #expect(AppNameNormalizer.normalize("Microsoft Visual C++ 2015 Redistributable (x64)") == "Microsoft Visual C++ Redistributable")
+        #expect(AppNameNormalizer.normalize("Google Chrome 120.0.6099") == "Google Chrome")
+        #expect(AppNameNormalizer.normalize("Adobe Photoshop 2024") == "Adobe Photoshop")
+        #expect(AppNameNormalizer.normalize("Blender 4.1.0") == "Blender")
+        #expect(AppNameNormalizer.normalize("Slack (x64)") == "Slack")
+        #expect(AppNameNormalizer.normalize("Zoom Desktop") == "Zoom")
+        #expect(AppNameNormalizer.normalize("Microsoft.NET.Runtime.Mono.6.0") == "Microsoft .NET Runtime")
+        #expect(AppNameNormalizer.normalize("Unknown") == "")
+        #expect(AppNameNormalizer.normalize("${{ app }}") == "")
+    }
+
+    @Test func excludesJunk() {
+        #expect(!AppNameNormalizer.shouldInclude("KB5031356"))
+        #expect(!AppNameNormalizer.shouldInclude("Microsoft.NET.Sdk.Android"))
+        #expect(!AppNameNormalizer.shouldInclude("Security Update for Microsoft Office"))
+        #expect(!AppNameNormalizer.shouldInclude("  "))
+        #expect(AppNameNormalizer.shouldInclude("Microsoft Visual Studio"))
+        #expect(AppNameNormalizer.shouldInclude("Blender"))
+    }
+
+    @Test func sortsVersionsNewestFirst() {
+        #expect(ApplicationsReport.sortVersionsDescending(["1.2", "1.10", "1.9"]) == ["1.10", "1.9", "1.2"])
+    }
+
+    @Test func versionAnalysisPrefersServerBuckets() throws {
+        let rows = try JSONValue.parse(Data(#"[{"serialNumber":"SAMPLE1","deviceName":"A","name":"Blender 4.1","version":"4.1"},{"serialNumber":"SAMPLE2","deviceName":"B","name":"Blender 4.1","version":"4.0"}]"#.utf8))
+            .elements.map(FleetApplicationRow.init(json:))
+        let folded = ApplicationsReport.versionAnalysis(server: nil, apps: rows)
+        #expect(folded["Blender"]?["4.1"] == 1)
+        #expect(folded["Blender"]?["4.0"] == 1)
+        let server = ApplicationsReport.parseServerDistribution(try JSONValue.parse(Data(#"{"Blender 4.1":{"totalDevices":5,"versions":{"4.1":3,"4.0":2}}}"#.utf8)))
+        let fromServer = ApplicationsReport.versionAnalysis(server: server, apps: rows)
+        #expect(fromServer["Blender"]?["4.1"] == 3)
+        #expect(ApplicationsReport.parseServerDistribution(.object(["error": .string("nope")])) == nil)
+    }
+
+    @Test func aggregatesUsageByDimension() throws {
+        let devices = try JSONValue.parse(Data(#"[{"serialNumber":"SAMPLE1","usage":"Shared","catalog":"Curriculum","location":"Room 1","fleet":"Lab","totalHours":12,"launchCount":40},{"serialNumber":"SAMPLE2","usage":"Assigned","catalog":"Curriculum","location":"Unknown","totalHours":60,"launchCount":5}]"#.utf8))
+            .elements.map(DeviceAggregate.init(json:))
+        let hours = UsageAggregates(devices: devices, metric: .hours)
+        #expect(hours.grandTotal == 72)
+        #expect(hours.byCatalog.first?.value == 72)
+        #expect(hours.byLocation.map(\.label) == ["Room 1"])
+        #expect(hours.bins.first { $0.label == "10–50h" }?.count == 1)
+        #expect(hours.bins.first { $0.label == "50–100h" }?.count == 1)
+        let launches = UsageAggregates(devices: devices, metric: .launches)
+        #expect(launches.byUsage.first?.label == "Shared")
+        #expect(launches.deviceCount == 2)
+    }
+
+    @Test func missingDevicesRespectSelections() throws {
+        let all = try JSONValue.parse(Data(#"[{"serialNumber":"SAMPLE1","name":"A","usage":"Shared","room":"Lab 101"},{"serialNumber":"SAMPLE2","name":"B","usage":"Assigned","room":"Lab 102"},{"serialNumber":"SAMPLE3","name":"C","usage":"Shared","room":"Office"}]"#.utf8))
+            .elements.map(ApplicationFilterDevice.init(json:))
+        let missing = ApplicationsReport.missingDevices(all: all, devicesWithApp: ["SAMPLE1"], usages: ["shared"], catalogs: [], locations: [], rooms: [])
+        #expect(missing.map(\.serialNumber) == ["SAMPLE3"])
+        let byRoom = ApplicationsReport.missingDevices(all: all, devicesWithApp: [], usages: [], catalogs: [], locations: [], rooms: ["lab"])
+        #expect(byRoom.map(\.serialNumber) == ["SAMPLE1", "SAMPLE2"])
+    }
+
+    @Test func formatsDurations() {
+        #expect(ApplicationsReport.duration(seconds: 0) == "0m")
+        #expect(ApplicationsReport.duration(seconds: 2700) == "45m")
+        #expect(ApplicationsReport.duration(seconds: 7200) == "2h")
+        #expect(ApplicationsReport.duration(seconds: 7500) == "2h 5m")
+    }
+}

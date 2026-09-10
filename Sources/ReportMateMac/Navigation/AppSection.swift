@@ -82,7 +82,8 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable, Codable {
 /// A navigation destination pushed on the detail stack.
 enum Route: Hashable {
     case device(serial: String, tab: DeviceTab?, filter: String?)
-    case applicationUsage(appName: String)
+    case applicationUsage(appName: String, days: Int = 30, usages: [String] = [], catalogs: [String] = [], locations: [String] = [])
+    case applicationCoverage
 
     static func device(_ serial: String) -> Route { .device(serial: serial, tab: nil, filter: nil) }
 }

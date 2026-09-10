@@ -290,3 +290,60 @@ struct ActiveFiltersBar: View {
         }
     }
 }
+
+/// Table rows for a page that scrolls as a whole: the header row pins to the
+/// top of the enclosing `ScrollView` while the rows scroll under it.
+struct StickyTable<Header: View, Rows: View>: View {
+    @ViewBuilder var header: Header
+    @ViewBuilder var rows: Rows
+    var body: some View {
+        LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+            Section {
+                rows
+            } header: {
+                VStack(spacing: 0) {
+                    HStack(spacing: 12) { header }
+                        .padding(.horizontal, 16).padding(.vertical, 8)
+                    Divider()
+                }
+                .background(Color.subtleBackground)
+                .background(Color(nsColor: .windowBackgroundColor))
+            }
+        }
+    }
+}
+
+/// Accordion header row: title, optional detail, trailing controls, chevron.
+struct AccordionHeader<Trailing: View>: View {
+    let title: String
+    var detail: String? = nil
+    @Binding var expanded: Bool
+    @ViewBuilder var trailing: Trailing
+
+    init(title: String, detail: String? = nil, expanded: Binding<Bool>, @ViewBuilder trailing: () -> Trailing = { EmptyView() }) {
+        self.title = title
+        self.detail = detail
+        _expanded = expanded
+        self.trailing = trailing()
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } } label: {
+                HStack(spacing: 8) {
+                    Text(title).appFont(.callout, weight: .medium)
+                    if let detail { Text(detail).appFont(.caption).foregroundStyle(.secondary) }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            trailing
+            Button { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } } label: {
+                Image(systemName: "chevron.right").rotationEffect(.degrees(expanded ? 90 : 0)).foregroundStyle(.secondary).appFont(.caption)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 9)
+    }
+}

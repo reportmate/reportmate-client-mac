@@ -264,6 +264,45 @@ public final class ReportMateAPI: Sendable {
         try await getJSON(path, query: query)
     }
 
+    // MARK: - Applications
+
+    /// Chip-cloud options and the device list for the Applications report.
+    public func applicationFilters() async throws -> ApplicationFilterOptions {
+        let json = try await getJSON("/applications/filters")
+        guard json.object != nil else { throw APIError.decoding("Invalid response format from filters API") }
+        return ApplicationFilterOptions(json: json)
+    }
+
+    /// Installed-application rows, filtered server-side by `applicationNames`,
+    /// inventory dimensions and platform.
+    public func applications(query: [String: String?]) async throws -> [FleetApplicationRow] {
+        let json = try await getJSON("/applications", query: query)
+        guard let rows = json.array else { throw APIError.decoding(json["error"].string ?? "Invalid data format") }
+        return rows.map(FleetApplicationRow.init(json:))
+    }
+
+    public func applicationUsage(query: [String: String?]) async throws -> UtilizationData {
+        UtilizationData(json: try await getJSON("/applications/usage", query: query))
+    }
+
+    /// Per-(app, version) counts aggregated in SQL; `nil` when the endpoint
+    /// cannot serve the request, so callers fold the rows themselves.
+    public func applicationDistribution(query: [String: String?]) async throws -> [String: ServerDistributionBucket]? {
+        ApplicationsReport.parseServerDistribution(try await getJSON("/applications/distribution", query: query))
+    }
+
+    public func applicationUsageByDevice(app: String, days: Int, usages: [String] = [], catalogs: [String] = [], locations: [String] = []) async throws -> UsageByDeviceReport {
+        var query: [String: String?] = ["app": app, "days": String(days)]
+        if !usages.isEmpty { query["usages"] = usages.joined(separator: ",") }
+        if !catalogs.isEmpty { query["catalogs"] = catalogs.joined(separator: ",") }
+        if !locations.isEmpty { query["locations"] = locations.joined(separator: ",") }
+        return UsageByDeviceReport(json: try await getJSON("/applications/usage/by-device", query: query))
+    }
+
+    public func applicationCollectionHealth(freshDays: Int = 7, staleDays: Int = 30) async throws -> CollectionHealth {
+        CollectionHealth(json: try await getJSON("/applications/collection-health", query: ["freshDays": String(freshDays), "staleDays": String(staleDays)]))
+    }
+
     // MARK: - Settings
 
     public func settings() async throws -> SettingsResponse {
