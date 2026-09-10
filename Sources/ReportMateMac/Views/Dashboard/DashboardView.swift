@@ -16,7 +16,13 @@ final class DashboardModel {
     /// Bumped every two minutes so relative times re-render.
     var clockTick = 0
 
-    enum ConnectionStatus { case connecting, polling, error }
+    enum ConnectionStatus { case connecting, connected, reconnecting, polling, error }
+
+    private var liveTask: Task<Void, Never>?
+    private var reconnectAttempts = 0
+    private static let maxReconnectAttempts = 5
+
+    var isLive: Bool { connectionStatus == .connected || connectionStatus == .reconnecting }
 
     func load(api: ReportMateAPI, includeArchived: Bool, initial: Bool) async {
         if initial { loading = data == nil }
@@ -41,12 +47,67 @@ final class DashboardModel {
                 data = d
             }
             error = nil
-            connectionStatus = .polling
+            if !isLive { connectionStatus = .polling }
             lastUpdate = Date()
         } catch {
             if initial { self.error = error.localizedDescription; connectionStatus = .error }
         }
         loading = false
+    }
+
+    /// Open the Web PubSub event stream like the web dashboard: negotiate a
+    /// token, listen, reconnect with exponential backoff up to five times,
+    /// then settle on polling. Polling keeps running underneath either way so
+    /// the device and install widgets stay fresh.
+    func startLive(api: ReportMateAPI) {
+        liveTask?.cancel()
+        reconnectAttempts = 0
+        liveTask = Task { [weak self] in await self?.runLive(api: api) }
+    }
+
+    func stopLive() {
+        liveTask?.cancel()
+        liveTask = nil
+    }
+
+    private func runLive(api: ReportMateAPI) async {
+        while !Task.isCancelled {
+            let negotiated: NegotiateResult
+            do { negotiated = try await api.negotiate() } catch { settle(); return }
+            guard negotiated.error == nil, let url = negotiated.url else { settle(); return }
+            do {
+                for try await frame in LiveEventStream.frames(url: url) {
+                    switch frame {
+                    case .open:
+                        connectionStatus = .connected
+                        reconnectAttempts = 0
+                        lastUpdate = Date()
+                    case .event(let event):
+                        insert(event)
+                    }
+                }
+            } catch {
+                // Closed: fall through to the reconnect ladder.
+            }
+            if Task.isCancelled { return }
+            guard reconnectAttempts < Self.maxReconnectAttempts else { settle(); return }
+            let delay = min(pow(2.0, Double(reconnectAttempts)), 30)
+            reconnectAttempts += 1
+            connectionStatus = .reconnecting
+            try? await Task.sleep(for: .seconds(delay))
+        }
+    }
+
+    private func settle() {
+        if connectionStatus != .error { connectionStatus = .polling }
+    }
+
+    private func insert(_ event: FleetEvent) {
+        guard var existing = data else { return }
+        guard !existing.events.contains(where: { $0.id == event.id }) else { return }
+        existing.events = ([event] + existing.events).prefix(1000).map { $0 }
+        data = existing
+        lastUpdate = Date()
     }
 }
 
@@ -92,6 +153,8 @@ struct DashboardView: View {
         }
         .navigationTitle("Dashboard")
         .task(id: appState.configuration) {
+            model.startLive(api: appState.api)
+            defer { model.stopLive() }
             await model.load(api: appState.api, includeArchived: appState.includeArchived, initial: true)
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(30))

@@ -215,7 +215,7 @@ struct ApplicationsReportView: View {
                             rows: {
                 sortedUsageApps.map { a in
                     [a.name, a.activeHours.map { String(format: "%.1f", $0) } ?? "", a.foregroundHours.map { String(format: "%.1f", $0) } ?? "", String(format: "%.1f", a.totalHours),
-                     String(a.launchCount), a.activeDeviceCount.map(String.init) ?? "", String(a.deviceCount), a.activeUserCount.map(String.init) ?? "", String(a.userCount),
+                     String(a.launchCount), a.activeDeviceCount.map(String.init) ?? "", a.installedDeviceCount.map(String.init) ?? "", a.activeUserCount.map(String.init) ?? "", String(a.userCount),
                      a.lastUsed ?? "", a.isSingleUser ? "Yes" : "No"]
                 }
             }, label: "Export Usage CSV")
@@ -461,8 +461,8 @@ struct ApplicationsReportView: View {
             Text(app.launchCount.formatted()).appFont(.callout).monospacedDigit().frame(width: 90, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(app.shownDeviceCount)").appFont(.callout).monospacedDigit().foregroundStyle((app.activeDeviceCount ?? 0) > 0 ? Color.primary : Color.secondary)
-                if let active = app.activeDeviceCount, active != app.deviceCount {
-                    Text("\(app.deviceCount) installed").appFont(.caption2).foregroundStyle(.secondary).help("Devices with any usage row, including background-only process time")
+                if let installed = app.installedDeviceCount {
+                    Text("\(installed) installed").appFont(.caption2).foregroundStyle(.secondary).help("Devices whose applications inventory lists this app")
                 }
             }
             .frame(width: 110, alignment: .leading)

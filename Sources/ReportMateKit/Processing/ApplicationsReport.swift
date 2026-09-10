@@ -284,6 +284,10 @@ public struct UtilizationApp: Sendable, Hashable, Identifiable {
     public let deviceCount: Int
     public let userCount: Int
     public let activeDeviceCount: Int?
+    /// Devices whose applications inventory lists the app, folded by the same
+    /// alias rules as the usage row. This is the install figure; deviceCount
+    /// bottoms out at the last baseline reset and, on macOS, only sees GUI sessions.
+    public let installedDeviceCount: Int?
     public let activeUserCount: Int?
     public let lastUsed: String?
     public let firstUsed: String?
@@ -306,6 +310,7 @@ public struct UtilizationApp: Sendable, Hashable, Identifiable {
         deviceCount = j["deviceCount"].int ?? 0
         userCount = j["userCount"].int ?? 0
         activeDeviceCount = j["activeDeviceCount"].int
+        installedDeviceCount = j["installedDeviceCount"].int
         activeUserCount = j["activeUserCount"].int
         lastUsed = j["lastUsed"].nonEmptyString
         firstUsed = j["firstUsed"].nonEmptyString

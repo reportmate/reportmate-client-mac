@@ -44,6 +44,8 @@ struct RecentEventsWidget: View {
     private var connectionDot: some View {
         let (color, text, tip): (Color, String, String) = {
             switch connectionStatus {
+            case .connected: return (.green, "Live", "Connected to the fleet event stream")
+            case .reconnecting: return (.orange, "Reconnecting", "The event stream dropped, reconnecting")
             case .polling: return (.blue, "Polling", "Polling the API every 30 seconds")
             case .connecting: return (.yellow, "Connecting", "Loading events")
             case .error: return (.red, "Offline", "Connection failed, events may be delayed")
