@@ -91,6 +91,10 @@ final class AppState {
         path.append(Route.applicationCoverage)
     }
 
+    func openThisMac() {
+        path.append(Route.localDevice)
+    }
+
     func goBack() {
         if !path.isEmpty {
             path.removeLast()

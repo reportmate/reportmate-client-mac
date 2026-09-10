@@ -84,6 +84,8 @@ enum Route: Hashable {
     case device(serial: String, tab: DeviceTab?, filter: String?)
     case applicationUsage(appName: String, days: Int = 30, usages: [String] = [], catalogs: [String] = [], locations: [String] = [])
     case applicationCoverage
+    /// This Mac's own report from the runner cache.
+    case localDevice
 
     static func device(_ serial: String) -> Route { .device(serial: serial, tab: nil, filter: nil) }
 }

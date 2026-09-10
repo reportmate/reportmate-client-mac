@@ -321,6 +321,7 @@ struct ErrorBanner: View {
 /// Shown in every section when the API is not configured yet.
 struct NotConfiguredView: View {
     @Environment(\.openSettings) private var openSettings
+    @Environment(AppState.self) private var appState
 
     var body: some View {
         VStack(spacing: 14) {
@@ -329,6 +330,10 @@ struct NotConfiguredView: View {
             Text("Enter the API URL and a credential in Settings to load the fleet.")
                 .appFont(.callout).foregroundStyle(.secondary)
             Button("Open Settings…") { openSettings() }.keyboardShortcut(",", modifiers: .command)
+            if LocalReportStore.isAvailable() {
+                Button("Open This Mac's Report") { appState.openThisMac() }
+                    .help("Read the runner cache on this Mac without an API connection")
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

@@ -80,6 +80,9 @@ enum DeviceTab: String, CaseIterable, Identifiable, Hashable {
 @Observable
 final class DeviceDetailModel {
     let serial: String
+    /// True for this Mac's own report, read from the runner cache instead of the API.
+    let isLocal: Bool
+    var localRunCount = 0
     var device: DeviceDetail?
     var loading = true
     var error: String?
@@ -90,11 +93,34 @@ final class DeviceDetailModel {
     var eventsLoaded = false
     var eventsLoading = false
 
-    init(serial: String) {
+    init(serial: String, isLocal: Bool = false) {
         self.serial = serial
+        self.isLocal = isLocal
+    }
+
+    /// Assemble the device from the runner cache on this Mac.
+    func loadLocal() async {
+        loading = device == nil
+        error = nil
+        let result = await Task.detached(priority: .userInitiated) { () -> Result<LocalReport?, Error> in
+            do { return .success(try LocalReportStore.load()) } catch { return .failure(error) }
+        }.value
+        switch result {
+        case .success(let report?):
+            device = report.device
+            events = report.events
+            localRunCount = report.runCount
+            eventsLoaded = true
+        case .success(nil):
+            notFound = true
+        case .failure(let err):
+            error = err.localizedDescription
+        }
+        loading = false
     }
 
     func load(api: ReportMateAPI, appState: AppState) async {
+        if isLocal { await loadLocal(); return }
         loading = device == nil
         error = nil
         notFound = false
@@ -151,6 +177,7 @@ final class DeviceDetailModel {
     }
 
     func loadEvents(api: ReportMateAPI) async {
+        if isLocal { eventsLoaded = true; return }
         guard let serial = device?.serialNumber, !eventsLoading else { return }
         eventsLoading = true
         events = (try? await api.deviceEvents(serial, limit: 200)) ?? []
@@ -164,6 +191,7 @@ struct DeviceDetailView: View {
     let serial: String
     var initialTab: DeviceTab?
     var initialFilter: String?
+    var isLocal = false
 
     @State private var model: DeviceDetailModel
     @State private var tab: DeviceTab
@@ -171,11 +199,12 @@ struct DeviceDetailView: View {
     @State private var showDeleteConfirm = false
     @State private var adminError: String?
 
-    init(serial: String, initialTab: DeviceTab? = nil, initialFilter: String? = nil) {
+    init(serial: String, initialTab: DeviceTab? = nil, initialFilter: String? = nil, isLocal: Bool = false) {
         self.serial = serial
         self.initialTab = initialTab
         self.initialFilter = initialFilter
-        _model = State(initialValue: DeviceDetailModel(serial: serial))
+        self.isLocal = isLocal
+        _model = State(initialValue: DeviceDetailModel(serial: serial, isLocal: isLocal))
         _tab = State(initialValue: initialTab ?? .info)
         _installsFilter = State(initialValue: initialFilter)
     }
@@ -185,7 +214,9 @@ struct DeviceDetailView: View {
             if model.loading, model.device == nil {
                 LoadingView(message: "Loading device…")
             } else if model.notFound {
-                EmptyStateView(title: "Device not found", message: "No device matches “\(serial)”. It may have been deleted or never registered.", systemImage: "questionmark.circle")
+                EmptyStateView(title: isLocal ? "No local report" : "Device not found",
+                               message: isLocal ? "The runner has not written a report to \(LocalReportStore.defaultCache.path) yet." : "No device matches “\(serial)”. It may have been deleted or never registered.",
+                               systemImage: "questionmark.circle")
             } else if let error = model.error, model.device == nil {
                 ErrorBanner(message: error) { Task { await model.load(api: appState.api, appState: appState) } }.padding()
                 Spacer()
@@ -339,6 +370,9 @@ struct DeviceHeaderView: View {
                     if let v = device.clientVersion {
                         Text("Client \(v)").appFont(.caption).foregroundStyle(.tertiary)
                     }
+                    if model.isLocal {
+                        Pill("This Mac", tone: .blue).help("Read from the runner cache in \(LocalReportStore.defaultCache.path) (\(model.localRunCount) runs)")
+                    }
                 }
             }
             Spacer()
@@ -348,6 +382,7 @@ struct DeviceHeaderView: View {
                     Text("Loading \(model.loadingModules.count) modules…").appFont(.caption).foregroundStyle(.secondary)
                 }
             }
+            if !model.isLocal {
             Menu {
                 Button(device.archived ? "Unarchive Device" : "Archive Device", action: onArchiveToggle)
                 Divider()
@@ -358,6 +393,7 @@ struct DeviceHeaderView: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Admin actions")
+            }
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
         .overlay(alignment: .bottom) { Divider() }

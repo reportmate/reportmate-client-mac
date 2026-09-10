@@ -104,6 +104,15 @@ Shared behaviour: every report has the platform toggle, the Selections
 accordion (status, usage, catalog, fleet, area, location), search, widget-driven
 filters, sortable columns and a CSV export through the save panel.
 
+## This Mac
+
+The device page can also show this Mac's own report without an API
+connection. **This Mac** on the Devices page (and on the not-connected screen)
+reads the runner cache at `/Library/Managed Reports/cache/<run>/event.json`,
+takes the newest copy of each module across runs, gathers the run events, and
+renders the same tabs. `ReportMateKit/Local/LocalReportStore.swift` does the
+assembly; admin actions are hidden for the local report.
+
 ## Layout of the code
 
 ```

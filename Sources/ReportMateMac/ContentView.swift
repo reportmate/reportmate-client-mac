@@ -21,6 +21,8 @@ struct ContentView: View {
                             ApplicationUsageDetailView(appName: appName, initialDays: days, usages: usages, catalogs: catalogs, locations: locations)
                         case .applicationCoverage:
                             ApplicationCoverageView()
+                        case .localDevice:
+                            DeviceDetailView(serial: "this-mac", isLocal: true)
                         }
                     }
             }

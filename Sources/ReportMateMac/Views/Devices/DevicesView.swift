@@ -71,6 +71,10 @@ struct DevicesView: View {
                     .appFont(.caption).foregroundStyle(.secondary)
             }
             Spacer()
+            if LocalReportStore.isAvailable() {
+                Button { appState.openThisMac() } label: { Label("This Mac", systemImage: "desktopcomputer") }
+                    .help("This Mac's own report, read from the runner cache")
+            }
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search devices…", text: $search).textFieldStyle(.plain)

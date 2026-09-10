@@ -350,3 +350,28 @@ import Foundation
         #expect(InstallsReport.aggregateMessages([device], errors: true).first?.message == "boom")
     }
 }
+
+@Suite struct LocalReportStoreTests {
+    @Test func mergesNewestModulesAcrossRuns() throws {
+        let cache = FileManager.default.temporaryDirectory.appendingPathComponent("rm-cache-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: cache) }
+        func write(_ run: String, _ json: String) throws {
+            let dir = cache.appendingPathComponent(run)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try Data(json.utf8).write(to: dir.appendingPathComponent("event.json"))
+        }
+        try write("2026-09-01-010000", #"{"metadata":{"serialNumber":"SAMPLE1","deviceId":"D1","platform":"macOS","clientVersion":"1.0","collectedAt":"2026-09-01T01:00:00Z"},"hardware":{"model":"Old"},"system":{"operatingSystem":{"name":"macOS","version":"15.0"}},"events":[{"eventType":"success","message":"first run","timestamp":"2026-09-01T01:00:00Z"}]}"#)
+        try write("2026-09-02-020000", #"{"metadata":{"serialNumber":"SAMPLE1","deviceId":"D1","platform":"macOS","clientVersion":"1.1","collectedAt":"2026-09-02T02:00:00Z"},"hardware":{"model":"New"},"events":[{"eventType":"warning","message":"second run","timestamp":"2026-09-02T02:00:00Z","details":{"x":1}}]}"#)
+        #expect(LocalReportStore.isAvailable(at: cache))
+        let report = try #require(try LocalReportStore.load(from: cache))
+        #expect(report.runCount == 2)
+        #expect(report.device.serialNumber == "SAMPLE1")
+        #expect(report.device[.hardware]["model"].string == "New")
+        #expect(report.device[.system]["operatingSystem"]["version"].string == "15.0")
+        #expect(report.device.clientVersion == "1.1")
+        #expect(report.events.count == 2)
+        #expect(report.events.first?.kind == .warning)
+        #expect(report.events.first?.payload?["x"].int == 1)
+        #expect(!LocalReportStore.isAvailable(at: cache.appendingPathComponent("missing")))
+    }
+}
