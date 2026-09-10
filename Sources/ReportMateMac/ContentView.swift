@@ -1,17 +1,16 @@
 import SwiftUI
 import ReportMateKit
 
+/// The window: the web app's header navigation over the current section,
+/// with device pages and drill-downs pushed on a navigation stack.
 struct ContentView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.openSettings) private var openSettings
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
         @Bindable var state = appState
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView()
-                .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 280)
-        } detail: {
+        VStack(spacing: 0) {
+            TopNavBar()
             NavigationStack(path: $state.path) {
                 sectionView
                     .navigationDestination(for: Route.self) { route in
@@ -87,43 +86,6 @@ struct ContentView: View {
             case .network: NetworkReportView()
             }
         }
-    }
-}
-
-struct SidebarView: View {
-    @Environment(AppState.self) private var appState
-
-    var body: some View {
-        @Bindable var state = appState
-        List(selection: Binding(get: { Optional(appState.section) }, set: { if let s = $0 { appState.section = s } })) {
-            Section("Fleet") {
-                ForEach(AppSection.fleet) { section in
-                    Label(section.title, systemImage: section.systemImage).tag(section)
-                }
-            }
-            Section("Reports") {
-                ForEach(AppSection.reports) { section in
-                    Label(section.title, systemImage: section.systemImage).tag(section)
-                }
-            }
-        }
-        .listStyle(.sidebar)
-        .safeAreaInset(edge: .bottom) {
-            VStack(alignment: .leading, spacing: 4) {
-                Divider()
-                HStack(spacing: 6) {
-                    Circle().fill(appState.isConfigured ? (appState.authProblem == nil ? Color.green : Color.red) : Color.gray).frame(width: 7, height: 7)
-                    Text(appState.isConfigured ? hostLabel : "Not connected")
-                        .appFont(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-            }
-        }
-    }
-
-    private var hostLabel: String {
-        URL(string: appState.configuration.normalizedBaseURL)?.host ?? appState.configuration.normalizedBaseURL
     }
 }
 
