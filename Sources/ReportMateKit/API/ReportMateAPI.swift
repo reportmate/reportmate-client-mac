@@ -303,6 +303,23 @@ public final class ReportMateAPI: Sendable {
         CollectionHealth(json: try await getJSON("/applications/collection-health", query: ["freshDays": String(freshDays), "staleDays": String(staleDays)]))
     }
 
+    // MARK: - Installs
+
+    /// Item names, inventory dimensions and the slimmed device list for the Installs report.
+    public func installsFilters(includeArchived: Bool = false) async throws -> InstallsFilterOptions {
+        let json = try await getJSON("/installs/filters", query: ["includeArchived": includeArchived ? "true" : nil])
+        guard json.object != nil else { throw APIError.decoding("Invalid response format from filters API") }
+        return InstallsFilterOptions(json: json)
+    }
+
+    /// Every (device, package) row for the fleet; filtering happens client-side.
+    public func installRecords(includeArchived: Bool = false) async throws -> [InstallRecord] {
+        let json = try await getJSON("/installs", query: ["includeArchived": includeArchived ? "true" : nil])
+        let rows = json.array ?? json["devices"].array ?? json["data"].array
+        guard let rows else { throw APIError.decoding(json["error"].string ?? json["message"].string ?? "Received invalid data format from API") }
+        return rows.map(InstallRecord.init(json:))
+    }
+
     // MARK: - Settings
 
     public func settings() async throws -> SettingsResponse {
