@@ -331,33 +331,29 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 windowsProcessor["logical_cores"] = logical
             }
             
-            // Parse performance/efficiency cores from system_profiler (format: "proc 14:10:4")
-            // This is only available on Apple Silicon
+            // Performance/efficiency cores on Apple silicon. system_profiler's
+            // number_processors reads "proc 14:10:4" (total:performance:efficiency)
+            // and, from macOS 26, "proc 14:0:10:4" with an extra tier in the
+            // middle; the last two numbers are always performance then efficiency.
+            // sysctl hw.perflevel0/1 (from the bash script) is authoritative when present.
             var parsedCores = false
             if let numberProcs = procDict["number_processors"] as? String, !numberProcs.isEmpty {
-                // Format: "proc total:performance:efficiency"
-                let pattern = "proc (\\d+):(\\d+):(\\d+)"
-                if let regex = try? NSRegularExpression(pattern: pattern),
-                   let match = regex.firstMatch(in: numberProcs, range: NSRange(numberProcs.startIndex..., in: numberProcs)) {
-                    if let totalRange = Range(match.range(at: 1), in: numberProcs),
-                       let perfRange = Range(match.range(at: 2), in: numberProcs),
-                       let effRange = Range(match.range(at: 3), in: numberProcs) {
-                        windowsProcessor["cores"] = Int(numberProcs[totalRange])
-                        windowsProcessor["performance_cores"] = Int(numberProcs[perfRange])
-                        windowsProcessor["efficiency_cores"] = Int(numberProcs[effRange])
-                        parsedCores = true
-                    }
+                let numbers = numberProcs.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }
+                if numbers.count >= 3 {
+                    windowsProcessor["cores"] = numbers[0]
+                    windowsProcessor["performance_cores"] = numbers[numbers.count - 2]
+                    windowsProcessor["efficiency_cores"] = numbers[numbers.count - 1]
+                    parsedCores = true
                 }
             }
-            
-            // Fallback: try hw.perflevel values from bash script if system_profiler didn't work
-            if !parsedCores {
-                if let perfStr = procDict["performance_cores"] as? String, !perfStr.isEmpty, let perf = Int(perfStr) {
-                    windowsProcessor["performance_cores"] = perf
-                }
-                if let effStr = procDict["efficiency_cores"] as? String, !effStr.isEmpty, let eff = Int(effStr) {
-                    windowsProcessor["efficiency_cores"] = eff
-                }
+            let sysctlPerf = (procDict["performance_cores"] as? String).flatMap(Int.init) ?? procDict["performance_cores"] as? Int
+            let sysctlEff = (procDict["efficiency_cores"] as? String).flatMap(Int.init) ?? procDict["efficiency_cores"] as? Int
+            if let perf = sysctlPerf, let eff = sysctlEff, perf > 0 {
+                windowsProcessor["performance_cores"] = perf
+                windowsProcessor["efficiency_cores"] = eff
+            } else if !parsedCores {
+                if let perf = sysctlPerf { windowsProcessor["performance_cores"] = perf }
+                if let eff = sysctlEff { windowsProcessor["efficiency_cores"] = eff }
             }
             
             // Clean up architecture: "arm64e" -> "ARM64"
@@ -1571,7 +1567,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         // Enhance with system_profiler data for number_processors (proc total:perf:eff format)
         // This gives us the performance/efficiency core breakdown on Apple Silicon
         let spHardwareScript = """
-            system_profiler SPHardwareDataType -json 2>/dev/null | python3 -c "import sys, json; data = json.load(sys.stdin).get('SPHardwareDataType', [{}])[0]; print(json.dumps({'number_processors': data.get('number_processors', ''), 'chip_type': data.get('chip_type', '')}))"
+            system_profiler SPHardwareDataType -json 2>/dev/null | jq -c '.SPHardwareDataType[0] | {number_processors: (.number_processors // ""), chip_type: (.chip_type // "")}'
         """
         
         if let spJson = try? await BashService.execute(spHardwareScript),
