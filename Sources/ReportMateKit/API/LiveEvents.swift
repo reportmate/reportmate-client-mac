@@ -52,18 +52,21 @@ public enum LiveEventStream {
         public var reason: String?
     }
 
-    public static func frames(url: URL, session: URLSession = .shared) -> AsyncThrowingStream<Frame, Error> {
+    /// Reports the handshake so the caller can show Live before any event arrives.
+    final class OpenDelegate: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
+        var onOpen: (@Sendable () -> Void)?
+        func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) { onOpen?() }
+    }
+
+    public static func frames(url: URL) -> AsyncThrowingStream<Frame, Error> {
         AsyncThrowingStream { continuation in
+            let delegate = OpenDelegate()
+            delegate.onOpen = { continuation.yield(.open) }
+            let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
             let task = session.webSocketTask(with: url, protocols: [subprotocol])
             task.resume()
             let reader = Task {
                 do {
-                    try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                        task.sendPing { error in
-                            if let error { c.resume(throwing: error) } else { c.resume() }
-                        }
-                    }
-                    continuation.yield(.open)
                     while !Task.isCancelled {
                         let message = try await task.receive()
                         let text: String?
@@ -86,6 +89,7 @@ public enum LiveEventStream {
             continuation.onTermination = { _ in
                 reader.cancel()
                 task.cancel(with: .normalClosure, reason: nil)
+                session.finishTasksAndInvalidate()
             }
         }
     }
