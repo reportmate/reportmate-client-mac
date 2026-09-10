@@ -71,6 +71,13 @@ credentials:
 Credentials are kept in the Keychain. The endpoint's own ingest key is not a
 read credential and will be refused with 403.
 
+On a Mac whose ReportMate runner already reports, the app inherits the API URL
+and credential from the runner's `com.github.reportmate` preference domain (a
+managed configuration profile or `/Library/Preferences/com.github.reportmate.plist`,
+keys `ApiUrl`, `ApiKey`, `Passphrase`) whenever it has none of its own. The
+Settings sheet says so, and Save keeps a copy in the app's Keychain. Environment
+variables and the Keychain always win over the inherited values.
+
 ## Navigation
 
 The header mirrors the web app: **Dashboard | Devices | Events** and then the
@@ -90,9 +97,9 @@ where the native counterpart lives.
 
 | Web page | Native view | Status |
 |---|---|---|
-| `/dashboard` (fleet status donut, error and warning counters, new clients, recent events with type filter, platform distribution with drill-downs and filters, macOS and Windows version donuts with drill-down) | `Views/Dashboard/DashboardView.swift`, `RecentEventsWidget.swift` | Complete; polls every 30 s like the web page. Version donuts link to the System report's OS version filter. |
+| `/dashboard` (fleet status donut, error and warning counters, new clients, recent events with type filter, platform distribution with drill-downs and filters, macOS and Windows version donuts with drill-down) | `Views/Dashboard/DashboardView.swift`, `RecentEventsWidget.swift` | Complete. Opens the Web PubSub event stream through `/negotiate` and shows Live, Reconnecting or Polling like the web page; polls every 30 s underneath either way. When the API declines the negotiate call for the app's credential the feed stays on polling. Version donuts link to the System report's OS version filter. |
 | `/devices` (search, Selections accordion, sortable table, status and inventory pills, `?status=` from the dashboard) | `Views/Devices/DevicesView.swift` | Complete. Adds a Registered column. |
-| `/device/[serial]` header and tabs: Info, Installs, Applications, Hardware, Network, Security, Management (with logs), Identity, Peripherals, System, Events | `Views/Device/DeviceDetailView.swift`, `Views/Device/Tabs/*` | Complete for all tabs, including the management log viewer, the security certificate and CVE tables, launchd and scheduled task tables, and the identity session analytics. |
+| `/device/[serial]` header and tabs: Info, Installs, Applications, Hardware, Network, Security, Management (with logs), Identity, Peripherals, System, Events | `Views/Device/DeviceDetailView.swift`, `Views/Device/Tabs/*` | Complete for all tabs, including the management log viewer (MDM root first, structured line parsers for the convention, CMTrace, Intune daemon, Munki, syslog and ISO-stamped logs, level toggles with counts, tag pills, JSON tails as a tree, tool version with a fallback to the installs module), the security certificate and CVE tables, launchd and scheduled task tables, and the identity session analytics. |
 | `/events` (date range, kind chips with System and Info shown alone, search, infinite scroll, live refresh, expanded rows with run summary, details, raw payload copy and search) | `Views/Events/EventsView.swift`, `EventRows.swift` | Complete. |
 | `/events/failures` (rejected check-ins by reason and row) | `IngestFailuresView` in `EventsView.swift` | Complete, as the second mode of the Events section. |
 | `/installs` (config report, items-with-status tables, error and warning message widgets, repo, tool version and manifest widgets, status pills, status drill-down by device or by message, item report builder, CSV) | `Views/Reports/InstallsReportView.swift`, `InstallsReportModel.swift`, `InstallsReportWidgets.swift` | Complete. The item report keeps Munki rows as well as Cimian rows; the web route drops Munki rows. |
