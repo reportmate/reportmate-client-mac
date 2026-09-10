@@ -267,6 +267,7 @@ public struct InstallsInfo: Sendable, Hashable {
             }
         }
 
+        let hasSessions = !cimian["sessions"].elements.isEmpty || !munki["sessions"].elements.isEmpty
         var packages: [InstallPackage] = []
         for item in items {
             var finalStatus: InstallStatus
@@ -281,6 +282,17 @@ public struct InstallsInfo: Sendable, Hashable {
                 }
             } else {
                 finalStatus = InstallStatus.standardize(item.status)
+            }
+
+            // The ingest ladder overrides the tool's verdict where it finds a problem:
+            // the API's stored state, Not Installed (managed, expected, absent) as a
+            // warning, an install loop, and a message the current run reported.
+            if item.raw.object != nil {
+                switch InstallItems.category(of: item.raw, hasSessions: hasSessions) {
+                case .error: finalStatus = .error
+                case .warning: finalStatus = .warning
+                default: break
+                }
             }
 
             // Date processed: only for items acted on in the latest run.

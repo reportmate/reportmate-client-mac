@@ -79,7 +79,7 @@ struct ConnectionSettingsView: View {
                 LabeledContent("Stored credential", value: appState.configuration.credentialSummary)
                 if appState.configuration.inheritedFromRunner {
                     LabeledContent("Source") {
-                        Text("Inherited from the ReportMate runner's configuration on this Mac (com.github.reportmate). Save to keep a copy in the app's Keychain.")
+                        Text(appState.configuration.isConfigured ? "Inherited from the ReportMate runner's configuration on this Mac (com.github.reportmate). Save to keep a copy in the app's Keychain." : "The API URL comes from the ReportMate runner's configuration on this Mac. The runner's own key is an ingest credential the API refuses for reads, so enter a read credential and save.")
                             .appFont(.caption).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
                     }
                 }

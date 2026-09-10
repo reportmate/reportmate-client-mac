@@ -29,6 +29,9 @@ struct InstallsReportView: View {
         var q: [String: String] = [:]
         switch model.itemsStatusFilter { case .error: q["filter"] = "errors"; case .warning: q["filter"] = "warnings"; case .pending: q["filter"] = "pending"; case .success: q["filter"] = "success"; case nil: break }
         if model.statusView == .messages, model.itemsStatusFilter != nil { q["view"] = "messages" }
+        if !model.selectedInstalls.isEmpty { q["items"] = model.selectedInstalls.joined(separator: ",") }
+        if !model.selections.catalogs.isEmpty { q["catalogs"] = model.selections.catalogs.sorted().joined(separator: ",") }
+        if !model.selections.usages.isEmpty { q["usages"] = model.selections.usages.sorted().joined(separator: ",") }
         if !model.searchQuery.isEmpty { q["q"] = model.searchQuery }
         return q
     }
@@ -71,6 +74,16 @@ struct InstallsReportView: View {
             model.searchQuery = link.query["q"] ?? ""
             model.selectStatus(Self.category(link.query["filter"]))
             model.statusView = link.query["view"] == "messages" ? .messages : .devices
+            // items, catalogs and usages take comma-separated lists; fleets stays
+            // unbound because the installs rows never carry one.
+            func list(_ key: String) -> [String] { (link.query[key] ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }
+            let items = list("items"), catalogs = list("catalogs"), usages = list("usages")
+            if !items.isEmpty || !catalogs.isEmpty || !usages.isEmpty {
+                model.selectedInstalls = items
+                model.selections.catalogs = Set(catalogs)
+                model.selections.usages = Set(usages)
+                Task { await model.generateReport(api: appState.api) }
+            }
             if model.itemsStatusFilter != nil { model.selectionsExpanded = false }
         }
         .onChange(of: linkQuery, initial: true) { _, q in appState.linkQuery = q }

@@ -72,11 +72,14 @@ Credentials are kept in the Keychain. The endpoint's own ingest key is not a
 read credential and will be refused with 403.
 
 On a Mac whose ReportMate runner already reports, the app inherits the API URL
-and credential from the runner's `com.github.reportmate` preference domain (a
-managed configuration profile or `/Library/Preferences/com.github.reportmate.plist`,
-keys `ApiUrl`, `ApiKey`, `Passphrase`) whenever it has none of its own. The
-Settings sheet says so, and Save keeps a copy in the app's Keychain. Environment
-variables and the Keychain always win over the inherited values.
+from the runner's `com.github.reportmate` preference domain (a managed
+configuration profile or `/Library/Preferences/com.github.reportmate.plist`, key
+`ApiUrl`) whenever it has none of its own, and the shared `Passphrase` when the
+runner uses one. The runner's `ApiKey` is never inherited: it is an ingest key
+and the API refuses it for reads, so a key-only runner leaves the app with the
+URL filled in and Settings asking for a read credential. The Settings sheet says
+where the values came from, Save keeps a copy in the app's Keychain, and
+environment variables and the Keychain always win over the inherited values.
 
 ## Navigation
 
@@ -97,7 +100,7 @@ where the native counterpart lives.
 
 | Web page | Native view | Status |
 |---|---|---|
-| `/dashboard` (fleet status donut, error and warning counters, new clients, recent events with type filter, platform distribution with drill-downs and filters, macOS and Windows version donuts with drill-down) | `Views/Dashboard/DashboardView.swift`, `RecentEventsWidget.swift` | Complete. Opens the Web PubSub event stream through `/negotiate` and shows Live, Reconnecting or Polling like the web page; polls every 30 s underneath either way. When the API declines the negotiate call for the app's credential the feed stays on polling. Version donuts link to the System report's OS version filter. |
+| `/dashboard` (fleet status donut, error and warning counters, new clients, recent events with type filter, platform distribution with drill-downs and filters, macOS and Windows version donuts with drill-down) | `Views/Dashboard/DashboardView.swift`, `RecentEventsWidget.swift` | Complete. Opens the Web PubSub event stream through `/negotiate` and shows Live, Reconnecting or Polling like the web page; polls every 30 s underneath either way. If the negotiate call fails or the hub is not configured the feed stays on polling. Version donuts link to the System report's OS version filter. |
 | `/devices` (search, Selections accordion, sortable table, status and inventory pills, `?status=` from the dashboard) | `Views/Devices/DevicesView.swift` | Complete. Adds a Registered column. |
 | `/device/[serial]` header and tabs: Info, Installs, Applications, Hardware, Network, Security, Management (with logs), Identity, Peripherals, System, Events | `Views/Device/DeviceDetailView.swift`, `Views/Device/Tabs/*` | Complete for all tabs, including the management log viewer (MDM root first, structured line parsers for the convention, CMTrace, Intune daemon, Munki, syslog and ISO-stamped logs, level toggles with counts, tag pills, JSON tails as a tree, tool version with a fallback to the installs module), the security certificate and CVE tables, launchd and scheduled task tables, and the identity session analytics. |
 | `/events` (date range, kind chips with System and Info shown alone, search, infinite scroll, live refresh, expanded rows with run summary, details, raw payload copy and search) | `Views/Events/EventsView.swift`, `EventRows.swift` | Complete. |

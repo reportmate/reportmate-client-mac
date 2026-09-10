@@ -213,6 +213,22 @@ import Foundation
         #expect(info.config?.manifest == "site_default")
     }
 
+    @Test func devicePageUsesTheIngestLadder() {
+        let modules: JSONValue = ["installs": ["munki": ["endTime": "2026-09-09T08:00:00Z", "items": [
+            ["name": "Slack", "displayName": "Slack", "status": "Not Installed", "version": "4.40"],
+            ["name": "Zoom", "displayName": "Zoom", "status": "installed", "version": "6.1", "installedVersion": "6.1", "hasInstallLoop": true],
+            ["name": "Chrome", "displayName": "Chrome", "status": "installed", "version": "130", "installedVersion": "130", "reportmateStatus": "error"],
+            ["name": "Firefox", "displayName": "Firefox", "currentStatus": "Installed", "version": "130", "installedVersion": "130", "lastAttemptStatus": "failed"],
+        ]]]]
+        let info = InstallsInfo(modules: modules)
+        func status(_ name: String) -> InstallStatus? { info.packages.first { $0.name == name }?.status }
+        #expect(status("Slack") == .warning)
+        #expect(status("Zoom") == .warning)
+        #expect(status("Chrome") == .error)
+        // A bare attempt status never contradicts a verdict of Installed.
+        #expect(status("Firefox") == .installed)
+    }
+
     @Test func itemPredicates() {
         #expect(InstallItems.isError(["currentStatus": "Failed"]))
         #expect(InstallItems.isWarning(["status": "Installed", "lastAttemptStatus": "warning"]))

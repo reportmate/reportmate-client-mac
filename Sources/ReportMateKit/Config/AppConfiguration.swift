@@ -96,9 +96,9 @@ public struct AppConfiguration: Sendable, Equatable {
         if config.baseURL.isEmpty, let runner = AppConfiguration.fromRunner() {
             config.baseURL = runner.baseURL
             config.inheritedFromRunner = true
-            if config.apiKey.isEmpty, config.passphrase.isEmpty, config.oidcAudience.isEmpty {
-                config.apiKey = runner.apiKey
+            if config.apiKey.isEmpty, config.passphrase.isEmpty, config.oidcAudience.isEmpty, !runner.passphrase.isEmpty {
                 config.passphrase = runner.passphrase
+                config.authMethod = .passphrase
             }
         }
         if let m = keychain.get(.authMethod), let method = AuthMethod(rawValue: m) {
@@ -125,6 +125,7 @@ public struct AppConfiguration: Sendable, Equatable {
     /// The runner's own configuration on this Mac: the `com.github.reportmate`
     /// preference domain, which covers a managed configuration profile and
     /// `/Library/Preferences/com.github.reportmate.plist`. Nil when no API URL is set.
+    /// Carries the URL and, when the runner uses one, the shared passphrase.
     public static func fromRunner(domain: String = "com.github.reportmate") -> AppConfiguration? {
         func read(_ key: String) -> String? {
             guard let v = CFPreferencesCopyAppValue(key as CFString, domain as CFString) as? String else { return nil }
@@ -133,8 +134,10 @@ public struct AppConfiguration: Sendable, Equatable {
         }
         guard let url = read("ApiUrl") else { return nil }
         var config = AppConfiguration(baseURL: url)
-        if let key = read("ApiKey") { config.apiKey = key; config.authMethod = .apiKey }
-        else if let pass = read("Passphrase") { config.passphrase = pass; config.authMethod = .passphrase }
+        // The runner's ApiKey is a per-client ingest key that the API refuses for
+        // reads with 403, so only the legacy passphrase (full access) is inherited;
+        // with a key-only runner the URL comes across and Settings asks for a read credential.
+        if let pass = read("Passphrase") { config.passphrase = pass; config.authMethod = .passphrase }
         return config
     }
 
