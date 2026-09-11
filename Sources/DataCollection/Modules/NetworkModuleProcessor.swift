@@ -82,15 +82,20 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             dictionary["dnsConfiguration"] = dnsConfig
         }
         
-        // Merge saved WiFi into wifiInfo
+        // Merge saved WiFi into wifiInfo. powerStatus is always read live rather than
+        // carried through from the collection path: the osquery branch of
+        // collectNetworkInfo() never populates wifiInfo, so this used to fall to an else
+        // that hardcoded `true` and every Mac reported its radio as on -- including labs
+        // whose radios were off and had no address on the Wi-Fi interface at all.
+        let radioPowered = await getWiFiPowerState()
         if var wifiInfo = dictionary["wifiInfo"] as? [String: Any] {
             wifiInfo["knownNetworks"] = savedWifi
+            if let radioPowered { wifiInfo["powerStatus"] = radioPowered }
             dictionary["wifiInfo"] = wifiInfo
         } else {
-            dictionary["wifiInfo"] = [
-                "knownNetworks": savedWifi,
-                "powerStatus": true
-            ]
+            var wifiInfo: [String: Any] = ["knownNetworks": savedWifi]
+            if let radioPowered { wifiInfo["powerStatus"] = radioPowered }
+            dictionary["wifiInfo"] = wifiInfo
         }
         
         return BaseModuleData(moduleId: moduleId, data: dictionary)
@@ -1080,6 +1085,56 @@ END {
         return parsed
     }
     
+    /// Read whether the Wi-Fi radio is powered on.
+    ///
+    /// CoreWLAN answers this without Location Services, but it can come back with no
+    /// interface under the root daemon, so fall back to `networksetup`. Returns nil when
+    /// neither source can answer, so the caller omits the field rather than guessing --
+    /// a wrong `true` here is worse than an absent value, because it makes a Mac whose
+    /// radio is off look healthy.
+    private func getWiFiPowerState() async -> Bool? {
+        if let interface = CWWiFiClient.shared().interface() {
+            return interface.powerOn()
+        }
+
+        guard let wifiDevice = await getWiFiDeviceName(),
+              let output = try? await ProcessRunner.run(
+                  executable: "/usr/sbin/networksetup",
+                  arguments: ["-getairportpower", wifiDevice],
+                  timeout: 10,
+                  label: "networksetup -getairportpower"
+              ),
+              output.exitCode == 0
+        else { return nil }
+
+        if output.standardOutput.contains(": On") { return true }
+        if output.standardOutput.contains(": Off") { return false }
+        return nil
+    }
+
+    /// BSD name of the Wi-Fi interface (en0/en1/...), for the networksetup fallback.
+    ///
+    /// Deliberately does not go through CoreWLAN: the only caller is the path taken when
+    /// CoreWLAN already returned no interface, so asking it again would return nothing.
+    private func getWiFiDeviceName() async -> String? {
+        guard let result = try? await ProcessRunner.run(
+            executable: "/usr/sbin/networksetup",
+            arguments: ["-listallhardwareports"],
+            timeout: 10,
+            label: "networksetup -listallhardwareports"
+        ), result.exitCode == 0 else { return nil }
+
+        let lines = result.standardOutput.components(separatedBy: .newlines)
+        for (index, line) in lines.enumerated() where line.hasPrefix("Hardware Port: Wi-Fi") {
+            guard index + 1 < lines.count else { break }
+            let deviceLine = lines[index + 1]
+            guard deviceLine.hasPrefix("Device: ") else { continue }
+            return String(deviceLine.dropFirst("Device: ".count))
+                .trimmingCharacters(in: .whitespaces)
+        }
+        return nil
+    }
+
     /// Get SSID using CoreWLAN framework (doesn't require location services permission)
     private func getCoreWLANSSID() -> String? {
         ConsoleFormatter.writeDebug("Attempting to get SSID via CoreWLAN...")
