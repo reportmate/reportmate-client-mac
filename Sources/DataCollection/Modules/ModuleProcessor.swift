@@ -72,6 +72,7 @@ open class BaseModuleProcessor: ModuleProcessor, @unchecked Sendable {
         
         // Try bash fallback (if osquery failed, not available, or returned empty)
         if let bashCmd = bash {
+            await OSQueryHealth.shared.recordDegraded(module: moduleId)
             do {
                 ConsoleFormatter.writeDebug("Trying bash fallback for module \(moduleId)...")
                 let output = try await BashService.execute(bashCmd)
@@ -102,6 +103,11 @@ open class BaseModuleProcessor: ModuleProcessor, @unchecked Sendable {
             return ["items": []]
         }
         
+        // Nothing worked: neither osquery nor bash produced data. Returning [:]
+        // keeps the run alive, but on its own it is indistinguishable from a
+        // device that genuinely has nothing to report, which is how a broken
+        // osquery went unnoticed. Record it so the run reports the gap.
+        await OSQueryHealth.shared.recordStarved(module: moduleId)
         ConsoleFormatter.writeWarning("All data sources exhausted for module \(moduleId), returning empty data")
         return [:]
     }
