@@ -187,12 +187,16 @@ public class DataCollectionService {
         // Create ISO8601 date formatter for consistent timestamp formatting
         let isoFormatter = ISO8601DateFormatter()
         isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        // One instant for the whole payload, so every module stamped by this run
+        // carries the same value and a reader can group by it.
+        let collectedAt = isoFormatter.string(from: Date())
         
         // Build metadata section (matches Windows EventMetadata)
         let metadata: [String: Any] = [
             "deviceId": deviceInfo.deviceId,
             "serialNumber": deviceInfo.serialNumber,
-            "collectedAt": isoFormatter.string(from: Date()),
+            "collectedAt": collectedAt,
             "clientVersion": AppVersion.current,
             "platform": "macOS",
             "collectionType": "Full",
@@ -215,9 +219,8 @@ public class DataCollectionService {
             "modules": {
                 var modulesDict: [String: Any] = [:]
                 for (key, data) in moduleResults {
-                    var dict = convertModuleDataToDict(data)
-                    dict["moduleVersion"] = ModuleVersions.version(for: key)
-                    modulesDict[key] = dict
+                    modulesDict[key] = stampModuleEnvelope(
+                        convertModuleDataToDict(data), moduleId: key, collectedAt: collectedAt)
                 }
                 return modulesDict
             }()
@@ -225,10 +228,8 @@ public class DataCollectionService {
         
         // Assign module data to top-level fields (mirrors Windows AssignModuleDataToPayload)
         for (moduleId, moduleData) in moduleResults {
-            var moduleDict = convertModuleDataToDict(moduleData)
-            
-            // Stamp per-module version from build-time git history
-            moduleDict["moduleVersion"] = ModuleVersions.version(for: moduleId)
+            let moduleDict = stampModuleEnvelope(
+                convertModuleDataToDict(moduleData), moduleId: moduleId, collectedAt: collectedAt)
             
             // Map module IDs to top-level payload keys (matching Windows structure)
             switch moduleId.lowercased() {
@@ -263,6 +264,32 @@ public class DataCollectionService {
         return payload
     }
     
+    /// Stamp the envelope fields every module carries onto its serialized dict.
+    ///
+    /// collectedAt was previously set by hand inside individual processors, and
+    /// only two of eleven ever did it -- so eight of ten modules reached the API
+    /// with no collection time at all, while the Windows client emitted one for
+    /// every module. Without it there is no way to tell a module that was
+    /// refreshed on this run from one whose stored row has not moved in months,
+    /// because a module's own content timestamps report what the underlying
+    /// source last wrote, not when we last looked. A Munki installs document
+    /// frozen since March looks identical either way.
+    ///
+    /// Stamping here rather than in each processor is what makes it hold: a new
+    /// module gets the field by existing, not by remembering. A processor that
+    /// sets its own collectedAt still wins, since that is the true collection
+    /// instant and this is the moment the payload was assembled.
+    private func stampModuleEnvelope(
+        _ dict: [String: Any], moduleId: String, collectedAt: String
+    ) -> [String: Any] {
+        var dict = dict
+        dict["moduleVersion"] = ModuleVersions.version(for: moduleId)
+        if dict["collectedAt"] == nil {
+            dict["collectedAt"] = collectedAt
+        }
+        return dict
+    }
+
     /// Convert ModuleData to dictionary for JSON serialization
     /// Extracts the actual data from the module, not the wrapper
     private func convertModuleDataToDict(_ moduleData: ModuleData) -> [String: Any] {
