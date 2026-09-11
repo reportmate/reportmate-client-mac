@@ -651,15 +651,26 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             # Check Bootstrap Token status via profiles command
             bt_output=$(profiles status -type bootstraptoken 2>&1 || echo "Unknown")
             
-            # Parse the output
-            if echo "$bt_output" | grep -qi "escrowed\\|YES"; then
-                escrowed=true
-                status="Escrowed"
-            elif echo "$bt_output" | grep -qi "not escrowed\\|NO"; then
-                status="Not Escrowed"
-            elif echo "$bt_output" | grep -qi "not supported"; then
+            # profiles reports each fact with its own phrase:
+            #   Bootstrap Token supported on server: YES
+            #   Bootstrap Token escrowed to server: NO
+            # Read the word that follows each phrase. The previous version matched
+            # YES anywhere in the output, so every supported Mac reported itself as
+            # escrowed, and it stayed wrong whether the output arrived on one line
+            # or two.
+            esc_value=$(echo "$bt_output" | sed -n 's/.*[Ee]scrowed to server:[[:space:]]*\\([A-Za-z][A-Za-z]*\\).*/\\1/p' | head -1)
+            sup_value=$(echo "$bt_output" | sed -n 's/.*[Ss]upported on server:[[:space:]]*\\([A-Za-z][A-Za-z]*\\).*/\\1/p' | head -1)
+            case "$esc_value" in [Yy][Ee][Ss]) escrowed=true ;; esac
+            case "$sup_value" in [Nn][Oo]) supported=false ;; esac
+            if echo "$bt_output" | grep -qi "not supported"; then
                 supported=false
+            fi
+            if [ "$supported" = false ]; then
                 status="Not Supported"
+            elif [ "$escrowed" = true ]; then
+                status="Escrowed"
+            elif [ -n "$esc_value" ]; then
+                status="Not Escrowed"
             elif echo "$bt_output" | grep -qi "requires MDM"; then
                 status="Requires MDM Enrollment"
             fi
