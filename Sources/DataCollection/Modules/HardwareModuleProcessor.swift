@@ -430,7 +430,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                         
                         // Serial number - use human-readable serial (spdisplays_display-serial-number)
                         // NOT the hex version (_spdisplays_display-serial-number) - snake_case
-                        if let serial = display["spdisplays_display-serial-number"] as? String, !serial.isEmpty {
+                        if let serial = EDIDDisplay.usableSerial(display["spdisplays_display-serial-number"] as? String) {
                             displayInfo["serial_number"] = serial
                         }
                         
@@ -479,6 +479,11 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                         }
                         if let productId = display["_spdisplays_display-product-id"] as? String, !productId.isEmpty {
                             displayInfo["product_id"] = productId
+                        }
+                        // Hex of the EDID header serial: not reported, only used to join this
+                        // row to the EDID on its transport
+                        if let headerSerial = display["_spdisplays_display-serial-number"] as? String, !headerSerial.isEmpty {
+                            displayInfo["edid_header_serial"] = headerSerial
                         }
                         if let mfgYear = display["_spdisplays_display-year"] as? String, !mfgYear.isEmpty {
                             displayInfo["manufacture_year"] = Int(mfgYear) ?? mfgYear
@@ -543,42 +548,45 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 }
             }
             
-            // Fallback: If no displays found at all, use model-based lookup
-            // This handles Apple Silicon iMacs and some machines where system_profiler doesn't enumerate displays
-            if displaysArray.isEmpty {
-                if var builtInDisplay = getBuiltInDisplayInfo(from: modelId) {
-                    builtInDisplay["is_main_display"] = true
-                    builtInDisplay["online"] = true
-                    builtInDisplay["data_source"] = "model_lookup"
-                    displaysArray = [builtInDisplay]
-                    print("[\(timestamp())] Using model-based display info for \(modelId)")
+            // system_profiler lists only what the window server has in a session: with no
+            // console user it returns an empty display list while the GPU is still reported.
+            // The EDID on each transport survives that, so join rows to it for serials, and
+            // report it directly when system_profiler lists no external display at all.
+            let registryDisplays = await collectRegistryDisplays()
+            for (index, serial) in RegistryDisplay.enrich(&displaysArray, from: registryDisplays).sorted(by: { $0.key < $1.key }) {
+                print("[\(timestamp())] EDID serial for '\(displaysArray[index]["name"] as? String ?? "")': \(serial)")
+            }
+
+            if !displaysArray.contains(where: { $0["type"] as? String == "external" }) {
+                let attached = registryDisplays.filter { !$0.isBuiltIn }
+                for display in attached {
+                    displaysArray.append(display.displayInfo)
+                }
+                if !attached.isEmpty {
+                    print("[\(timestamp())] system_profiler listed no external display; reported \(attached.count) from the IO registry")
                 }
             }
-            
-            // Enrich external displays with EDID data (serial numbers, manufacturer)
-            // Non-Apple displays often lack serial numbers in system_profiler but have them in EDID
-            await enrichDisplaysWithEDID(&displaysArray)
-            
-            // For laptops (MacBook Air/Pro): ALWAYS add built-in display even if lid is closed
-            // This ensures we show the built-in display specs even when using external displays only
+
+            // Add the built-in panel from the model database when nothing listed it: a laptop
+            // with its lid closed, or any Mac with a built-in panel at the login window.
             let isLaptop = modelId.hasPrefix("MacBookAir") || modelId.hasPrefix("MacBookPro") || modelId.hasPrefix("Mac14,") || modelId.hasPrefix("Mac15,")
-            if isLaptop && !displaysArray.isEmpty {
-                // Check if we already have the built-in display (from model lookup or system_profiler)
-                let hasBuiltIn = displaysArray.contains { display in
-                    (display["type"] as? String == "internal") || 
-                    (display["data_source"] as? String == "model_lookup")
-                }
-                
-                // If no built-in display found, add it from model database (lid is closed)
-                if !hasBuiltIn, var builtInDisplay = getBuiltInDisplayInfo(from: modelId) {
-                    builtInDisplay["is_main_display"] = false  // External display is main when lid closed
-                    builtInDisplay["online"] = false  // Lid is closed, display is inactive
-                    builtInDisplay["data_source"] = "model_lookup"
-                    displaysArray.append(builtInDisplay)  // Add alongside external displays
-                    print("[\(timestamp())] Added closed built-in display for \(modelId)")
-                }
+            let hasBuiltIn = displaysArray.contains { display in
+                (display["type"] as? String == "internal") ||
+                (display["data_source"] as? String == "model_lookup")
             }
-            
+            if !hasBuiltIn, var builtInDisplay = getBuiltInDisplayInfo(from: modelId) {
+                let lidClosed = isLaptop && !displaysArray.isEmpty
+                builtInDisplay["is_main_display"] = !lidClosed
+                builtInDisplay["online"] = !lidClosed
+                builtInDisplay["data_source"] = "model_lookup"
+                displaysArray.append(builtInDisplay)
+                print("[\(timestamp())] Added built-in display from model data for \(modelId)\(lidClosed ? " (lid closed)" : "")")
+            }
+
+            for i in displaysArray.indices {
+                displaysArray[i].removeValue(forKey: "edid_header_serial")
+            }
+
             if !displaysArray.isEmpty {
                 hardwareData["displays"] = displaysArray
             }
@@ -2887,88 +2895,24 @@ private func collectBatteryInfo() async throws -> [String: Any] {
     
     // MARK: - EDID Display Enrichment
     
-    /// Enrich external displays with data from EDID (serial numbers, manufacturer name)
-    /// Non-Apple displays often lack spdisplays_display-serial-number in system_profiler
-    /// but have serial numbers embedded in EDID descriptor blocks
-    private func enrichDisplaysWithEDID(_ displays: inout [[String: Any]]) async {
-        // Only enrich external displays that are missing serial numbers
-        let needsEnrichment = displays.contains { display in
-            let type = display["type"] as? String ?? ""
-            let hasSerial = display["serial_number"] as? String != nil
-            return type == "external" && !hasSerial
-        }
-        
-        guard needsEnrichment else { return }
-        
-        // Extract EDID data from ioreg for all connected displays
-        // ioreg DisplayAttributes contains AlphanumericSerialNumber for most displays
-        let edidScript = """
-            ioreg -l -w0 2>/dev/null | grep 'DisplayAttributes.*ProductAttributes' | while IFS= read -r line; do
-                # Extract ProductName from ProductAttributes
-                pname=$(echo "$line" | sed -n 's/.*"ProductName"="\\([^"]*\\)".*/\\1/p')
-                
-                # Extract AlphanumericSerialNumber (the human-readable serial)
-                serial=$(echo "$line" | sed -n 's/.*"AlphanumericSerialNumber"="\\([^"]*\\)".*/\\1/p')
-                
-                # Extract ManufacturerID
-                mfr=$(echo "$line" | sed -n 's/.*"ManufacturerID"="\\([^"]*\\)".*/\\1/p')
-                
-                if [ -n "$pname" ]; then
-                    printf '%s|%s|%s\\n' "$pname" "$serial" "$mfr"
-                fi
-            done
-        """
-        
-        do {
-            let output = try await BashService.execute(edidScript).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !output.isEmpty else { return }
-            
-            // Parse EDID results into lookup by product name
-            var edidLookup: [String: (serial: String, manufacturer: String)] = [:]
-            for line in output.split(separator: "\n") {
-                let parts = line.split(separator: "|", maxSplits: 3).map(String.init)
-                guard parts.count >= 3 else { continue }
-                let productName = parts[0].trimmingCharacters(in: .whitespaces)
-                let serial = parts[1].trimmingCharacters(in: .whitespaces)
-                let manufacturer = parts[2].trimmingCharacters(in: .whitespaces)
-                if !productName.isEmpty && !serial.isEmpty {
-                    edidLookup[productName] = (serial: serial, manufacturer: manufacturer)
-                }
+    /// Displays the IO registry holds an EDID for. Apple Silicon keeps it on the port
+    /// transport nodes (IOPortTransportState and its DisplayPort/HDMI subclasses); Intel
+    /// Macs keep it under IODisplayConnect.
+    private func collectRegistryDisplays() async -> [RegistryDisplay] {
+        var entries: [[String: Any]] = []
+        for objectClass in ["IOPortTransportState", "IODisplayConnect"] {
+            guard let output = try? await BashService.execute("ioreg -a -r -c \(objectClass) 2>/dev/null"),
+                  let data = output.data(using: .utf8),
+                  !data.isEmpty,
+                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
+                  let found = plist as? [[String: Any]] else {
+                continue
             }
-            
-            // Match EDID data to displays
-            for i in 0..<displays.count {
-                let type = displays[i]["type"] as? String ?? ""
-                let hasSerial = displays[i]["serial_number"] as? String != nil
-                guard type == "external" && !hasSerial else { continue }
-                
-                let displayName = displays[i]["name"] as? String ?? ""
-                // Try exact name match (system_profiler _name often matches EDID ProductName)
-                if let edid = edidLookup[displayName] {
-                    displays[i]["serial_number"] = edid.serial
-                    if !edid.manufacturer.isEmpty {
-                        displays[i]["manufacturer"] = edid.manufacturer
-                    }
-                    print("[\(timestamp())] Enriched '\(displayName)' with EDID serial: \(edid.serial), manufacturer: \(edid.manufacturer)")
-                } else {
-                    // Try fuzzy match - display name might have spaces where EDID doesn't
-                    let normalizedName = displayName.replacingOccurrences(of: " ", with: "")
-                    for (edidName, edid) in edidLookup {
-                        if edidName.replacingOccurrences(of: " ", with: "") == normalizedName {
-                            displays[i]["serial_number"] = edid.serial
-                            if !edid.manufacturer.isEmpty {
-                                displays[i]["manufacturer"] = edid.manufacturer
-                            }
-                            print("[\(timestamp())] Enriched '\(displayName)' with EDID serial: \(edid.serial) (fuzzy match)")
-                            break
-                        }
-                    }
-                }
-            }
-        } catch {
-            print("[\(timestamp())] EDID enrichment failed: \(error)")
+            entries.append(contentsOf: found)
         }
+        return RegistryDisplay.collect(from: entries)
     }
+
     
     /// Clean system_profiler display type strings to human-readable format
     /// Examples:
