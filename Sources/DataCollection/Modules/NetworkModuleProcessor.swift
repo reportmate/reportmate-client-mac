@@ -60,6 +60,24 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         dictionary["hostname"] = hostnameInfo["hostname"]
         dictionary["localHostname"] = hostnameInfo["localHostname"]
         dictionary["sharingName"] = hostnameInfo["sharingName"]
+
+        let hostnames = [
+            hostnameInfo["hostname"] as? String,
+            hostnameInfo["localHostname"] as? String,
+            (hostnameInfo["localHostname"] as? String).map { "\($0).local" },
+            ProcessInfo.processInfo.hostName
+        ].compactMap { $0 }
+        let localAddresses = NetworkAddressInventory.localInterfaceAddresses()
+        let resolvedAddresses = await Task.detached {
+            NetworkAddressInventory.resolve(hostnames: hostnames)
+        }.value
+        let addressSummary = NetworkAddressInventory.summarize(
+            localAddresses: localAddresses,
+            hostnameAddresses: resolvedAddresses
+        )
+        dictionary["localIpAddresses"] = addressSummary.localIpAddresses
+        dictionary["hostnameAddresses"] = addressSummary.hostnameAddresses
+        dictionary["managementAddress"] = addressSummary.managementAddress
         
         // Add extension data
         dictionary["networkQuality"] = networkQuality
