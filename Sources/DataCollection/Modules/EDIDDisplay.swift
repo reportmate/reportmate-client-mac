@@ -20,10 +20,6 @@ struct EDIDDisplay: Equatable, Sendable {
     let serialNumber: String?
     /// Text of the 0xFC display name descriptor, trimmed; nil when absent
     let name: String?
-    /// Week of manufacture; nil when the panel states only a model year
-    let manufactureWeek: Int?
-    /// Year of manufacture, or the model year when the week byte is 0xFF
-    let manufactureYear: Int?
     /// Largest timing the EDID describes ("5120 x 2880"); nil when it describes none
     let resolution: String?
 
@@ -64,13 +60,13 @@ struct EDIDDisplay: Equatable, Sendable {
             }
         }
 
-        // Week 0xFF marks byte 17 as a model year rather than a manufacture year.
-        var week: Int? = (1...53).contains(Int(bytes[16])) ? Int(bytes[16]) : nil
-        var year: Int? = bytes[17] == 0 ? nil : 1980 + Int(bytes[17])
+        // The manufacture week and year bytes are deliberately not decoded. No single year
+        // offset agrees with what system_profiler and Windows report for the same panels
+        // (1980 is ten years early for some vendors, 1990 is years early for others), and a
+        // wrong date is worse than none once it reaches inventory.
 
         // Extension blocks. Panels that describe themselves in DisplayID (Apple's among
-        // them) keep the real manufacture date and native timing there, and fill the base
-        // block with values that decode to the wrong year and a lower resolution.
+        // them) keep their native timing there and put a lower one in the base block.
         let extensionCount = min(Int(bytes[126]), bytes.count / 128 - 1)
         if extensionCount > 0 {
             for index in 1...extensionCount {
@@ -79,30 +75,15 @@ struct EDIDDisplay: Equatable, Sendable {
                 case 0x02:
                     timings += EDIDDisplay.ceaTimings(block)
                 case 0x70:
-                    let displayID = EDIDDisplay.displayID(block)
-                    timings += displayID.timings
-                    if let productYear = displayID.year {
-                        year = productYear
-                        week = displayID.week
-                    }
+                    timings += EDIDDisplay.displayIDTimings(block)
                 default:
                     break
                 }
             }
         }
 
-        // Apple panels do not follow the 1980 year offset: a Studio Display XDR built in
-        // 2026 stores 36 in byte 17 and carries no DisplayID product block to correct it.
-        // An unknown date is better than one ten years out, so Apple EDIDs report none.
-        if manufacturer == 0x0610 {
-            week = nil
-            year = nil
-        }
-
         serialNumber = EDIDDisplay.usableSerial(serial)
         name = displayName
-        manufactureWeek = week
-        manufactureYear = year
         resolution = timings.max { $0.width * $0.height < $1.width * $1.height }
             .map { "\($0.width) x \($0.height)" }
     }
@@ -158,12 +139,10 @@ struct EDIDDisplay: Equatable, Sendable {
         }
     }
 
-    /// Timings and product date from a DisplayID extension section. Data blocks follow a
-    /// five-byte section header as tag, revision, payload length, payload.
-    private static func displayID(_ block: [UInt8]) -> (timings: [(width: Int, height: Int)], year: Int?, week: Int?) {
+    /// Timings from a DisplayID extension section. Data blocks follow a five-byte section
+    /// header as tag, revision, payload length, payload.
+    private static func displayIDTimings(_ block: [UInt8]) -> [(width: Int, height: Int)] {
         var timings: [(width: Int, height: Int)] = []
-        var year: Int?
-        var week: Int?
         let end = min(5 + Int(block[2]), block.count)
         var offset = 5
         while offset + 3 <= end {
@@ -174,14 +153,6 @@ struct EDIDDisplay: Equatable, Sendable {
             let payload = Array(block[payloadStart..<payloadStart + length])
 
             switch tag {
-            case 0x00, 0x20:
-                // Product identification: OUI or vendor id (3), product code (2), serial (4),
-                // week (1), year offset from 2000 (1).
-                if payload.count >= 11 {
-                    let productWeek = Int(payload[9])
-                    week = (1...53).contains(productWeek) ? productWeek : nil
-                    year = 2000 + Int(payload[10])
-                }
             case 0x03, 0x22:
                 // Type I and Type VII detailed timings: 20 bytes each, active pixels stored
                 // minus one at bytes 4-5 (horizontal) and 12-13 (vertical).
@@ -197,7 +168,7 @@ struct EDIDDisplay: Equatable, Sendable {
             }
             offset = payloadStart + length
         }
-        return (timings, year, week)
+        return timings
     }
 
     private static func plausible(_ width: Int, _ height: Int) -> (width: Int, height: Int)? {
@@ -298,12 +269,6 @@ struct RegistryDisplay: Equatable, Sendable {
         if let connectionType {
             info["connection_type"] = connectionType
         }
-        if let year = edid.manufactureYear {
-            info["manufacture_year"] = year
-        }
-        if let week = edid.manufactureWeek {
-            info["manufacture_week"] = week
-        }
         return info
     }
 
@@ -348,12 +313,6 @@ struct RegistryDisplay: Equatable, Sendable {
             }
             if displays[i]["manufacturer"] == nil, !edid.manufacturerCode.isEmpty {
                 displays[i]["manufacturer"] = edid.manufacturerCode
-            }
-            if displays[i]["manufacture_year"] == nil, let year = edid.manufactureYear {
-                displays[i]["manufacture_year"] = year
-            }
-            if displays[i]["manufacture_week"] == nil, let week = edid.manufactureWeek {
-                displays[i]["manufacture_week"] = week
             }
         }
         return filled
