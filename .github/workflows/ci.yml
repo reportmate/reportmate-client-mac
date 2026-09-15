@@ -1,6 +1,6 @@
 name: CI
 
-# Build-only validation for pushes and PRs to main. Compiles the Swift
+# Build and test validation for pushes and PRs to main. Compiles the Swift
 # client (release config) via build.sh; no packaging, signing, or release.
 # The tag-triggered release.yml produces the shippable unsigned pkg.
 
@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - 'Sources/**'
+      - 'Tests/**'
       - 'Package.swift'
       - 'build.sh'
       - '.github/workflows/ci.yml'
@@ -16,6 +17,7 @@ on:
     branches: [main]
     paths:
       - 'Sources/**'
+      - 'Tests/**'
       - 'Package.swift'
       - 'build.sh'
       - '.github/workflows/ci.yml'
@@ -60,3 +62,6 @@ jobs:
 
       - name: Build (compile only, unsigned)
         run: ./build.sh --skip-pkg --skip-zip --skip-dmg
+
+      - name: Test
+        run: swift test
