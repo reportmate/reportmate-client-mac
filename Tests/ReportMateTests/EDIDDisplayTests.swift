@@ -4,9 +4,9 @@ import XCTest
 
 final class EDIDDisplayTests: XCTestCase {
     /// Build an EDID base block by hand: manufacturer "WAC", product 0x037f, header
-    /// serial 0x01020304, week 12 of 2021, a 3840 x 2160 preferred timing, then
+    /// serial 0x01020304, week 12, year byte 41, a 3840 x 2160 preferred timing, then
     /// whichever text descriptors the test supplies.
-    private func edid(serial: String? = "ABC1234567", name: String? = "Cintiq Pro 24", headerSerial: UInt32 = 0x0102_0304, week: UInt8 = 12) -> Data {
+    private func edid(serial: String? = "ABC1234567", name: String? = "Cintiq Pro 24", headerSerial: UInt32 = 0x0102_0304) -> Data {
         var bytes = [UInt8](repeating: 0, count: 128)
         bytes[0..<8] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
         bytes[8] = 0x5C
@@ -17,7 +17,7 @@ final class EDIDDisplayTests: XCTestCase {
         bytes[13] = UInt8(headerSerial >> 8 & 0xFF)
         bytes[14] = UInt8(headerSerial >> 16 & 0xFF)
         bytes[15] = UInt8(headerSerial >> 24 & 0xFF)
-        bytes[16] = week
+        bytes[16] = 12
         bytes[17] = 41
 
         bytes[54] = 0x04
@@ -50,8 +50,6 @@ final class EDIDDisplayTests: XCTestCase {
         XCTAssertEqual(display.headerSerial, 0x0102_0304)
         XCTAssertEqual(display.serialNumber, "ABC1234567")
         XCTAssertEqual(display.name, "Cintiq Pro 24")
-        XCTAssertEqual(display.manufactureWeek, 12)
-        XCTAssertEqual(display.manufactureYear, 2021)
         XCTAssertEqual(display.resolution, "3840 x 2160")
     }
 
@@ -66,23 +64,6 @@ final class EDIDDisplayTests: XCTestCase {
         XCTAssertNil(EDIDDisplay.usableSerial("0000000"))
         XCTAssertNil(EDIDDisplay.usableSerial("  "))
         XCTAssertEqual(EDIDDisplay.usableSerial(" A1 "), "A1")
-    }
-
-    func testModelYearWeekIsNotAWeek() throws {
-        let display = try XCTUnwrap(EDIDDisplay(data: edid(week: 0xFF)))
-        XCTAssertNil(display.manufactureWeek)
-        XCTAssertEqual(display.manufactureYear, 2021)
-    }
-
-    func testAppleEDIDReportsNoManufactureDate() throws {
-        var bytes = [UInt8](edid(serial: nil, name: "Studio Display"))
-        bytes[8] = 0x06
-        bytes[9] = 0x10
-        let display = try XCTUnwrap(EDIDDisplay(data: Data(bytes)))
-        XCTAssertEqual(display.vendorId, "610")
-        XCTAssertEqual(display.manufacturerCode, "APP")
-        XCTAssertNil(display.manufactureYear)
-        XCTAssertNil(display.manufactureWeek)
     }
 
     func testRejectsNonEDID() {
@@ -127,8 +108,8 @@ final class EDIDDisplayTests: XCTestCase {
         XCTAssertEqual(displays.map(\.edid.serialNumber), ["UNIT0001", "UNIT0002"])
     }
 
-    /// Append a DisplayID extension carrying a product identification block (week 7 of
-    /// 2025) and one Type VII timing of 6016 x 3384, and point the base block at it.
+    /// Append a DisplayID extension carrying a product identification block and one
+    /// Type VII timing of 6016 x 3384, and point the base block at it.
     private func withDisplayID(_ base: Data) -> Data {
         var bytes = [UInt8](base)
         bytes[126] = 1
@@ -148,10 +129,8 @@ final class EDIDDisplayTests: XCTestCase {
         return Data(bytes + ext)
     }
 
-    func testDisplayIDOverridesBaseBlockDateAndResolution() throws {
+    func testDisplayIDTimingOverridesBaseBlockResolution() throws {
         let display = try XCTUnwrap(EDIDDisplay(data: withDisplayID(edid())))
-        XCTAssertEqual(display.manufactureYear, 2025)
-        XCTAssertEqual(display.manufactureWeek, 7)
         XCTAssertEqual(display.resolution, "6016 x 3384")
         XCTAssertEqual(display.serialNumber, "ABC1234567")
     }
@@ -169,7 +148,8 @@ final class EDIDDisplayTests: XCTestCase {
         let filled = RegistryDisplay.enrich(&rows, from: registry)
         XCTAssertEqual(filled, [0: "UNIT0002", 1: "UNIT0001"])
         XCTAssertEqual(rows[0]["manufacturer"] as? String, "WAC")
-        XCTAssertEqual(rows[0]["manufacture_year"] as? Int, 2021)
+        XCTAssertNil(rows[0]["manufacture_year"])
+        XCTAssertNil(rows[0]["manufacture_week"])
     }
 
     func testEnrichLeavesAmbiguousAndExistingSerialsAlone() {
@@ -194,6 +174,8 @@ final class EDIDDisplayTests: XCTestCase {
         XCTAssertEqual(row["connection_type"] as? String, "USB-C")
         XCTAssertEqual(row["data_source"] as? String, "ioregistry")
         XCTAssertNil(row["serial_number"])
+        XCTAssertNil(row["manufacture_year"])
+        XCTAssertNil(row["manufacture_week"])
     }
 
     func testIntelBacklightDisplayIsBuiltIn() {
