@@ -258,9 +258,16 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         """
         
         let bashScript = """
-            boot_time_sec=$(sysctl -n kern.boottime 2>/dev/null | awk -F'[= ,]' '{print $4}')
+            # kern.boottime reads "{ sec = 1787688050, usec = 313690 } Tue Aug 25 ...".
+            # Splitting on [= ,] yields empty fields, so $4 came back blank and
+            # total_seconds became the current epoch -- a ~56 year uptime.
+            boot_time_sec=$(sysctl -n kern.boottime 2>/dev/null | awk '{gsub(/[{}=,]/, " "); print $2}')
             current_time=$(date +%s)
-            total_seconds=$((current_time - boot_time_sec))
+            if [ -z "$boot_time_sec" ]; then
+                total_seconds=0
+            else
+                total_seconds=$((current_time - boot_time_sec))
+            fi
             
             days=$((total_seconds / 86400))
             hours=$(((total_seconds % 86400) / 3600))

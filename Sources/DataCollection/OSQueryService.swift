@@ -57,20 +57,94 @@ public class OSQueryService {
     
     /// Check if osquery is available
     public func isAvailable() async -> Bool {
+        // `--version` only proves the file is executable. It exits 0 on a binary
+        // that can no longer open its database or run a query on this OS, which
+        // is exactly how a broken osquery stayed invisible: every module fell
+        // through to bash and the device reported almost nothing. Ask the SQL
+        // engine to answer a real query against a real virtual table instead.
+        let probe = await Self.probe(osqueryPath: osqueryPath)
+
+        if await !OSQueryHealth.shared.hasProbed() {
+            await OSQueryHealth.shared.recordProbe(
+                healthy: probe.healthy,
+                version: probe.version,
+                failureReason: probe.failureReason
+            )
+            if !probe.healthy {
+                ConsoleFormatter.writeWarning(
+                    "osquery is not usable (\(probe.failureReason ?? "unknown failure")) - modules will fall back to bash and may report no data"
+                )
+            }
+        }
+
+        return probe.healthy
+    }
+
+    private struct Probe: Sendable {
+        let healthy: Bool
+        let version: String?
+        let failureReason: String?
+    }
+
+    /// Run the canary query. Mirrors how modules actually invoke osquery
+    /// (`osqueryi --json <query>`) so the probe fails whenever real queries would.
+    private static func probe(osqueryPath: String) async -> Probe {
+        guard FileManager.default.isExecutableFile(atPath: osqueryPath) else {
+            return Probe(healthy: false, version: nil,
+                         failureReason: "not installed at \(osqueryPath)")
+        }
+
         return await withCheckedContinuation { continuation in
             let task = Process()
             task.executableURL = URL(fileURLWithPath: osqueryPath)
-            task.arguments = ["--version"]
-            task.standardOutput = Pipe()
-            task.standardError = Pipe()
-            
+            task.arguments = ["--json", "SELECT version FROM osquery_info;"]
+
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
+            task.standardOutput = outputPipe
+            task.standardError = errorPipe
+
             do {
                 try task.run()
-                task.waitUntilExit()
-                continuation.resume(returning: task.terminationStatus == 0)
             } catch {
-                continuation.resume(returning: false)
+                continuation.resume(returning: Probe(
+                    healthy: false, version: nil,
+                    failureReason: "failed to launch: \(error.localizedDescription)"))
+                return
             }
+
+            // A wedged osquery must not stall the whole collection run.
+            let watchdog = DispatchWorkItem { if task.isRunning { task.terminate() } }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 20, execute: watchdog)
+
+            let out = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let err = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit()
+            watchdog.cancel()
+
+            guard task.terminationStatus == 0 else {
+                let stderr = String(data: err, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                continuation.resume(returning: Probe(
+                    healthy: false, version: nil,
+                    failureReason: "exit \(task.terminationStatus)"
+                        + (stderr.isEmpty ? "" : ": \(stderr)")))
+                return
+            }
+
+            guard
+                let rows = try? JSONSerialization.jsonObject(with: out) as? [[String: Any]],
+                let version = rows.first?["version"] as? String,
+                !version.isEmpty
+            else {
+                continuation.resume(returning: Probe(
+                    healthy: false, version: nil,
+                    failureReason: "canary query returned no usable rows"))
+                return
+            }
+
+            continuation.resume(returning: Probe(
+                healthy: true, version: version, failureReason: nil))
         }
     }
     
