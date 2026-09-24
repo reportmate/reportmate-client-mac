@@ -972,7 +972,7 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             if [ "$cpu_arch" = "arm64" ]; then
                 # Apple Silicon: Use ioreg product-name with plutil and base64 decode (e.g., "Mac mini (2024)")
                 # The product-name is base64 encoded in the plist XML
-                model_name=$(ioreg -ar -k product-name -d1 2>/dev/null | plutil -extract 0.product-name raw -o - - 2>/dev/null | base64 -d 2>/dev/null | tr -d '\0')
+                model_name=$(ioreg -ar -k product-name -d1 2>/dev/null | plutil -extract 0.product-name raw -o - - 2>/dev/null | base64 -d 2>/dev/null | tr -d '\\0')
             else
                 # Intel: Try SIMachineAttributes.plist
                 if [ -f "/System/Library/PrivateFrameworks/ServerInformation.framework/Resources/en.lproj/SIMachineAttributes.plist" ]; then
