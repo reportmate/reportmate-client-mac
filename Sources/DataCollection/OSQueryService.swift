@@ -5,6 +5,9 @@ import Foundation
 public class OSQueryService {
     private let configuration: ReportMateConfiguration
     private let osqueryPath: String
+    /// Arguments that put the binary in shell mode. Empty for an `osqueryi` path; `-S` when the
+    /// resolver fell back to the `osqueryd` inside the app bundle, which is the same binary.
+    private let shellArgs: [String]
     private let extensionPath: String?
     private var extensionAvailable: Bool = false
     private var extensionTablesChecked: Bool = false
@@ -24,7 +27,9 @@ public class OSQueryService {
     
     public init(configuration: ReportMateConfiguration) {
         self.configuration = configuration
-        self.osqueryPath = configuration.osqueryPath
+        let binary = Self.resolveOsqueryBinary(configured: configuration.osqueryPath)
+        self.osqueryPath = binary.path
+        self.shellArgs = binary.shellArgs
         
         // Extension support - load macadmins extension for additional tables
         if configuration.extensionEnabled {
@@ -55,24 +60,67 @@ public class OSQueryService {
         return false
     }
     
-    /// Check if osquery is available
+    /// Seconds `osquery --version` gets before the binary counts as unusable.
+    static let availabilityProbeTimeout: TimeInterval = 10
+
+    /// Check if osquery is available.
+    ///
+    /// osquery is the primary source but never a requirement: when this returns false every
+    /// module goes straight to its bash fallback. The probe is bounded, because a binary that
+    /// hangs here would otherwise spend the module's whole budget before any fallback runs,
+    /// and its answer is kept for the rest of the run so a broken install is probed only once.
     public func isAvailable() async -> Bool {
-        return await withCheckedContinuation { continuation in
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: osqueryPath)
-            task.arguments = ["--version"]
-            task.standardOutput = Pipe()
-            task.standardError = Pipe()
-            
-            do {
-                try task.run()
-                task.waitUntilExit()
-                continuation.resume(returning: task.terminationStatus == 0)
-            } catch {
-                continuation.resume(returning: false)
-            }
+        let key = ([osqueryPath] + shellArgs).joined(separator: " ")
+        if let known = Self.availability.value(for: key) {
+            return known
         }
+
+        let osqueryPath = self.osqueryPath
+        let shellArgs = self.shellArgs
+        let available = await Task.detached(priority: .userInitiated) {
+            Self.probeVersion(osqueryPath: osqueryPath, shellArgs: shellArgs)
+        }.value
+
+        if !available {
+            Self.warnOnce("osquery at \(osqueryPath) did not answer --version; using bash collection only")
+        }
+        Self.availability.set(available, for: key)
+        return available
     }
+
+    /// Runs `--version` and waits at most `availabilityProbeTimeout`, killing the process if it hangs.
+    private static func probeVersion(osqueryPath: String, shellArgs: [String]) -> Bool {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: osqueryPath)
+        task.arguments = shellArgs + ["--version"]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+
+        let exited = DispatchSemaphore(value: 0)
+        task.terminationHandler = { _ in exited.signal() }
+        do {
+            try task.run()
+        } catch {
+            return false
+        }
+        if exited.wait(timeout: .now() + availabilityProbeTimeout) == .timedOut {
+            task.terminate()
+            if exited.wait(timeout: .now() + 2) == .timedOut {
+                kill(task.processIdentifier, SIGKILL)
+            }
+            return false
+        }
+        return task.terminationStatus == 0
+    }
+
+    /// Per-run cache of availability probes, keyed by the command line that was probed.
+    private final class AvailabilityCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var results: [String: Bool] = [:]
+        func value(for key: String) -> Bool? { lock.lock(); defer { lock.unlock() }; return results[key] }
+        func set(_ value: Bool, for key: String) { lock.lock(); results[key] = value; lock.unlock() }
+    }
+    private static let availability = AvailabilityCache()
     
     /// Check if a specific osquery extension table is available
     public func isTableAvailable(_ tableName: String) async -> Bool {
@@ -95,6 +143,98 @@ public class OSQueryService {
         }
     }
     
+    /// Where the osquery pkg means to put the real binary. `/usr/local/bin/osqueryi` is only a
+    /// symlink into this bundle, and the bundle does not always land here: when an earlier
+    /// osquery.app with the same bundle ID exists elsewhere, Installer relocates the new one
+    /// on top of it and the link is left pointing at nothing.
+    static let bundledOsquerydPath = "/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryd"
+
+    /// Pick an osquery binary that can actually run.
+    ///
+    /// Tried in order: the configured path, the standard link, the pkg's intended location,
+    /// then any osquery.app found under `searchRoot` — which is where a relocated install ends
+    /// up. Only paths that resolve to an executable file count, so a dangling link is skipped
+    /// instead of turning every query into a launch failure. The app bundle's `osqueryd` needs
+    /// `-S`, since that binary only acts as a shell when invoked by the `osqueryi` name.
+    static func resolveOsqueryBinary(
+        configured: String,
+        fallbacks: [String] = ["/usr/local/bin/osqueryi", bundledOsquerydPath],
+        searchRoot: String = "/opt",
+        fileManager: FileManager = .default
+    ) -> (path: String, shellArgs: [String]) {
+        let listed = [configured] + fallbacks
+        let found = listed.first { fileManager.isExecutableFile(atPath: $0) }
+            ?? discovered.value(for: searchRoot) { discoverOsqueryBinaries(under: searchRoot, fileManager: fileManager) }
+                .first { fileManager.isExecutableFile(atPath: $0) }
+
+        guard let candidate = found else {
+            warnOnce("No runnable osquery found (tried \(listed.joined(separator: ", ")) and \(searchRoot)); using bash collection only")
+            return (configured, [])
+        }
+        if candidate != configured {
+            warnOnce("osquery at \(configured) is missing or a broken link; using \(candidate)")
+        }
+        let isShellName = (candidate as NSString).lastPathComponent == "osqueryi"
+        return (candidate, isShellName ? [] : ["-S"])
+    }
+
+    /// Discovery results per search root, so a device needing the search pays for it once a run
+    /// rather than once for every service built.
+    private final class DiscoveryCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var results: [String: [String]] = [:]
+        func value(for root: String, compute: () -> [String]) -> [String] {
+            lock.lock(); defer { lock.unlock() }
+            if let known = results[root] { return known }
+            let found = compute()
+            results[root] = found
+            return found
+        }
+    }
+    private static let discovered = DiscoveryCache()
+
+    /// Top-level `/opt` directories owned by package managers, never by an osquery install.
+    static let skippedSearchDirectories: Set<String> = ["homebrew", "local", "MacPorts"]
+
+    /// Every `osquery.app/Contents/MacOS/osqueryd` under `root`, searched a few levels deep,
+    /// without descending into app bundles or package-manager trees. Homebrew alone puts tens
+    /// of thousands of directories under `/opt`, which turns a sub-second walk into half a minute.
+    static func discoverOsqueryBinaries(under root: String, fileManager: FileManager = .default) -> [String] {
+        let rootURL = URL(fileURLWithPath: root)
+        guard let walker = fileManager.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return [] }
+
+        var found: [String] = []
+        let topLevel = rootURL.pathComponents.count + 1
+        let maxDepth = rootURL.pathComponents.count + 7
+        for case let url as URL in walker {
+            if url.pathComponents.count > maxDepth
+                || (url.pathComponents.count == topLevel && Self.skippedSearchDirectories.contains(url.lastPathComponent)) {
+                walker.skipDescendants()
+                continue
+            }
+            if url.lastPathComponent == "osquery.app" {
+                found.append(url.appendingPathComponent("Contents/MacOS/osqueryd").path)
+            }
+        }
+        return found.sorted()
+    }
+
+    /// A service is built per module query, so a broken path would otherwise log the same
+    /// warning dozens of times a run.
+    private static let warnedLock = NSLock()
+    nonisolated(unsafe) private static var warned: Set<String> = []
+
+    private static func warnOnce(_ message: String) {
+        warnedLock.lock()
+        let isNew = warned.insert(message).inserted
+        warnedLock.unlock()
+        if isNew { ConsoleFormatter.writeWarning(message) }
+    }
+
     /// Resolve extension path from configuration or bundled location
     private static func resolveExtensionPath(configured: String?) -> String? {
         // 1. Try configured path (highest priority - user override)
@@ -167,6 +307,7 @@ public class OSQueryService {
         // closures don't capture `self` (avoids Swift 6 sending-closure data
         // race diagnostics for this non-Sendable class).
         let osqueryPath = self.osqueryPath
+        let shellArgs = self.shellArgs
         let extensionPath = self.extensionPath
 
         return try await withThrowingTaskGroup(of: QueryRunResult.self) { group in
@@ -178,6 +319,7 @@ public class OSQueryService {
                     rows = try await Self.runExtensionQuery(
                         query,
                         osqueryPath: osqueryPath,
+                        shellArgs: shellArgs,
                         extensionPath: extensionPath,
                         processBox: processBox
                     )
@@ -185,6 +327,7 @@ public class OSQueryService {
                     rows = try await Self.runSimpleQuery(
                         query,
                         osqueryPath: osqueryPath,
+                        shellArgs: shellArgs,
                         processBox: processBox
                     )
                 }
@@ -289,11 +432,11 @@ public class OSQueryService {
     /// Runs on a detached Task so the blocking pipe reads release the cooperative
     /// thread pool; on timeout, the parent will terminate the Process and the
     /// pipe will EOF, unblocking the read here.
-    private static func runSimpleQuery(_ query: String, osqueryPath: String, processBox: ProcessBox) async throws -> [[String: Any]] {
+    private static func runSimpleQuery(_ query: String, osqueryPath: String, shellArgs: [String], processBox: ProcessBox) async throws -> [[String: Any]] {
         let box = try await Task.detached(priority: .userInitiated) { () throws -> QueryRows in
             let task = Process()
             task.executableURL = URL(fileURLWithPath: osqueryPath)
-            task.arguments = ["--json", query]
+            task.arguments = shellArgs + ["--json", query]
 
             let outputPipe = Pipe()
             let errorPipe = Pipe()
@@ -351,7 +494,7 @@ public class OSQueryService {
     /// macadmins extension time to register its tables. The bash process is the
     /// one we kill on timeout — terminating it brings down the osqueryi child
     /// and unblocks the pipe reads here.
-    private static func runExtensionQuery(_ query: String, osqueryPath: String, extensionPath: String, processBox: ProcessBox) async throws -> [[String: Any]] {
+    private static func runExtensionQuery(_ query: String, osqueryPath: String, shellArgs: [String], extensionPath: String, processBox: ProcessBox) async throws -> [[String: Any]] {
         let box = try await Task.detached(priority: .userInitiated) { () throws -> QueryRows in
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -359,7 +502,7 @@ public class OSQueryService {
             let escapedQuery = query.replacingOccurrences(of: "'", with: "'\"'\"'")
 
             let script = """
-            (sleep 7 && echo '\(escapedQuery)' && echo '.exit') | "\(osqueryPath)" --json --extension "\(extensionPath)" --extensions_timeout 15
+            (sleep 7 && echo '\(escapedQuery)' && echo '.exit') | "\(osqueryPath)" \(shellArgs.joined(separator: " ")) --json --extension "\(extensionPath)" --extensions_timeout 15
             """
 
             task.arguments = ["-c", script]
@@ -475,7 +618,7 @@ public class OSQueryService {
         return try await withCheckedThrowingContinuation { continuation in
             let task = Process()
             task.executableURL = URL(fileURLWithPath: osqueryPath)
-            task.arguments = ["--version"]
+            task.arguments = shellArgs + ["--version"]
             
             let outputPipe = Pipe()
             task.standardOutput = outputPipe
