@@ -112,7 +112,19 @@ public enum ProcessRunner {
         arguments: [String],
         box: ProcessBox
     ) async throws -> ProcessRunResult {
-        try await withCheckedThrowingContinuation { continuation in
+        // Process raises an Objective-C exception, not a Swift error, when the path or an
+        // argument cannot become a C string. Swift cannot catch that, so one bad string
+        // aborts the whole run and nothing is reported. The usual culprit is a `\0` in a
+        // script literal, which Swift turns into a real NUL byte.
+        if executable.isEmpty {
+            throw BashError.invalidOutput("refusing to launch: empty executable path")
+        }
+        if let bad = ([executable] + arguments).first(where: { $0.contains("\0") }) {
+            let shown = bad.prefix(120).replacingOccurrences(of: "\0", with: "\\0")
+            throw BashError.invalidOutput("refusing to launch: NUL byte in argument (\(shown))")
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
             let task = Process()
             task.executableURL = URL(fileURLWithPath: executable)
             task.arguments = arguments
