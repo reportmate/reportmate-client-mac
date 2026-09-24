@@ -1258,8 +1258,21 @@ done
 
 OSQUERY_PATH="/usr/local/bin/osqueryi"
 OSQUERY_VERSION="5.21.0"  # Pin to known compatible version with macadmins extension
+OSQUERY_APP_BIN="/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryd"
 
-if [ ! -f "$OSQUERY_PATH" ]; then
+# ReportMate uses whatever osquery the device already has and never changes it. Another
+# tool may own an osquery.app elsewhere under /opt, and installing the osquery pkg over it
+# would make Installer relocate the new bundle on top of that copy. The client finds a
+# runnable copy on its own (link, intended location, or any osquery.app under /opt), so
+# the pkg is installed only when no osquery.app exists at all.
+find_osquery() {
+    if [ -x "$OSQUERY_PATH" ]; then echo "$OSQUERY_PATH"; return 0; fi
+    if [ -x "$OSQUERY_APP_BIN" ]; then echo "$OSQUERY_APP_BIN"; return 0; fi
+    /usr/bin/find /opt -maxdepth 7 -type d -name osquery.app -prune 2>/dev/null | head -n 1
+}
+
+EXISTING_OSQUERY=$(find_osquery)
+if [ -z "$EXISTING_OSQUERY" ]; then
     log_message "osquery not found, installing..."
 
     # Determine architecture
@@ -1285,7 +1298,7 @@ if [ ! -f "$OSQUERY_PATH" ]; then
         log_message "WARNING: Failed to download osquery"
     fi
 else
-    log_message "osquery already installed at $OSQUERY_PATH"
+    log_message "osquery already present at $EXISTING_OSQUERY; leaving it as is"
 fi
 
 # Make extension and watcher executable
