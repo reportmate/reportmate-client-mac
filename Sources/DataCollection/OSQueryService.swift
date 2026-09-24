@@ -77,8 +77,8 @@ public class OSQueryService {
 
         let osqueryPath = self.osqueryPath
         let shellArgs = self.shellArgs
-        let available = await Task.detached(priority: .userInitiated) {
-            Self.probeVersion(osqueryPath: osqueryPath, shellArgs: shellArgs)
+        let available = await Task.detached(priority: .userInitiated) { @Sendable () -> Bool in
+            OSQueryService.probeVersion(osqueryPath: osqueryPath, shellArgs: shellArgs)
         }.value
 
         if !available {
