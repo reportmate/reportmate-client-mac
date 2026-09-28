@@ -1,10 +1,12 @@
 import CryptoKit
 import Foundation
+import Logging
 
 /// API client for communicating with ReportMate backend
 public class APIClient {
     private let configuration: ReportMateConfiguration
     private let session = URLSession.shared
+    private let logger = Logger(label: "reportmate.api")
     
     public init(configuration: ReportMateConfiguration) {
         self.configuration = configuration
@@ -129,9 +131,60 @@ public class APIClient {
             } else {
                 request.httpBody = body
             }
+        } catch {
+            return .failure(.encodingError(error))
+        }
 
+        // A dropped connection or a server hiccup is resent down a fresh
+        // connection rather than costing the device its check-in until the next
+        // scheduled run. The idempotency key makes a resend safe even when the
+        // first attempt landed and only its response was lost. Failures the
+        // server would repeat -- a bad passphrase, a body it cannot parse -- are
+        // returned at once, since sending them again changes nothing.
+        let attempts = max(1, configuration.maxRetryAttempts)
+        var result: Result<TransmissionResponse, APIError> = .failure(.invalidResponse("No attempt made"))
+        for attempt in 1...attempts {
+            result = await send(request)
+            guard case .failure(let error) = result, attempt < attempts, Self.isTransient(error) else {
+                return result
+            }
+            let delay = Self.retryDelay(afterAttempt: attempt)
+            logger.warning("Transmission attempt \(attempt)/\(attempts) failed (\(error.localizedDescription)); retrying in \(Int(delay))s")
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+        return result
+    }
+
+    /// Backoff before the next attempt: 1s, then 2s, doubling -- the same
+    /// schedule as the Windows client.
+    static func retryDelay(afterAttempt attempt: Int) -> TimeInterval {
+        pow(2, Double(attempt - 1))
+    }
+
+    /// Whether a failed attempt is worth sending again: the connection broke
+    /// or the server was briefly unable to take the request.
+    static func isTransient(_ error: APIError) -> Bool {
+        switch error {
+        case .networkError(let underlying):
+            guard let urlError = underlying as? URLError else { return false }
+            switch urlError.code {
+            case .timedOut, .networkConnectionLost, .notConnectedToInternet,
+                 .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+                return true
+            default:
+                return false
+            }
+        case .httpError(let status, _):
+            return [408, 429, 500, 502, 503, 504].contains(status)
+        default:
+            return false
+        }
+    }
+
+    private func send(_ request: URLRequest) async -> Result<TransmissionResponse, APIError> {
+        do {
             let (data, response) = try await session.data(for: request)
-            
+
             guard let httpResponse = response as? HTTPURLResponse else {
                 return .failure(.invalidResponse("Invalid response type"))
             }
