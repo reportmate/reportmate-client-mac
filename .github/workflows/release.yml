@@ -1,7 +1,13 @@
 name: Release
 
-# Builds ReportMate-<version>.pkg, signs it with a Developer ID, notarizes and
-# staples it, and publishes it as a GitHub release.
+# Builds ReportMate-<version>.pkg and publishes two assets:
+#
+#   ReportMate-<version>.pkg         unsigned, exactly as before. Downstream
+#                                    pipelines that re-sign with their own
+#                                    Developer ID select this one: they take
+#                                    ReportMate-*.pkg and skip "-signed".
+#   ReportMate-<version>-signed.pkg  signed with a Developer ID, notarized and
+#                                    stapled, for anyone installing directly.
 #
 # The signing identity comes only from repository secrets. build.sh stays
 # identity-agnostic and reads it from the environment, so anyone building from
@@ -29,6 +35,11 @@ on:
         description: 'Version (leave empty for auto YYYY.MM.DD.HHMM)'
         required: false
         type: string
+      publish:
+        description: 'Publish a GitHub release. Off = build, sign and notarize only, as a dry run.'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -79,11 +90,12 @@ jobs:
           else
             VERSION="${REF_NAME#v}"
           fi
-          if printf '%s' "$VERSION" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{4}$'; then
-            echo "arg=--version $VERSION" >> "$GITHUB_OUTPUT"
-          else
-            echo "arg=" >> "$GITHUB_OUTPUT"
+          # Both build.sh passes must agree on one version, so settle it here
+          # rather than letting each pass stamp its own.
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{4}$'; then
+            VERSION="$(TZ=America/Vancouver date +%Y.%m.%d.%H%M)"
           fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       # build.sh's shebang is #!/opt/homebrew/bin/bash (bash 5). The runner ships
       # only system bash 3.2, so install the Homebrew bash the script expects.
@@ -124,20 +136,33 @@ jobs:
             --keychain "$KEYCHAIN"
           rm "$key"
 
-      # --distribution signs the app bundle with the hardened runtime and signs
-      # the pkg. Notarization is done in the next step rather than with
-      # --notarize, so the log shows its progress instead of sitting silent.
-      - name: Build and sign pkg
+      - name: Build unsigned pkg
         env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          ./build.sh --version "$VERSION" --skip-zip --skip-dmg
+          mv "release/ReportMate-$VERSION.pkg" "$RUNNER_TEMP/unsigned.pkg"
+
+      # A second pass over the products the first one built: --skip-build
+      # reuses them, --distribution signs the app with the hardened runtime and
+      # signs the pkg. Notarization is its own step so the log shows progress.
+      - name: Sign pkg
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
           SIGNING_IDENTITY_APP: ${{ secrets.SIGNING_IDENTITY_APP }}
           SIGNING_IDENTITY_INSTALLER: ${{ secrets.SIGNING_IDENTITY_INSTALLER }}
-        run: SIGNING_KEYCHAIN="$KEYCHAIN" ./build.sh ${{ steps.resolve.outputs.arg }} --skip-zip --skip-dmg --distribution
+        run: |
+          set -euo pipefail
+          SIGNING_KEYCHAIN="$KEYCHAIN" ./build.sh --version "$VERSION" --skip-build --skip-zip --skip-dmg --distribution
+          mv "release/ReportMate-$VERSION.pkg" "release/ReportMate-$VERSION-signed.pkg"
+          mv "$RUNNER_TEMP/unsigned.pkg" "release/ReportMate-$VERSION.pkg"
 
       # Before the checksum is taken: stapling rewrites the pkg.
       - name: Notarize and staple
         run: |
           set -euo pipefail
-          pkg=$(ls -1 release/ReportMate-*.pkg | head -1)
+          pkg="release/ReportMate-${{ steps.resolve.outputs.version }}-signed.pkg"
           id=$(xcrun notarytool submit "$pkg" --keychain-profile "$NOTARIZATION_PROFILE" \
                  --keychain "$KEYCHAIN" --output-format json | jq -r .id)
           echo "Submitted $(basename "$pkg") as $id"
@@ -165,14 +190,14 @@ jobs:
         id: info
         run: |
           set -euo pipefail
-          PKG=$(ls -1 release/ReportMate-*.pkg 2>/dev/null | head -1)
+          PKG="release/ReportMate-${{ steps.resolve.outputs.version }}.pkg"
           [ -n "$PKG" ] || { echo "No pkg produced by build.sh"; exit 1; }
           BASE=$(basename "$PKG")
           if ! printf '%s' "$BASE" | grep -Eq '^ReportMate-[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{4}\.pkg$'; then
             echo "Unexpected pkg name: $BASE"; exit 1
           fi
           VERSION=$(printf '%s' "$BASE" | sed -E 's/^ReportMate-(.+)\.pkg$/\1/')
-          ( cd release && shasum -a 256 "$BASE" > "$BASE.sha256" )
+          ( cd release && for f in "$BASE" "${BASE%.pkg}-signed.pkg"; do shasum -a 256 "$f" > "$f.sha256"; done )
           {
             echo "version=$VERSION"
             echo "swift=$(swift --version 2>&1 | head -1)"
@@ -180,9 +205,18 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: List release artifacts
-        run: ls -lh release/ReportMate-*.pkg release/ReportMate-*.pkg.sha256
+        run: ls -lh release/ReportMate-*.pkg release/ReportMate-*.sha256
+
+      - name: Upload pkg artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ReportMate-${{ steps.resolve.outputs.version }}
+          path: |
+            release/ReportMate-*.pkg
+            release/ReportMate-*.sha256
 
       - name: Create GitHub Release
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
@@ -211,8 +245,8 @@ jobs:
           NOTES_FILE="$RUNNER_TEMP/notes.md"
           {
             printf '## Build info\n\n'
-            printf 'Built with %s on %s, via %s. Signed with a Developer ID and notarized by Apple.\n\n' \
-              "$SWIFT" "$OS" "$RUN_URL"
+            printf 'Built with %s on %s, via %s.\n\nInstall **ReportMate-%s-signed.pkg**: signed with a Developer ID and notarized by Apple. The unsigned pkg beside it is for pipelines that re-sign with their own identity.\n\n' \
+              "$SWIFT" "$OS" "$RUN_URL" "$VERSION"
             printf '%s\n\n' "$AUTO_NOTES"
             printf '%s\n' '## Signing with your own Developer ID'
             printf '%s\n' ''
@@ -223,13 +257,13 @@ jobs:
 
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             gh release create "$TAG" \
-              release/ReportMate-*.pkg release/ReportMate-*.pkg.sha256 \
+              release/ReportMate-*.pkg release/ReportMate-*.sha256 \
               --target "$GITHUB_SHA" \
               --title "ReportMate $VERSION" \
               --notes-file "$NOTES_FILE"
           else
             gh release create "$TAG" \
-              release/ReportMate-*.pkg release/ReportMate-*.pkg.sha256 \
+              release/ReportMate-*.pkg release/ReportMate-*.sha256 \
               --title "ReportMate $VERSION" \
               --notes-file "$NOTES_FILE"
           fi
