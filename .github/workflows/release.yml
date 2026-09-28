@@ -1,7 +1,7 @@
 name: Release
 
 # Builds an UNSIGNED ReportMate-<version>.pkg and publishes it as a GitHub
-# release. ECU's Apple Developer ID material is intentionally NOT held here:
+# release. Apple Developer ID signing material is intentionally NOT held here:
 # the pkg ships unsigned and is signed + notarized downstream by the Munki
 # bootstrap pipeline (Azure DevOps), mirroring how reportmate-client-win ships
 # unsigned and is signed by the Cimian pipeline.
