@@ -243,6 +243,10 @@ public struct ReportMateConfiguration {
     /// without shipping a new client.
     public var compressPayload: Bool = true
 
+    /// Attempts per check-in, counting the first. A transport failure or a
+    /// transient server error is resent with backoff until this is spent.
+    public var maxRetryAttempts: Int = 3
+
     /// Per-query timeout for built-in osquery tables. Kills the osqueryi process
     /// if it does not return within this bound, so a single misbehaving table
     /// cannot block the rest of a module's collection.
@@ -278,6 +282,7 @@ public struct ReportMateConfiguration {
         if let validateSSL = other["ValidateSSL"] as? Bool { self.validateSSL = validateSSL }
         if let timeout = other["Timeout"] as? Int { self.timeout = timeout }
         if let compressPayload = other["CompressPayload"] as? Bool { self.compressPayload = compressPayload }
+        if let maxRetryAttempts = other["MaxRetryAttempts"] as? Int { self.maxRetryAttempts = maxRetryAttempts }
         if let queryTimeout = other["QueryTimeoutSeconds"] as? Double { self.queryTimeoutSeconds = queryTimeout }
         else if let queryTimeoutInt = other["QueryTimeoutSeconds"] as? Int { self.queryTimeoutSeconds = Double(queryTimeoutInt) }
         if let extQueryTimeout = other["ExtensionQueryTimeoutSeconds"] as? Double { self.extensionQueryTimeoutSeconds = extQueryTimeout }
