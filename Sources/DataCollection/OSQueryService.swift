@@ -5,6 +5,8 @@ import Foundation
 public class OSQueryService {
     private let configuration: ReportMateConfiguration
     private let osqueryPath: String
+    /// False when no candidate passed `BinaryTrust`; nothing at `osqueryPath` is ever run then.
+    private let osqueryTrusted: Bool
     /// Arguments that put the binary in shell mode. Empty for an `osqueryi` path; `-S` when the
     /// resolver fell back to the `osqueryd` inside the app bundle, which is the same binary.
     private let shellArgs: [String]
@@ -25,15 +27,26 @@ public class OSQueryService {
         "puppet_facts", "google_chrome_profiles", "file_lines"
     ]
     
-    public init(configuration: ReportMateConfiguration) {
+    public convenience init(configuration: ReportMateConfiguration) {
+        self.init(configuration: configuration, osqueryTrust: BinaryTrust.trustedOsquery, extensionTrust: BinaryTrust.trustedExtension)
+    }
+
+    /// Each trust function maps a candidate path to the real path that may be executed, or
+    /// `nil` when it must not be. Tests substitute ones that skip the signature check.
+    init(
+        configuration: ReportMateConfiguration,
+        osqueryTrust: (String) -> String?,
+        extensionTrust: (String) -> String?
+    ) {
         self.configuration = configuration
-        let binary = Self.resolveOsqueryBinary(configured: configuration.osqueryPath)
+        let binary = Self.resolveOsqueryBinary(configured: configuration.osqueryPath, trust: osqueryTrust)
         self.osqueryPath = binary.path
         self.shellArgs = binary.shellArgs
-        
+        self.osqueryTrusted = binary.trusted
+
         // Extension support - load macadmins extension for additional tables
         if configuration.extensionEnabled {
-            self.extensionPath = Self.resolveExtensionPath(configured: configuration.osqueryExtensionPath)
+            self.extensionPath = Self.resolveExtensionPath(configured: configuration.osqueryExtensionPath, trust: extensionTrust)
             if let path = self.extensionPath {
                 ConsoleFormatter.writeDebug("OSQuery extension enabled: \(path)")
             } else {
@@ -70,6 +83,7 @@ public class OSQueryService {
     /// hangs here would otherwise spend the module's whole budget before any fallback runs,
     /// and its answer is kept for the rest of the run so a broken install is probed only once.
     public func isAvailable() async -> Bool {
+        guard osqueryTrusted else { return false }
         let key = ([osqueryPath] + shellArgs).joined(separator: " ")
         if let known = Self.availability.value(for: key) {
             return known
@@ -153,29 +167,37 @@ public class OSQueryService {
     ///
     /// Tried in order: the configured path, the standard link, the pkg's intended location,
     /// then any osquery.app found under `searchRoot` — which is where a relocated install ends
-    /// up. Only paths that resolve to an executable file count, so a dangling link is skipped
-    /// instead of turning every query into a launch failure. The app bundle's `osqueryd` needs
-    /// `-S`, since that binary only acts as a shell when invoked by the `osqueryi` name.
+    /// up. A candidate counts only when `trust` accepts it, and the path returned is the real
+    /// path `trust` checked, never the link: the runner is root, so a dangling link, a binary
+    /// in a directory someone else can write, or one not signed by osquery is skipped rather
+    /// than run. The app bundle's `osqueryd` needs `-S`, since that binary only acts as a shell
+    /// when invoked by the `osqueryi` name.
     static func resolveOsqueryBinary(
         configured: String,
         fallbacks: [String] = ["/usr/local/bin/osqueryi", bundledOsquerydPath],
         searchRoot: String = "/opt",
+        trust: (String) -> String? = BinaryTrust.trustedOsquery,
         fileManager: FileManager = .default
-    ) -> (path: String, shellArgs: [String]) {
+    ) -> (path: String, shellArgs: [String], trusted: Bool) {
         let listed = [configured] + fallbacks
-        let found = listed.first { fileManager.isExecutableFile(atPath: $0) }
+        if let candidate = trust(configured) {
+            return (candidate, shellArgs(for: candidate), true)
+        }
+        let found = fallbacks.lazy.compactMap(trust).first
             ?? discovered.value(for: searchRoot) { discoverOsqueryBinaries(under: searchRoot, fileManager: fileManager) }
-                .first { fileManager.isExecutableFile(atPath: $0) }
+                .lazy.compactMap(trust).first
 
         guard let candidate = found else {
-            warnOnce("No runnable osquery found (tried \(listed.joined(separator: ", ")) and \(searchRoot)); using bash collection only")
-            return (configured, [])
+            warnOnce("No trusted osquery found (tried \(listed.joined(separator: ", ")) and \(searchRoot)); using bash collection only")
+            return (configured, [], false)
         }
-        if candidate != configured {
-            warnOnce("osquery at \(configured) is missing or a broken link; using \(candidate)")
-        }
+        warnOnce("osquery at \(configured) is missing or failed ownership or signature checks; using \(candidate)")
+        return (candidate, shellArgs(for: candidate), true)
+    }
+
+    private static func shellArgs(for candidate: String) -> [String] {
         let isShellName = (candidate as NSString).lastPathComponent == "osqueryi"
-        return (candidate, isShellName ? [] : ["-S"])
+        return isShellName ? [] : ["-S"]
     }
 
     /// Discovery results per search root, so a device needing the search pays for it once a run
@@ -235,54 +257,33 @@ public class OSQueryService {
         if isNew { ConsoleFormatter.writeWarning(message) }
     }
 
-    /// Resolve extension path from configuration or bundled location
-    private static func resolveExtensionPath(configured: String?) -> String? {
-        // 1. Try configured path (highest priority - user override)
-        if let configured = configured, FileManager.default.fileExists(atPath: configured) {
-            return configured
+    /// Resolve the extension from configuration or the installed and bundled locations.
+    ///
+    /// osquery runs the extension as its own child, so it gets the same trust bar as osquery:
+    /// the first candidate `trust` accepts wins, as the real path it checked. There is no
+    /// working-directory lookup; a root process must not run code from wherever it was started.
+    private static func resolveExtensionPath(configured: String?, trust: (String) -> String?) -> String? {
+        var candidates: [String] = []
+        if let configured = configured, !configured.isEmpty {
+            candidates.append(configured)
         }
-        
-        // 2. Try standard installation location FIRST (installed by .pkg)
-        // This has proper root ownership which osquery requires for security
-        let installedPath = "/usr/local/reportmate/macadmins_extension.ext"
-        if FileManager.default.fileExists(atPath: installedPath) {
-            return installedPath
-        }
-        
-        // 3. Try bundled in Resources/extensions/ (SPM executable bundle)
-        // Fallback for development - may have permission warnings
-        // For SPM, the bundle is at .build/release/<Target>_<Target>.bundle/Resources/
+        // Installed by the pkg, root-owned, which osquery itself requires when running as root.
+        candidates.append("/usr/local/reportmate/macadmins_extension.ext")
+        // Development builds: the SPM resource bundle, found directly or beside the executable.
         if let bundlePath = Bundle.main.resourcePath {
-            let bundledExt = "\(bundlePath)/extensions/macadmins_extension.ext"
-            if FileManager.default.fileExists(atPath: bundledExt) {
-                return bundledExt
+            candidates.append("\(bundlePath)/extensions/macadmins_extension.ext")
+        }
+        if let executablePath = Bundle.main.executablePath {
+            let executableDir = (executablePath as NSString).deletingLastPathComponent
+            candidates.append("\(executableDir)/ReportMate_ReportMate.bundle/Resources/extensions/macadmins_extension.ext")
+        }
+
+        for candidate in candidates where FileManager.default.fileExists(atPath: candidate) {
+            if let trusted = trust(candidate) {
+                return trusted
             }
+            warnOnce("osquery extension at \(candidate) failed ownership or signature checks; skipping it")
         }
-        
-        // 4. Try relative to executable (for development builds)
-        let executablePath = Bundle.main.executablePath ?? ""
-        let executableDir = (executablePath as NSString).deletingLastPathComponent
-        let relativeToExec = "\(executableDir)/ReportMate_ReportMate.bundle/Resources/extensions/macadmins_extension.ext"
-        if FileManager.default.fileExists(atPath: relativeToExec) {
-            return relativeToExec
-        }
-
-        // 5. Try development source paths (for local builds)
-        let devSourcePaths = [
-            // Relative to working directory
-            "Sources/Resources/extensions/macadmins_extension.ext",
-            "../Sources/Resources/extensions/macadmins_extension.ext"
-        ]
-
-        // Get current working directory to try relative paths
-        let cwd = FileManager.default.currentDirectoryPath
-        for devPath in devSourcePaths {
-            let fullPath = "\(cwd)/\(devPath)"
-            if FileManager.default.fileExists(atPath: fullPath) {
-                return fullPath
-            }
-        }
-
         return nil
     }
     
@@ -298,6 +299,7 @@ public class OSQueryService {
     /// do online I/O like `sofa_unpatched_cves` fetching the SOFA feed — from
     /// blocking the rest of a module's collection indefinitely.
     public func executeQuery(_ query: String) async throws -> [[String: Any]] {
+        guard osqueryTrusted else { throw OSQueryError.untrustedBinary(osqueryPath) }
         let useExtension = extensionPath != nil && Self.queryUsesExtensionTables(query)
         let timeout = useExtension
             ? configuration.extensionQueryTimeoutSeconds
@@ -489,28 +491,30 @@ public class OSQueryService {
         return box.rows
     }
     
+    /// Seconds the macadmins extension gets to register its tables before the query is sent.
+    static let extensionRegistrationDelay: TimeInterval = 7
+
     /// Execute an osquery query with extension support.
-    /// Uses a bash subshell that sleeps 7s before sending the query, giving the
-    /// macadmins extension time to register its tables. The bash process is the
-    /// one we kill on timeout — terminating it brings down the osqueryi child
-    /// and unblocks the pipe reads here.
+    /// osquery is launched directly with an argument array — no shell, so no path or query
+    /// text is ever parsed as a command. The query reaches it on stdin only after
+    /// `extensionRegistrationDelay`, giving the macadmins extension time to register its
+    /// tables. On timeout osquery itself is killed, which closes the pipes read here.
     private static func runExtensionQuery(_ query: String, osqueryPath: String, shellArgs: [String], extensionPath: String, processBox: ProcessBox) async throws -> [[String: Any]] {
         let box = try await Task.detached(priority: .userInitiated) { () throws -> QueryRows in
             let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/bin/bash")
+            task.executableURL = URL(fileURLWithPath: osqueryPath)
+            task.arguments = shellArgs + ["--json", "--extension", extensionPath, "--extensions_timeout", "15"]
 
-            let escapedQuery = query.replacingOccurrences(of: "'", with: "'\"'\"'")
-
-            let script = """
-            (sleep 7 && echo '\(escapedQuery)' && echo '.exit') | "\(osqueryPath)" \(shellArgs.joined(separator: " ")) --json --extension "\(extensionPath)" --extensions_timeout 15
-            """
-
-            task.arguments = ["-c", script]
-
+            let inputPipe = Pipe()
             let outputPipe = Pipe()
             let errorPipe = Pipe()
+            task.standardInput = inputPipe
             task.standardOutput = outputPipe
             task.standardError = errorPipe
+
+            // A query sent after osquery has already died must fail the write, not raise
+            // SIGPIPE and take the whole runner down with it.
+            _ = fcntl(inputPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
 
             do {
                 try task.run()
@@ -518,6 +522,13 @@ public class OSQueryService {
                 throw OSQueryError.processLaunchFailed(error)
             }
             processBox.attach(task)
+
+            let input = inputPipe.fileHandleForWriting
+            let script = Data("\(query)\n.exit\n".utf8)
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + extensionRegistrationDelay) {
+                try? input.write(contentsOf: script)
+                try? input.close()
+            }
 
             let (outputData, errorData) = Self.drainConcurrently(
                 stdout: outputPipe.fileHandleForReading,
@@ -615,6 +626,7 @@ public class OSQueryService {
     
     /// Get osquery version
     public func getVersion() async throws -> String {
+        guard osqueryTrusted else { throw OSQueryError.untrustedBinary(osqueryPath) }
         return try await withCheckedThrowingContinuation { continuation in
             let task = Process()
             task.executableURL = URL(fileURLWithPath: osqueryPath)
@@ -654,6 +666,7 @@ public enum OSQueryError: Error, LocalizedError {
     case invalidOutput(String)
     case jsonDecodingFailed(Error)
     case timeout(TimeInterval)
+    case untrustedBinary(String)
 
     public var errorDescription: String? {
         switch self {
@@ -667,6 +680,8 @@ public enum OSQueryError: Error, LocalizedError {
             return "Failed to decode JSON output: \(error.localizedDescription)"
         case .timeout(let seconds):
             return "OSQuery exceeded timeout of \(String(format: "%.0fs", seconds))"
+        case .untrustedBinary(let path):
+            return "No trusted osquery binary (refusing to run \(path))"
         }
     }
 }

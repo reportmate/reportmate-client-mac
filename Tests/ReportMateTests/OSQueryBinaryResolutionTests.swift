@@ -5,18 +5,26 @@ import XCTest
 final class OSQueryBinaryResolutionTests: XCTestCase {
     private var dir: URL!
 
+    /// The ownership and permission checks without the signature check, so shell-script
+    /// stand-ins for osquery can be resolved.
+    private let pathOnly: (String) -> String? = { BinaryTrust.trustedRealPath($0) }
+
     override func setUpWithError() throws {
-        dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let created = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: created, withIntermediateDirectories: true)
+        // The temporary directory sits behind the /var link; resolved paths come back real.
+        let real = try XCTUnwrap(realpath(created.path, nil))
+        dir = URL(fileURLWithPath: String(cString: real))
+        free(real)
     }
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: dir)
     }
 
-    private func executable(_ name: String) throws -> String {
+    private func executable(_ name: String, script: String = "#!/bin/sh\n") throws -> String {
         let path = dir.appendingPathComponent(name).path
-        FileManager.default.createFile(atPath: path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+        FileManager.default.createFile(atPath: path, contents: Data(script.utf8), attributes: [.posixPermissions: 0o755])
         return path
     }
 
@@ -27,17 +35,28 @@ final class OSQueryBinaryResolutionTests: XCTestCase {
         return path
     }
 
+    private func configuration(osquery: String, extensionPath: String? = nil) -> ReportMateConfiguration {
+        var configuration = ReportMateConfiguration()
+        configuration.osqueryPath = osquery
+        configuration.extensionEnabled = extensionPath != nil
+        configuration.osqueryExtensionPath = extensionPath
+        return configuration
+    }
+
+    // MARK: Resolution
+
     func testWorkingConfiguredPathIsUsedAsIs() throws {
         let configured = try executable("osqueryi")
-        let resolved = OSQueryService.resolveOsqueryBinary(configured: configured, fallbacks: [], searchRoot: dir.path)
+        let resolved = OSQueryService.resolveOsqueryBinary(configured: configured, fallbacks: [], searchRoot: dir.path, trust: pathOnly)
         XCTAssertEqual(resolved.path, configured)
         XCTAssertEqual(resolved.shellArgs, [])
+        XCTAssertTrue(resolved.trusted)
     }
 
     func testBrokenLinkFallsBackToAppBundleBinaryInShellMode() throws {
         let configured = try danglingLink("osqueryi")
         let osqueryd = try executable("osqueryd")
-        let resolved = OSQueryService.resolveOsqueryBinary(configured: configured, fallbacks: [osqueryd], searchRoot: dir.path)
+        let resolved = OSQueryService.resolveOsqueryBinary(configured: configured, fallbacks: [osqueryd], searchRoot: dir.path, trust: pathOnly)
         XCTAssertEqual(resolved.path, osqueryd)
         XCTAssertEqual(resolved.shellArgs, ["-S"])
     }
@@ -46,21 +65,29 @@ final class OSQueryBinaryResolutionTests: XCTestCase {
         let configured = try danglingLink("broken-osqueryi")
         let other = try executable("osqueryi")
         let osqueryd = try executable("osqueryd")
-        let resolved = OSQueryService.resolveOsqueryBinary(configured: configured, fallbacks: [other, osqueryd], searchRoot: dir.path)
+        let resolved = OSQueryService.resolveOsqueryBinary(configured: configured, fallbacks: [other, osqueryd], searchRoot: dir.path, trust: pathOnly)
         XCTAssertEqual(resolved.path, other)
         XCTAssertEqual(resolved.shellArgs, [])
     }
 
+    /// The standard `osqueryi` is a link to the bundle's `osqueryd`. The real path is what
+    /// runs, and that binary only acts as a shell with `-S`.
+    func testLinkResolvesToRealPathInShellMode() throws {
+        let osqueryd = try executable("osqueryd")
+        let link = dir.appendingPathComponent("osqueryi").path
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: osqueryd)
+        let resolved = OSQueryService.resolveOsqueryBinary(configured: link, fallbacks: [], searchRoot: dir.path, trust: pathOnly)
+        XCTAssertEqual(resolved.path, osqueryd)
+        XCTAssertEqual(resolved.shellArgs, ["-S"])
+    }
+
     /// A binary that never answers must not hold up the bash fallback past the probe budget.
     func testHungOsqueryReportsUnavailableWithinProbeBudget() async throws {
-        let hung = dir.appendingPathComponent("osqueryi").path
-        FileManager.default.createFile(atPath: hung, contents: Data("#!/bin/sh\nexec sleep 120\n".utf8), attributes: [.posixPermissions: 0o755])
-        var configuration = ReportMateConfiguration()
-        configuration.osqueryPath = hung
-        configuration.extensionEnabled = false
+        let hung = try executable("osqueryi", script: "#!/bin/sh\nexec sleep 120\n")
+        let service = OSQueryService(configuration: configuration(osquery: hung), osqueryTrust: pathOnly, extensionTrust: pathOnly)
 
         let start = Date()
-        let available = await OSQueryService(configuration: configuration).isAvailable()
+        let available = await service.isAvailable()
         XCTAssertFalse(available)
         XCTAssertLessThan(Date().timeIntervalSince(start), OSQueryService.availabilityProbeTimeout + 5)
     }
@@ -77,15 +104,103 @@ final class OSQueryBinaryResolutionTests: XCTestCase {
         let resolved = OSQueryService.resolveOsqueryBinary(
             configured: configured,
             fallbacks: [dir.appendingPathComponent("lib/osquery.app/Contents/MacOS/osqueryd").path],
-            searchRoot: dir.path
+            searchRoot: dir.path,
+            trust: pathOnly
         )
-        XCTAssertEqual(URL(fileURLWithPath: resolved.path).resolvingSymlinksInPath(), URL(fileURLWithPath: relocated).resolvingSymlinksInPath())
+        XCTAssertEqual(resolved.path, relocated)
         XCTAssertEqual(resolved.shellArgs, ["-S"])
     }
 
     func testNothingRunnableKeepsConfiguredPath() throws {
         let configured = try danglingLink("osqueryi")
-        let resolved = OSQueryService.resolveOsqueryBinary(configured: configured, fallbacks: [dir.appendingPathComponent("absent").path], searchRoot: dir.path)
+        let resolved = OSQueryService.resolveOsqueryBinary(configured: configured, fallbacks: [dir.appendingPathComponent("absent").path], searchRoot: dir.path, trust: pathOnly)
         XCTAssertEqual(resolved.path, configured)
+        XCTAssertFalse(resolved.trusted)
+    }
+
+    // MARK: Trust
+
+    /// An osquery.app planted anywhere under the search root is only a candidate; without
+    /// osquery's signature it is never chosen.
+    func testUnsignedPlantedAppIsNeverChosen() throws {
+        let macOS = dir.appendingPathComponent("planted/osquery.app/Contents/MacOS")
+        try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: macOS.appendingPathComponent("osqueryd").path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+
+        let resolved = OSQueryService.resolveOsqueryBinary(configured: try danglingLink("osqueryi"), fallbacks: [], searchRoot: dir.path)
+        XCTAssertFalse(resolved.trusted)
+    }
+
+    func testWorldWritableDirectoryIsRejected() throws {
+        let open = dir.appendingPathComponent("open")
+        try FileManager.default.createDirectory(at: open, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o777])
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: open.path)
+        let binary = open.appendingPathComponent("osqueryi").path
+        FileManager.default.createFile(atPath: binary, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+        XCTAssertNil(BinaryTrust.trustedRealPath(binary))
+    }
+
+    func testGroupWritableBinaryIsRejected() throws {
+        let binary = try executable("osqueryi")
+        try FileManager.default.setAttributes([.posixPermissions: 0o775], ofItemAtPath: binary)
+        XCTAssertNil(BinaryTrust.trustedRealPath(binary))
+    }
+
+    func testBinaryOwnedBySomeoneElseIsRejected() throws {
+        let binary = try executable("osqueryi")
+        XCTAssertNotNil(BinaryTrust.trustedRealPath(binary))
+        XCTAssertNil(BinaryTrust.trustedRealPath(binary, allowedOwners: [0]))
+    }
+
+    /// A link in a safe directory that points into an unsafe one is judged by its target.
+    func testLinkIntoWritableDirectoryIsRejected() throws {
+        let open = dir.appendingPathComponent("open")
+        try FileManager.default.createDirectory(at: open, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: open.path)
+        let target = open.appendingPathComponent("osqueryd").path
+        FileManager.default.createFile(atPath: target, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+        let link = dir.appendingPathComponent("osqueryi").path
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: target)
+        XCTAssertNil(BinaryTrust.trustedRealPath(link))
+    }
+
+    func testInstalledOsqueryIsTrusted() throws {
+        let installed = OSQueryService.bundledOsquerydPath
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: installed), "osquery is not installed")
+        XCTAssertEqual(BinaryTrust.trustedOsquery("/usr/local/bin/osqueryi"), installed)
+    }
+
+    /// An untrusted binary is never launched, not even for the availability probe.
+    func testUntrustedBinaryIsNeverExecuted() async throws {
+        let marker = dir.appendingPathComponent("ran").path
+        let binary = try executable("osqueryi", script: "#!/bin/sh\ntouch '\(marker)'\necho '[]'\n")
+        let service = OSQueryService(configuration: configuration(osquery: binary), osqueryTrust: { _ in nil }, extensionTrust: { _ in nil })
+
+        let available = await service.isAvailable()
+        XCTAssertFalse(available)
+        do {
+            _ = try await service.executeQuery("SELECT 1")
+            XCTFail("an untrusted binary must not be queried")
+        } catch {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker))
+    }
+
+    /// Extension queries reach osquery on stdin with no shell in between, so quotes and
+    /// command substitutions in the query or the paths stay inert text.
+    func testExtensionQueryIsPassedWithoutAShell() async throws {
+        let marker = dir.appendingPathComponent("injected").path
+        let received = dir.appendingPathComponent("received").path
+        let binary = try executable("osqueryi", script: "#!/bin/sh\ncat > '\(received)'\necho '[{\"ok\":\"1\"}]'\n")
+        let extensionPath = try executable("ext $(touch \(marker)).ext")
+        let query = "SELECT * FROM mdm WHERE x = '$(touch \(marker))' OR y = '`touch \(marker)`'; touch \(marker)"
+
+        var config = configuration(osquery: binary, extensionPath: extensionPath)
+        config.extensionQueryTimeoutSeconds = 30
+        let service = OSQueryService(configuration: config, osqueryTrust: pathOnly, extensionTrust: pathOnly)
+
+        let rows = try await service.executeQuery(query)
+        XCTAssertEqual(rows.first?["ok"] as? String, "1")
+        XCTAssertEqual(try String(contentsOfFile: received, encoding: .utf8), "\(query)\n.exit\n")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker))
     }
 }
