@@ -1082,7 +1082,7 @@ EOF
     # APP ICON (Liquid Glass / Tahoe icon pipeline for macOS Sequoia+)
     # ═══════════════════════════════════════════════════════════════════════════
 
-    ICON_SOURCE="${RESOURCES_DIR}/ReportMate.icon"
+    ICON_SOURCE="${SCRIPT_DIR}/Resources/ReportMate.icon"
     ICON_BUILD_DIR="${BUILD_DIR}/actool-out"
     mkdir -p "$ICON_BUILD_DIR"
 
@@ -1116,8 +1116,8 @@ EOF
             log_success "Icon compiled: ReportMate.icns (legacy fallback)"
         fi
     else
-        log_warn "Icon bundle not found at: ${ICON_SOURCE}"
-        log_warn "Build will continue without an app icon. Create build/resources/ReportMate.icon to add one."
+        log_error "Icon bundle not found at: ${ICON_SOURCE}"
+        exit 1
     fi
 
     # NOTE: The preference plist is NOT included in the package payload.
