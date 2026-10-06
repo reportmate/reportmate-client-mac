@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import ReportMateXPC
 
 struct LogView: View {
     @Bindable var store: LogFileStore
@@ -145,12 +146,16 @@ struct LogView: View {
 
     // MARK: - Log Line Coloring
 
+    /// Log files are written as "[yyyy-MM-dd HH:mm:ss] LEVEL message";
+    /// LogLineLevel reads that and the console's "[LEVEL]" tags alike.
     private func colorForLogLine(_ line: String) -> Color {
-        if line.contains("[ERROR]") { return .red }
-        if line.contains("[WARNING]") { return .orange }
-        if line.contains("[SUCCESS]") { return .green }
-        if line.contains("[DEBUG]") { return .gray }
-        if line.hasPrefix("===") { return .cyan }
-        return .white
+        switch LogLineLevel.classify(line) {
+        case .error: .red
+        case .warning: .orange
+        case .success: .green
+        case .debug: .gray
+        case .header: .cyan
+        case .info: .white
+        }
     }
 }

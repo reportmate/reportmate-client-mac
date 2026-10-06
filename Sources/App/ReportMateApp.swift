@@ -9,9 +9,6 @@ struct ReportMateApp: App {
             ContentView()
                 .environment(xpcClient)
                 .frame(minWidth: 700, minHeight: 500)
-                .onAppear {
-                    xpcClient.setup()
-                }
         }
         .windowResizability(.contentSize)
         .defaultSize(width: 850, height: 748)

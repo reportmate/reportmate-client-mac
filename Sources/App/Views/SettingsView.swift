@@ -45,28 +45,9 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                // App info header
-                VStack(spacing: 6) {
-                    Image(nsImage: NSApp.applicationIconImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 56, height: 56)
-                    Text("Managed Reports Runner")
-                        .font(.title2.bold())
-                    Text("Device telemetry collection & reporting")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("v\(marketingVersion) (\(buildNumber))")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    HStack(spacing: 12) {
-                        Link("Documentation", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/wiki")!)
-                        Link("Report Issue", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/issues")!)
-                    }
-                    .font(.caption)
-                }
-                .padding(.top, 4)
-                .padding(.bottom, 12)
+                appInfoHeader
+
+                Divider()
 
                 // Two-column layout — boxes stack within each column
                 HStack(alignment: .top, spacing: 16) {
@@ -86,8 +67,11 @@ struct SettingsView: View {
                 }
 
                 HStack {
-                    saveStatusLabel
+                    Text("v\(marketingVersion) (\(buildNumber))")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                     Spacer()
+                    saveStatusLabel
                 }
                 .padding(.top, 4)
             }
@@ -97,6 +81,34 @@ struct SettingsView: View {
             viewModel.configure(client: xpcClient)
             viewModel.load()
         }
+    }
+
+    // MARK: - App Info Header
+
+    @ViewBuilder
+    private var appInfoHeader: some View {
+        VStack(spacing: 8) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 72, height: 72)
+
+            Text("Managed Reports Runner")
+                .font(.largeTitle.bold())
+
+            Text("Device telemetry collection and reporting for managed fleets.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            HStack(spacing: 16) {
+                Link("Documentation", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/wiki")!)
+                    .font(.caption)
+                Link("Report Issue", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/issues")!)
+                    .font(.caption)
+            }
+        }
+        .padding(.top, 8)
     }
 
     // MARK: - Auto-Save Status

@@ -95,6 +95,11 @@ let package = Package(
             path: "Sources/Helper"
         ),
         .testTarget(
+            name: "ReportMateXPCTests",
+            dependencies: ["ReportMateXPC"],
+            path: "Tests/ReportMateXPCTests"
+        ),
+        .testTarget(
             name: "ReportMateLoggingTests",
             dependencies: ["ReportMateLogging"],
             path: "Tests/ReportMateLoggingTests"

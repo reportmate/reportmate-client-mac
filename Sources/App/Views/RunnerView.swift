@@ -172,19 +172,24 @@ struct RunView: View {
 
     @ViewBuilder
     private var statusIndicator: some View {
-        if let exitCode = xpcClient.lastExitCode {
-            if exitCode == 0 {
-                Label("Completed", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
+        if let exitCode = xpcClient.lastExitCode, !xpcClient.isRunning {
+            if exitCode != 0 {
                 Label("Failed (exit \(exitCode))", systemImage: "xmark.circle.fill")
                     .foregroundStyle(.red)
+            } else if errorCount > 0 {
+                Label("Completed with \(errorCount) error\(errorCount == 1 ? "" : "s")", systemImage: "xmark.circle.fill")
+                    .foregroundStyle(.red)
+            } else if warningCount > 0 {
+                Label("Completed with \(warningCount) warning\(warningCount == 1 ? "" : "s")", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+            } else {
+                Label("Completed", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
             }
         }
-
         if !xpcClient.helperAvailable && !xpcClient.isRunning {
-            if xpcClient.helperStatus == .requiresApproval {
-                Label("Approve helper in System Settings > Login Items", systemImage: "exclamationmark.triangle.fill")
+            if xpcClient.helperStatus == .notRegistered {
+                Label("Helper not installed: reinstall the package to run as root", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .font(.caption)
             } else {
@@ -194,6 +199,9 @@ struct RunView: View {
             }
         }
     }
+
+    private var errorCount: Int { xpcClient.outputLines.filter { $0.level == .error }.count }
+    private var warningCount: Int { xpcClient.outputLines.filter { $0.level == .warning }.count }
 
     // MARK: - Helpers
 }
