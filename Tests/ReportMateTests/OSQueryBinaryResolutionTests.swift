@@ -189,9 +189,19 @@ final class OSQueryBinaryResolutionTests: XCTestCase {
     /// command substitutions in the query or the paths stay inert text.
     func testExtensionQueryIsPassedWithoutAShell() async throws {
         let marker = dir.appendingPathComponent("injected").path
+        // A file name cannot hold a slash, so the extension's own substitution names a
+        // relative marker; a shell would create it in the working directory it inherited.
+        let relativeMarker = "injected-\(UUID().uuidString)"
+        let relativeMarkerPaths = [dir.path, FileManager.default.currentDirectoryPath]
+            .map { ($0 as NSString).appendingPathComponent(relativeMarker) }
         let received = dir.appendingPathComponent("received").path
-        let binary = try executable("osqueryi", script: "#!/bin/sh\ncat > '\(received)'\necho '[{\"ok\":\"1\"}]'\n")
-        let extensionPath = try executable("ext $(touch \(marker)).ext")
+        let arguments = dir.appendingPathComponent("arguments").path
+        let binary = try executable(
+            "osqueryi",
+            script: "#!/bin/sh\nprintf '%s\\n' \"$@\" > '\(arguments)'\ncat > '\(received)'\necho '[{\"ok\":\"1\"}]'\n"
+        )
+        let extensionPath = try executable("ext $(touch \(relativeMarker)) `touch \(relativeMarker)`.ext")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: extensionPath))
         let query = "SELECT * FROM mdm WHERE x = '$(touch \(marker))' OR y = '`touch \(marker)`'; touch \(marker)"
 
         var config = configuration(osquery: binary, extensionPath: extensionPath)
@@ -200,7 +210,13 @@ final class OSQueryBinaryResolutionTests: XCTestCase {
 
         let rows = try await service.executeQuery(query)
         XCTAssertEqual(rows.first?["ok"] as? String, "1")
+        // The configured extension, not one installed on the host, is what osquery was given.
+        let passed = try String(contentsOfFile: arguments, encoding: .utf8).split(separator: "\n").map(String.init)
+        XCTAssertEqual(passed.firstIndex(of: "--extension").map { passed[$0 + 1] }, extensionPath)
         XCTAssertEqual(try String(contentsOfFile: received, encoding: .utf8), "\(query)\n.exit\n")
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker))
+        for path in relativeMarkerPaths {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        }
     }
 }
