@@ -48,10 +48,10 @@ public class ReportMateCore {
         do {
             // Update configuration if overrides provided
             if let deviceId = deviceId {
-                configurationManager.setOverride(key: "deviceId", value: deviceId)
+                configurationManager.setOverride(key: "DeviceId", value: deviceId)
             }
             if let apiUrl = apiUrl {
-                configurationManager.setOverride(key: "apiUrl", value: apiUrl)
+                configurationManager.setOverride(key: "ApiUrl", value: apiUrl)
             }
             
             var collectedData: [String: Any] = [:]

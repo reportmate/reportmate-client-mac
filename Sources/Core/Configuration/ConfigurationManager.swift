@@ -1,7 +1,7 @@
 import Foundation
 
 /// Configuration manager for ReportMate macOS client
-/// Handles configuration hierarchy: CLI args > Environment > Config Profiles > System plist > User plist > Defaults
+/// Handles configuration hierarchy: CLI args > Config Profiles > System plist > Environment > User plist > Defaults
 public class ConfigurationManager {
     public private(set) var configuration: ReportMateConfiguration
     private var overrides: [String: Any] = [:]
@@ -65,77 +65,82 @@ public class ConfigurationManager {
     }
     
     // MARK: - Private Configuration Loading
-    
+
+    /// Preference domain read for machine settings and configuration-profile policy.
+    public static let preferencesDomain = "com.github.reportmate"
+
+    /// Every key ReportMateConfiguration.merge understands. Each one can be set by a
+    /// configuration profile, and a profile-forced value beats every other source.
+    public static let settingKeys = [
+        "ApiUrl", "DeviceId", "Passphrase", "ApiKey",
+        "CollectionInterval", "LogLevel", "EnabledModules",
+        "OsqueryPath", "OsqueryExtensionPath", "ExtensionEnabled", "UseAltSystemInfo",
+        "ValidateSSL", "Timeout", "CompressPayload", "MaxRetryAttempts",
+        "QueryTimeoutSeconds", "ExtensionQueryTimeoutSeconds", "ModuleTimeoutSeconds",
+        "StorageMode",
+    ]
+
     private static func loadConfiguration(overrides: [String: Any] = [:]) throws -> ReportMateConfiguration {
+        resolve(
+            userPlist: loadUserPlist(),
+            environment: loadEnvironmentVariables(),
+            systemPlist: loadSystemPlist(),
+            policy: loadConfigurationProfiles(),
+            overrides: overrides
+        )
+    }
+
+    /// Layers the configuration sources, lowest first:
+    /// defaults < user plist < environment < /Library/Preferences < configuration profile < one-off overrides.
+    /// Overrides are the explicit command-line flags for this run (--api-url, --device-id, --storage-mode).
+    /// Environment variables sit with the machine settings and never beat a profile.
+    static func resolve(
+        userPlist: [String: Any]?,
+        environment: [String: Any],
+        systemPlist: [String: Any]?,
+        policy: [String: Any]?,
+        overrides: [String: Any]
+    ) -> ReportMateConfiguration {
         var config = ReportMateConfiguration()
-        
-        // 1. Load defaults (already set in init)
-        
-        // 2. Load user plist
-        if let userConfig = loadUserPlist() {
-            config.merge(with: userConfig)
-        }
-        
-        // 3. Load system plist  
-        if let systemConfig = loadSystemPlist() {
-            config.merge(with: systemConfig)
-        }
-        
-        // 4. Load Configuration Profiles
-        if let profileConfig = loadConfigurationProfiles() {
-            config.merge(with: profileConfig)
-        }
-        
-        // 5. Load environment variables
-        config.merge(with: loadEnvironmentVariables())
-        
-        // 6. Apply runtime overrides
+        if let userPlist { config.merge(with: userPlist) }
+        config.merge(with: environment)
+        if let systemPlist { config.merge(with: systemPlist) }
+        if let policy { config.merge(with: policy) }
         config.merge(with: overrides)
-        
         return config
     }
-    
+
     private static func loadUserPlist() -> [String: Any]? {
         let userConfigPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Managed Reports/reportmate.plist")
-        
+
         return loadPlist(at: userConfigPath)
     }
-    
+
     private static func loadSystemPlist() -> [String: Any]? {
         let systemConfigPath = URL(fileURLWithPath: "/Library/Preferences/com.github.reportmate.plist")
         return loadPlist(at: systemConfigPath)
     }
-    
+
+    /// Values a configuration profile forces, for every setting key.
     private static func loadConfigurationProfiles() -> [String: Any]? {
-        // Check for Configuration Profile managed preferences
-        let profileDefaults = UserDefaults(suiteName: "com.github.reportmate")
-        
-        guard let profileDefaults = profileDefaults else { return nil }
-        
+        policyValues(
+            isForced: { CFPreferencesAppValueIsForced($0 as CFString, preferencesDomain as CFString) },
+            read: { CFPreferencesCopyAppValue($0 as CFString, preferencesDomain as CFString) }
+        )
+    }
+
+    /// Collects the forced value of every setting key; nil when a profile forces none.
+    static func policyValues(isForced: (String) -> Bool, read: (String) -> Any?) -> [String: Any]? {
         var config: [String: Any] = [:]
-        
-        // Map Configuration Profile keys to internal configuration
-        // Passphrase is for device-to-api authentication
-        let keyMappings: [String: String] = [
-            "ApiUrl": "ApiUrl",
-            "DeviceId": "DeviceId",
-            "Passphrase": "Passphrase",
-            "ApiKey": "ApiKey",
-            "CollectionInterval": "CollectionInterval",
-            "LogLevel": "LogLevel",
-            "EnabledModules": "EnabledModules"
-        ]
-        
-        for (profileKey, configKey) in keyMappings {
-            if let value = profileDefaults.object(forKey: profileKey) {
-                config[configKey] = value
+        for key in settingKeys where isForced(key) {
+            if let value = read(key) {
+                config[key] = value
             }
         }
-        
         return config.isEmpty ? nil : config
     }
-    
+
     private static func loadEnvironmentVariables() -> [String: Any] {
         var config: [String: Any] = [:]
         let environment = ProcessInfo.processInfo.environment
