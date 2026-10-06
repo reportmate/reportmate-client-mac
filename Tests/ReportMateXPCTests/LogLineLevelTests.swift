@@ -10,6 +10,13 @@ final class LogLineLevelTests: XCTestCase {
         XCTAssertEqual(LogLineLevel.classify("[2026-10-06 09:41:00] INFO  Collecting hardware"), .info)
     }
 
+    func testSwiftLogStreamLines() {
+        XCTAssertEqual(LogLineLevel.classify("2026-10-06T17:42:21+0000 error reportmate.client: [ReportMate] Execution failed"), .error)
+        XCTAssertEqual(LogLineLevel.classify("2026-10-06T17:42:21+0000 warning reportmate.client: slow"), .warning)
+        XCTAssertEqual(LogLineLevel.classify("2026-10-06T17:42:21+0000 info reportmate.client: [ReportMate] Data cached"), .info)
+        XCTAssertEqual(LogLineLevel.classify("2026-10-06T17:42:21+0000 critical reportmate.client: boom"), .error)
+    }
+
     func testConsoleTags() {
         XCTAssertEqual(LogLineLevel.classify("[ERROR] CLI binary not found"), .error)
         XCTAssertEqual(LogLineLevel.classify("[WARN] Retrying"), .warning)

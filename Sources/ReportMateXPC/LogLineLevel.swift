@@ -17,6 +17,7 @@ public enum LogLineLevel: Sendable, Equatable {
     public static func classify(_ line: String) -> LogLineLevel {
         if let level = tagLevel(line) { return level }
         if let level = fileLevel(line) { return level }
+        if let level = streamLevel(line) { return level }
         if line.hasPrefix("ERROR:") || line.contains("✗") { return .error }
         if line.hasPrefix("WARNING:") || line.contains("⚠") { return .warning }
         if line.contains("✓") { return .success }
@@ -29,6 +30,15 @@ public enum LogLineLevel: Sendable, Equatable {
         guard line.hasPrefix("["), let close = line.firstIndex(of: "]") else { return nil }
         let rest = line[line.index(after: close)...].drop(while: { $0 == " " })
         let word = rest.prefix(while: { $0 != " " })
+        return level(named: String(word))
+    }
+
+    /// swift-log's stream handler: "2026-10-06T17:42:21+0000 error label: message".
+    private static func streamLevel(_ line: String) -> LogLineLevel? {
+        guard line.count > 20, line.first?.isNumber == true,
+              let space = line.firstIndex(of: " "),
+              line[..<space].contains("T") else { return nil }
+        let word = line[line.index(after: space)...].prefix(while: { $0 != " " })
         return level(named: String(word))
     }
 
