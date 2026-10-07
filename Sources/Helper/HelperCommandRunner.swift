@@ -112,10 +112,17 @@ final class HelperCommandRunner: NSObject, HelperXPCProtocol, @unchecked Sendabl
 
     /// Writes one key to /Library/Preferences/<domain>.plist (any user, any
     /// host), the file the runner reads below a configuration profile. Only
-    /// the keys the Prefs tab edits, in the ReportMate domain, are accepted.
+    /// the keys the Prefs tab edits, in the ReportMate domain, are accepted,
+    /// and never one a configuration profile manages.
     private func write(key: String, value: CFPropertyList?, domain: String) -> Bool {
         guard HelperPolicy.canWrite(key: key, domain: domain) else {
             log.error("Refused preference write for \(domain, privacy: .public) \(key, privacy: .public)")
+            return false
+        }
+        let forced = CFPreferencesAppValueIsForced(key as CFString, domain as CFString)
+            || HelperPolicy.isManaged(key: key, managedPlistPath: HelperPolicy.managedPreferencesPath(domain: domain))
+        guard HelperPolicy.canWrite(key: key, domain: domain, isForced: forced) else {
+            log.error("Refused preference write for profile-managed \(domain, privacy: .public) \(key, privacy: .public)")
             return false
         }
         CFPreferencesSetValue(key as CFString, value, domain as CFString, kCFPreferencesAnyUser, kCFPreferencesAnyHost)
