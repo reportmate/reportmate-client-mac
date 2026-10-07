@@ -94,6 +94,14 @@ final class SettingsViewModel {
             dict = parsed
         }
 
+        // A field a configuration profile forces shows the forced value, which is
+        // the one the runner uses, not whatever the local plist still holds.
+        for key in managedKeys {
+            if let value = CFPreferencesCopyAppValue(key as CFString, Self.preferencesDomain as CFString) {
+                dict[key] = value
+            }
+        }
+
         apiUrl               = dict["ApiUrl"]             as? String ?? ""
         deviceId             = dict["DeviceId"]           as? String ?? ""
         passphrase           = dict["Passphrase"]         as? String ?? ""
