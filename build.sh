@@ -455,6 +455,14 @@ if [ "$SKIP_BUILD" = false ]; then
     # Pass version to Swift via environment variable
     export REPORTMATE_VERSION="$VERSION"
     
+    # Record the SDK the binaries are linked against. Some toolchains write the
+    # deployment target as the SDK version, and AppKit then keeps the pre-macOS 26
+    # window chrome (a title bar plus a small tab strip) instead of toolbar tabs.
+    SDK_VERSION="$(xcrun --show-sdk-version 2>/dev/null)"
+    if [ -n "$SDK_VERSION" ]; then
+        BUILD_FLAGS="${BUILD_FLAGS} -Xlinker -platform_version -Xlinker macos -Xlinker 14.0 -Xlinker ${SDK_VERSION}"
+    fi
+
     swift build ${BUILD_FLAGS}
     
     if [ "$CONFIGURATION" = "release" ]; then
@@ -647,18 +655,32 @@ if [ "$SKIP_PKG" = false ]; then
         cp "$HELPER_EXECUTABLE" "$APP_MACOS/ReportMateHelper"
         log_success "Helper binary copied to app bundle"
         
-        # Copy helper LaunchDaemon plist into app bundle for SMAppService registration.
-        # The plist is optional and not produced by this build; guard the copy so a
-        # successfully built helper binary doesn't abort packaging when it's absent.
-        HELPER_LD_DIR="${APP_CONTENTS}/Library/LaunchDaemons"
-        HELPER_LD_PLIST="${BUILD_DIR}/launchdaemons/com.github.reportmate.helper.plist"
-        if [ -f "$HELPER_LD_PLIST" ]; then
-            mkdir -p "$HELPER_LD_DIR"
-            cp "$HELPER_LD_PLIST" "$HELPER_LD_DIR/"
-            log_success "Helper LaunchDaemon plist copied to app bundle"
-        else
-            log_warn "Helper LaunchDaemon plist not found at: $HELPER_LD_PLIST (SMAppService registration skipped)"
-        fi
+        # The package installs the helper as a system LaunchDaemon: postinstall
+        # copies this plist to /Library/LaunchDaemons and bootstraps it, so no
+        # user ever has to approve a login item. launchd starts the helper on
+        # demand when the GUI connects to its Mach service.
+        cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.helper.plist" << 'HELPERPLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.github.reportmate.helper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/ReportMateHelper</string>
+    </array>
+    <key>MachServices</key>
+    <dict>
+        <key>com.github.reportmate.helper</key>
+        <true/>
+    </dict>
+    <key>AssociatedBundleIdentifiers</key>
+    <string>com.github.reportmate</string>
+</dict>
+</plist>
+HELPERPLIST
+        log_success "Helper LaunchDaemon plist created"
     else
         log_warn "ReportMateHelper not found at: $HELPER_EXECUTABLE (privileged helper will not be available)"
     fi
@@ -1345,6 +1367,7 @@ DAEMONS=(
     "com.github.reportmate.allmodules.plist"
     "com.github.reportmate.installs.plist"
     "com.github.reportmate.appusage.plist"
+    "com.github.reportmate.helper.plist"
 )
 
 # Remove legacy daemons (boot removed 2026.02, 12hourly renamed to allmodules 2026.02)

@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import os
 import ReportMateXPC
 
 final class HelperCommandRunner: NSObject, HelperXPCProtocol, @unchecked Sendable {
@@ -21,6 +22,23 @@ final class HelperCommandRunner: NSObject, HelperXPCProtocol, @unchecked Sendabl
 
     func runCollection(arguments: [String]) {
         let clientProxy = connection.remoteObjectProxy as? HelperXPCClientProtocol
+
+        guard process == nil else {
+            clientProxy?.didEncounterError("A collection is already running.")
+            return
+        }
+        guard HelperPolicy.isAllowedRun(arguments: arguments) else {
+            log.error("Refused run with arguments outside the allowed set")
+            clientProxy?.didEncounterError("The helper refused these run arguments.")
+            clientProxy?.runDidComplete(success: false, exitCode: -1)
+            return
+        }
+        guard HelperPolicy.isTrustedRootPath(kReportMateCLIPath) else {
+            log.error("Refused to run \(kReportMateCLIPath, privacy: .public): it, or a folder above it, is a symlink or writable by a non-admin")
+            clientProxy?.didEncounterError("The runner binary is not root-owned and protected, so the helper will not run it.")
+            clientProxy?.runDidComplete(success: false, exitCode: -1)
+            return
+        }
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: kReportMateCLIPath)
@@ -73,58 +91,35 @@ final class HelperCommandRunner: NSObject, HelperXPCProtocol, @unchecked Sendabl
     }
 
     func setPreference(key: String, stringValue: String, domain: String, withReply reply: @escaping (Bool) -> Void) {
-        CFPreferencesSetValue(
-            key as CFString,
-            stringValue as CFString,
-            domain as CFString,
-            kCFPreferencesAnyUser,
-            kCFPreferencesCurrentHost
-        )
-        reply(CFPreferencesSynchronize(domain as CFString, kCFPreferencesAnyUser, kCFPreferencesCurrentHost))
+        reply(write(key: key, value: stringValue as CFString, domain: domain))
     }
 
     func setBoolPreference(key: String, boolValue: Bool, domain: String, withReply reply: @escaping (Bool) -> Void) {
-        CFPreferencesSetValue(
-            key as CFString,
-            boolValue as CFPropertyList,
-            domain as CFString,
-            kCFPreferencesAnyUser,
-            kCFPreferencesCurrentHost
-        )
-        reply(CFPreferencesSynchronize(domain as CFString, kCFPreferencesAnyUser, kCFPreferencesCurrentHost))
+        reply(write(key: key, value: boolValue as CFPropertyList, domain: domain))
     }
 
     func setIntPreference(key: String, intValue: Int, domain: String, withReply reply: @escaping (Bool) -> Void) {
-        CFPreferencesSetValue(
-            key as CFString,
-            intValue as CFNumber as CFPropertyList,
-            domain as CFString,
-            kCFPreferencesAnyUser,
-            kCFPreferencesCurrentHost
-        )
-        reply(CFPreferencesSynchronize(domain as CFString, kCFPreferencesAnyUser, kCFPreferencesCurrentHost))
+        reply(write(key: key, value: intValue as CFNumber as CFPropertyList, domain: domain))
     }
 
     func setArrayPreference(key: String, arrayValue: [String], domain: String, withReply reply: @escaping (Bool) -> Void) {
-        CFPreferencesSetValue(
-            key as CFString,
-            arrayValue as CFArray as CFPropertyList,
-            domain as CFString,
-            kCFPreferencesAnyUser,
-            kCFPreferencesCurrentHost
-        )
-        reply(CFPreferencesSynchronize(domain as CFString, kCFPreferencesAnyUser, kCFPreferencesCurrentHost))
+        reply(write(key: key, value: arrayValue as CFArray as CFPropertyList, domain: domain))
     }
 
     func removePreference(key: String, domain: String, withReply reply: @escaping (Bool) -> Void) {
-        CFPreferencesSetValue(
-            key as CFString,
-            nil,
-            domain as CFString,
-            kCFPreferencesAnyUser,
-            kCFPreferencesCurrentHost
-        )
-        reply(CFPreferencesSynchronize(domain as CFString, kCFPreferencesAnyUser, kCFPreferencesCurrentHost))
+        reply(write(key: key, value: nil, domain: domain))
+    }
+
+    /// Writes one key to /Library/Preferences/<domain>.plist (any user, any
+    /// host), the file the runner reads below a configuration profile. Only
+    /// the keys the Prefs tab edits, in the ReportMate domain, are accepted.
+    private func write(key: String, value: CFPropertyList?, domain: String) -> Bool {
+        guard HelperPolicy.canWrite(key: key, domain: domain) else {
+            log.error("Refused preference write for \(domain, privacy: .public) \(key, privacy: .public)")
+            return false
+        }
+        CFPreferencesSetValue(key as CFString, value, domain as CFString, kCFPreferencesAnyUser, kCFPreferencesAnyHost)
+        return CFPreferencesSynchronize(domain as CFString, kCFPreferencesAnyUser, kCFPreferencesAnyHost)
     }
 
     func getHelperVersion(withReply reply: @escaping (String) -> Void) {

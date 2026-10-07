@@ -8,7 +8,6 @@
 
 import Foundation
 import ReportMateXPC
-import ServiceManagement
 
 @Observable
 @MainActor
@@ -37,9 +36,8 @@ final class XPCClient: NSObject {
 
     enum HelperStatus: String {
         case unknown = "Unknown"
-        case registered = "Registered"
-        case notRegistered = "Not Registered"
-        case requiresApproval = "Requires Approval"
+        case registered = "Installed"
+        case notRegistered = "Not Installed"
     }
 
     override init() {
@@ -48,12 +46,9 @@ final class XPCClient: NSObject {
 
     // MARK: - Setup (called on app launch)
 
-    /// Checks helper status, attempts registration if needed, and connects.
+    /// Checks whether the package installed the helper, then connects.
     func setup() {
         checkHelperStatus()
-        if helperStatus == .notRegistered || helperStatus == .unknown {
-            registerHelper()
-        }
         connect()
     }
 
@@ -93,38 +88,12 @@ final class XPCClient: NSObject {
         connection = nil
     }
 
-    // MARK: - Helper Registration
+    // MARK: - Helper Status
 
-    func registerHelper() {
-        let service = SMAppService.daemon(plistName: kHelperPlistName)
-        do {
-            try service.register()
-            helperStatus = .registered
-            connectionError = nil
-        } catch let error as NSError {
-            switch service.status {
-            case .requiresApproval:
-                helperStatus = .requiresApproval
-                connectionError = "Helper requires approval in System Settings > Login Items"
-            default:
-                helperStatus = .notRegistered
-                connectionError = "Helper registration failed (\(error.code)): \(error.localizedDescription)"
-            }
-        }
-    }
-
+    /// The package installs the helper as a LaunchDaemon, so the app never
+    /// registers it and a standard user never has to approve it.
     func checkHelperStatus() {
-        let service = SMAppService.daemon(plistName: kHelperPlistName)
-        switch service.status {
-        case .enabled:
-            helperStatus = .registered
-        case .requiresApproval:
-            helperStatus = .requiresApproval
-        case .notRegistered, .notFound:
-            helperStatus = .notRegistered
-        @unknown default:
-            helperStatus = .unknown
-        }
+        helperStatus = FileManager.default.fileExists(atPath: kHelperLaunchDaemonPath) ? .registered : .notRegistered
     }
 
     // MARK: - Running Collection
@@ -396,10 +365,12 @@ extension XPCClient: HelperXPCClientProtocol {
     }
 
     private static nonisolated func parseLogLevel(_ line: String) -> OutputLine.LogLevel {
-        if line.contains("[ERROR]") || line.contains("✗") { return .error }
-        if line.contains("[WARNING]") || line.contains("⚠") { return .warning }
-        if line.contains("[SUCCESS]") || line.contains("✓") { return .success }
-        if line.contains("[DEBUG]") { return .debug }
-        return .info
+        switch LogLineLevel.classify(line) {
+        case .error: .error
+        case .warning: .warning
+        case .success: .success
+        case .debug: .debug
+        case .info, .header: .info
+        }
     }
 }
