@@ -54,4 +54,27 @@ final class HelperPolicyTests: XCTestCase {
     func testSystemBinaryIsTrusted() {
         XCTAssertTrue(HelperPolicy.isTrustedRootPath("/usr/bin/true"))
     }
+
+    func testForcedKeyIsNeverWritable() {
+        XCTAssertTrue(HelperPolicy.canWrite(key: "LogLevel", domain: kReportMatePreferenceDomain, isForced: false))
+        XCTAssertFalse(HelperPolicy.canWrite(key: "LogLevel", domain: kReportMatePreferenceDomain, isForced: true))
+        XCTAssertFalse(HelperPolicy.canWrite(key: "Unknown", domain: kReportMatePreferenceDomain, isForced: false))
+    }
+
+    func testManagedPlistIsReReadEachTime() throws {
+        let path = NSTemporaryDirectory() + "managed-\(UUID().uuidString).plist"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        XCTAssertFalse(HelperPolicy.isManaged(key: "LogLevel", managedPlistPath: path))
+        let data = try PropertyListSerialization.data(fromPropertyList: ["LogLevel": "debug"], format: .xml, options: 0)
+        try data.write(to: URL(fileURLWithPath: path))
+        XCTAssertTrue(HelperPolicy.isManaged(key: "LogLevel", managedPlistPath: path))
+        XCTAssertFalse(HelperPolicy.isManaged(key: "ApiUrl", managedPlistPath: path))
+        try FileManager.default.removeItem(atPath: path)
+        XCTAssertFalse(HelperPolicy.isManaged(key: "LogLevel", managedPlistPath: path))
+    }
+
+    func testManagedPreferencesPath() {
+        XCTAssertEqual(HelperPolicy.managedPreferencesPath(domain: "com.github.reportmate"),
+                       "/Library/Managed Preferences/com.github.reportmate.plist")
+    }
 }

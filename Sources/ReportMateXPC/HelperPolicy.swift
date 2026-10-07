@@ -35,6 +35,28 @@ public enum HelperPolicy {
         domain == kReportMatePreferenceDomain && writableKeys.contains(key)
     }
 
+    /// A key a configuration profile manages is never written or removed, so
+    /// the helper cannot leave a stale value under the profile's.
+    public static func canWrite(key: String, domain: String, isForced: Bool) -> Bool {
+        canWrite(key: key, domain: domain) && !isForced
+    }
+
+    /// Profile-managed preference file for a domain. Read directly because a
+    /// long-running helper keeps the managed layer cfprefsd gave it at launch,
+    /// so a profile installed later would otherwise go unnoticed.
+    public static func managedPreferencesPath(domain: String) -> String {
+        "/Library/Managed Preferences/\(domain).plist"
+    }
+
+    /// True when the key is present in the profile-managed plist at `path`.
+    public static func isManaged(key: String, managedPlistPath path: String) -> Bool {
+        guard let data = FileManager.default.contents(atPath: path),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+            return false
+        }
+        return plist[key] != nil
+    }
+
     /// Arguments the helper passes to the CLI: verbosity flags and a module list.
     public static func isAllowedRun(arguments: [String]) -> Bool {
         var index = 0
