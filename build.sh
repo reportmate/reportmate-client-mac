@@ -1122,13 +1122,14 @@ EOF
             --app-icon "ReportMate" \
             --output-partial-info-plist "${ICON_BUILD_DIR}/partial-info.plist" \
             --warnings --errors \
-            "$ICON_SOURCE" > /dev/null
+            "$ICON_SOURCE" > "${ICON_BUILD_DIR}/actool.log" 2>&1 || true
 
         if [ -f "${ICON_BUILD_DIR}/Assets.car" ]; then
             cp "${ICON_BUILD_DIR}/Assets.car" "$APP_RESOURCES/Assets.car"
             log_success "Icon compiled: Assets.car"
         else
-            log_error "actool did not produce Assets.car"
+            log_error "actool did not produce Assets.car ($(xcrun actool --version 2>/dev/null | tr '\n' ' '))"
+            cat "${ICON_BUILD_DIR}/actool.log" >&2
             exit 1
         fi
 
