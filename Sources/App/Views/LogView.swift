@@ -13,13 +13,17 @@ struct LogView: View {
     @Bindable var store: LogFileStore
     @State private var filterText: String = ""
 
+    private let logDirectory = "/Library/Managed Reports/logs"
+
     var body: some View {
         HSplitView {
             logFileList
-                .frame(minWidth: 180, idealWidth: 240, maxWidth: 300)
+                .frame(minWidth: 180, idealWidth: 240, maxWidth: 300, maxHeight: .infinity)
 
             logDetailView
+                .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Log File List
@@ -67,6 +71,16 @@ struct LogView: View {
                 .tag(file)
             }
             .listStyle(.sidebar)
+            .frame(maxHeight: .infinity)
+            .overlay {
+                if store.logFiles.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Logs Yet", systemImage: "doc.text.magnifyingglass")
+                    } description: {
+                        Text("Logs are written to \(logDirectory).")
+                    }
+                }
+            }
         }
         .onChange(of: store.selectedLog) { _, newValue in
             if let log = newValue {
@@ -115,6 +129,12 @@ struct LogView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .background(.black.opacity(0.85))
+            } else if store.logFiles.isEmpty {
+                ContentUnavailableView(
+                    "No Logs",
+                    systemImage: "doc.text",
+                    description: Text("There are no logs yet. They appear here after the first run.")
+                )
             } else {
                 ContentUnavailableView(
                     "No Log Selected",
@@ -141,7 +161,7 @@ struct LogView: View {
     }
 
     private func openLogFolder() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: "/Library/Managed Reports/logs"))
+        NSWorkspace.shared.open(URL(fileURLWithPath: logDirectory))
     }
 
     // MARK: - Log Line Coloring
