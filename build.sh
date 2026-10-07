@@ -234,11 +234,12 @@ if [ -z "$VERSION" ]; then
     VERSION="$(date +%Y.%m.%d.%H%M)"
 fi
 
-# Split version: 2026.03.07.1012 → MARKETING_VERSION=2026.03.07, BUILD_NUMBER=1012
-# Used to populate CFBundleShortVersionString and CFBundleVersion separately
-# so macOS About window shows "2026.03.07 (1012)" instead of a duplicate.
+# Split version: 2026.03.07.1012 → MARKETING_VERSION=2026.03.07, BUILD_NUMBER=202603071012
+# CFBundleShortVersionString shows the date; CFBundleVersion carries every digit so it
+# always increases from one build to the next. The installer compares CFBundleVersion,
+# and an HHMM-only build number would go backwards on a later day with an earlier time.
 MARKETING_VERSION="$(echo "$VERSION" | sed 's/\.[^.]*$//')"
-BUILD_NUMBER="$(echo "$VERSION" | sed 's/.*\.//')"
+BUILD_NUMBER="$(echo "$VERSION" | tr -d '.')"
 
 # Export as REPORTMATE_VERSION for envsubst substitution in scripts and build-info.yaml
 export REPORTMATE_VERSION="$VERSION"
