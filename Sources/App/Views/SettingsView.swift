@@ -38,8 +38,11 @@ struct SettingsView: View {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "–"
     }
 
+    /// CFBundleVersion holds every digit of the version (YYYYMMDDHHMM) so it always
+    /// increases; next to the date, only the time part is worth showing.
     private var buildNumber: String {
-        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "–"
+        let full = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "–"
+        return full.count == 12 && full.allSatisfy(\.isNumber) ? String(full.suffix(4)) : full
     }
 
     var body: some View {
