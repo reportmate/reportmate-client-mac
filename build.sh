@@ -1636,23 +1636,33 @@ plist_set_if_missing ExtensionEnabled -bool true
 plist_set_if_missing ValidateSSL -bool true
 plist_set_if_missing Timeout -integer 300
 plist_set_if_missing EnabledModules -array installs applications system management identity hardware peripherals security network inventory
-
-# Run initial collection immediately so the device appears in ReportMate right away.
-# The client writes its own log; nothing here needs capturing.
-log_message "Running initial inventory and system collection..."
-nohup /usr/local/reportmate/managedreportsrunner --run-modules inventory,system \
-    >/dev/null 2>&1 &
-disown
-
-log_message "ReportMate postinstall complete."
 POSTINSTALL_SCRIPT
 
         # If --api-url was given at build time, append it as a non-destructive
         # defaults write so it only lands on a fresh install (no plist yet).
+        # It goes in before the initial run below, which reads it.
         if [ -n "$API_URL" ]; then
             printf 'plist_set_if_missing ApiUrl -string "%s"\n' "${API_URL}" >> "$SCRIPTS_DIR/postinstall"
         fi
-        echo 'exit 0' >> "$SCRIPTS_DIR/postinstall"
+
+        cat >> "$SCRIPTS_DIR/postinstall" << 'POSTINSTALL_RUN'
+
+# Initial run, backgrounded so the installer does not wait on it. A hello
+# check-in first, so the device appears in ReportMate within seconds; then one
+# forced collection of every enabled module, so a Mac shelved straight after
+# enrolment still has identity and logged-in user data as of install.
+# Quick storage keeps that run short; the daily deep task does the full walk.
+# The client writes its own log; nothing here needs capturing.
+log_message "Running initial check-in, then a full collection..."
+nohup /bin/sh -c '
+    /usr/local/reportmate/managedreportsrunner --hello
+    exec /usr/local/reportmate/managedreportsrunner --force --storage-mode quick
+' >/dev/null 2>&1 &
+disown
+
+log_message "ReportMate postinstall complete."
+exit 0
+POSTINSTALL_RUN
 
         chmod +x "$SCRIPTS_DIR/postinstall"
         

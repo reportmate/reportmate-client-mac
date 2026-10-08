@@ -1,5 +1,6 @@
 import Foundation
 import IOKit
+import SystemConfiguration
 
 /// Utility class for retrieving system information
 public class SystemUtils {
@@ -40,6 +41,17 @@ public class SystemUtils {
         return serial.isEmpty ? "UNKNOWN" : serial
     }
     
+    /// Retrieves the computer name shown in Sharing settings.
+    ///
+    /// Read from the dynamic store rather than `scutil --get ComputerName`, so the check-in
+    /// path that runs straight after install spawns no subprocess. Falls back to the host name.
+    public static func getComputerName() -> String {
+        if let name = SCDynamicStoreCopyComputerName(nil, nil) as String?, !name.isEmpty {
+            return name
+        }
+        return ProcessInfo.processInfo.hostName
+    }
+
     /// Retrieves the OS version
     public static func getOSVersion() -> String {
         let processInfo = ProcessInfo.processInfo
