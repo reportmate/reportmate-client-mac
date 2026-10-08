@@ -57,6 +57,12 @@ public struct MunkiInfo: Codable, Sendable {
     public var consoleUser: String?
     public var startTime: String?
     public var endTime: String?
+
+    // Run liveness, readable whether or not the last run finished
+    /// Modification time of ManagedInstallReport.plist (ISO 8601)
+    public var reportModifiedTime: String?
+    /// Start time of the oldest managedsoftwareupdate still running (ISO 8601), nil when idle
+    public var runningSince: String?
     
     // Run errors/warnings (from munki_info table)
     public var errors: String?

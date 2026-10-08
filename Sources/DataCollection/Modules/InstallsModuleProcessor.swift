@@ -69,6 +69,8 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             munki.errors = info["errors"] as? String
             munki.warnings = info["warnings"] as? String
             munki.problemInstalls = info["problemInstalls"] as? String
+            munki.reportModifiedTime = info["reportModifiedTime"] as? String
+            munki.runningSince = info["runningSince"] as? String
             
             // Set catalogs from manifest
             munki.catalogs = manifestCatalogs
@@ -158,6 +160,8 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 if let errors = munki.errors { dict["errors"] = errors }
                 if let warnings = munki.warnings { dict["warnings"] = warnings }
                 if let problems = munki.problemInstalls { dict["problemInstalls"] = problems }
+                if let modified = munki.reportModifiedTime { dict["reportModifiedTime"] = modified }
+                if let running = munki.runningSince { dict["runningSince"] = running }
                 if let lastRun = munki.lastRun { dict["lastRun"] = ISO8601DateFormatter().string(from: lastRun) }
                 if !munki.catalogs.isEmpty { dict["catalogs"] = munki.catalogs }
                 return dict
@@ -184,6 +188,44 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         return BaseModuleData(moduleId: moduleId, data: installsData)
     }
     
+    // MARK: - Run liveness
+
+    static func livenessTimestamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
+    /// Modification time of ManagedInstallReport.plist, or nil when it does not exist.
+    static func reportModifiedTime(atPath path: String) -> Date? {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        return attributes?[.modificationDate] as? Date
+    }
+
+    /// Start time of the oldest running managedsoftwareupdate in `ps -axww -o lstart=,command=`
+    /// output, or nil when none is running. macOS `ps` has no `etimes`, so the start comes from
+    /// `lstart` ("Wed Oct  7 01:23:45 2026", local time, always the first five fields).
+    static func oldestRunningMunkiStart(psOutput: String, timeZone: TimeZone = .current) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+
+        var oldest: Date?
+        for line in psOutput.split(separator: "\n") {
+            let fields = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard fields.count > 5 else { continue }
+            // Match the executable path itself (directly, under Munki's Python, or under its
+            // supervisor), not a grep or tail that merely mentions the name.
+            let arguments = fields.dropFirst(5)
+            guard arguments.contains(where: { $0.hasPrefix("/") && $0.hasSuffix("/managedsoftwareupdate") }),
+                  !arguments.contains("--version") else { continue }
+            guard let start = formatter.date(from: fields.prefix(5).joined(separator: " ")) else { continue }
+            if oldest == nil || start < oldest! { oldest = start }
+        }
+        return oldest
+    }
+
     // MARK: - Structured session reports (newer Munki builds)
 
     /// Merges Munki's session reports into the `munki` payload using the field names the
@@ -578,8 +620,23 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             info["clientIdentifier"] = prefsPlist["ClientIdentifier"] as? String
         }
         
-        // Read ManagedInstallReport.plist for last run info
+        // Liveness: neither signal depends on a Munki run finishing, so a run that hangs before
+        // it rewrites the report still shows up as a stale report and/or a long-running process.
         let reportPath = "\(munkiDir)/ManagedInstallReport.plist"
+        if let modified = Self.reportModifiedTime(atPath: reportPath) {
+            info["reportModifiedTime"] = Self.livenessTimestamp(modified)
+        }
+        if let ps = try? await ProcessRunner.run(
+            // C locale so lstart is always the English form the parser expects.
+            executable: "/usr/bin/env",
+            arguments: ["LC_ALL=C", "/bin/ps", "-axww", "-o", "lstart=,command="],
+            timeout: 30
+        ), ps.timedOut != true,
+           let runningSince = Self.oldestRunningMunkiStart(psOutput: ps.standardOutput) {
+            info["runningSince"] = Self.livenessTimestamp(runningSince)
+        }
+
+        // Read ManagedInstallReport.plist for last run info
         guard let reportData = try? Data(contentsOf: URL(fileURLWithPath: reportPath)),
               let report = try? PropertyListSerialization.propertyList(from: reportData, options: [], format: nil) as? [String: Any] else {
             return info
