@@ -188,4 +188,126 @@ final class EDIDDisplayTests: XCTestCase {
         XCTAssertEqual(displays.first?.isBuiltIn, true)
         XCTAssertEqual(displays.first?.name, "Color LCD")
     }
+
+    func testUnresolvedNameIsRecoveredFromJoinedEDID() {
+        var named = transport(id: 1, serial: "UNIT0001", headerSerial: 0x11)
+        named["ProductName"] = "Cintiq Pro 24"
+        let registry = RegistryDisplay.collect(from: [named])
+        var rows: [[String: Any]] = [
+            ["name": "spdisplays_display", "type": "external", "vendor_id": "5c23", "product_id": "37f", "edid_header_serial": "11"],
+        ]
+        XCTAssertEqual(RegistryDisplay.resolveUnnamed(&rows, from: registry), [0: "Cintiq Pro 24"])
+        XCTAssertEqual(rows[0]["name"] as? String, "Cintiq Pro 24")
+        XCTAssertEqual(rows[0]["unidentified"] as? Bool, false)
+    }
+
+    func testUnknownVendorTakesTheOnlySpareEDID() {
+        let registry = RegistryDisplay.collect(from: [transport(id: 1, serial: "UNIT0001")])
+        var rows: [[String: Any]] = [
+            ["name": "spdisplays_display", "type": "external", "vendor_id": "756e6b6e", "product_id": "717267"],
+            ["name": "Color LCD", "type": "internal"],
+        ]
+        XCTAssertEqual(RegistryDisplay.resolveUnnamed(&rows, from: registry), [0: "Cintiq Pro 24"])
+        XCTAssertEqual(rows[0]["vendor_id"] as? String, "5c23")
+        XCTAssertEqual(rows[0]["product_id"] as? String, "37f")
+        XCTAssertEqual(rows[0]["serial_number"] as? String, "UNIT0001")
+        XCTAssertEqual(rows[0]["manufacturer"] as? String, "WAC")
+        XCTAssertEqual(rows[0]["connection_type"] as? String, "USB-C")
+        XCTAssertEqual(rows[0]["unidentified"] as? Bool, false)
+        XCTAssertNil(rows[1]["unidentified"])
+    }
+
+    func testUnknownVendorWithNoEDIDIsMarkedUnidentified() {
+        var rows: [[String: Any]] = [
+            ["name": "spdisplays_display", "type": "external", "vendor_id": "756e6b6e", "product_id": "717267"],
+        ]
+        XCTAssertTrue(RegistryDisplay.resolveUnnamed(&rows, from: []).isEmpty)
+        XCTAssertEqual(rows[0]["name"] as? String, RegistryDisplay.unidentifiedName)
+        XCTAssertEqual(rows[0]["unidentified"] as? Bool, true)
+        XCTAssertEqual(rows[0]["vendor_id"] as? String, "756e6b6e")
+    }
+
+    func testUnknownVendorNeverTakesAClaimedOrAmbiguousEDID() {
+        let claimed = RegistryDisplay.collect(from: [transport(id: 1, serial: "UNIT0001")])
+        var rows: [[String: Any]] = [
+            ["name": "Cintiq Pro 24", "type": "external", "vendor_id": "5c23", "product_id": "37f"],
+            ["name": "spdisplays_display", "type": "external", "vendor_id": "756e6b6e"],
+        ]
+        RegistryDisplay.resolveUnnamed(&rows, from: claimed)
+        XCTAssertEqual(rows[1]["unidentified"] as? Bool, true)
+        XCTAssertNil(rows[1]["serial_number"])
+        XCTAssertNil(rows[0]["unidentified"])
+
+        var other = transport(id: 2, serial: "UNIT0002")
+        other["EDID"] = edid(serial: "UNIT0002", name: "Other").withProduct(0x0400)
+        let spare = RegistryDisplay.collect(from: [transport(id: 1, serial: "UNIT0001"), other])
+        var twoUnknown: [[String: Any]] = [
+            ["name": "spdisplays_display", "type": "external", "vendor_id": "756e6b6e"],
+            ["name": "spdisplays_display", "type": "external", "vendor_id": "756e6b6e"],
+        ]
+        XCTAssertTrue(RegistryDisplay.resolveUnnamed(&twoUnknown, from: spare).isEmpty)
+        XCTAssertEqual(twoUnknown.map { $0["unidentified"] as? Bool }, [true, true])
+    }
+
+    func testRealVendorWithNoNameAnywhereIsMarkedUnidentified() {
+        let unnamed = RegistryDisplay.collect(from: [["IOObjectClass": "IOPortTransportStateDisplayPort", "IORegistryEntryID": 1, "ParentPortTypeDescription": "HDMI", "EDID": edid(name: nil)]])
+        var rows: [[String: Any]] = [
+            ["name": "spdisplays_display", "type": "external", "vendor_id": "5c23", "product_id": "37f"],
+        ]
+        XCTAssertTrue(RegistryDisplay.resolveUnnamed(&rows, from: unnamed).isEmpty)
+        XCTAssertEqual(rows[0]["name"] as? String, RegistryDisplay.unidentifiedName)
+        XCTAssertEqual(rows[0]["unidentified"] as? Bool, true)
+        XCTAssertEqual(rows[0]["vendor_id"] as? String, "5c23")
+    }
+
+    func testNamedRowWithNoEDIDKeepsItsNameAndAdoptsNothing() {
+        let registry = RegistryDisplay.collect(from: [transport(id: 1, serial: "UNIT0001")])
+        var rows: [[String: Any]] = [
+            ["name": "Living Room", "type": "external", "vendor_id": "756e6b6e"],
+        ]
+        XCTAssertTrue(RegistryDisplay.resolveUnnamed(&rows, from: registry).isEmpty)
+        XCTAssertEqual(rows[0]["name"] as? String, "Living Room")
+        XCTAssertEqual(rows[0]["unidentified"] as? Bool, true)
+        XCTAssertEqual(rows[0]["vendor_id"] as? String, "756e6b6e")
+        XCTAssertNil(rows[0]["serial_number"])
+
+        var withUnnamed: [[String: Any]] = [
+            ["name": "Living Room", "type": "external", "vendor_id": "756e6b6e"],
+            ["name": "spdisplays_display", "type": "external", "vendor_id": "756e6b6e"],
+        ]
+        XCTAssertTrue(RegistryDisplay.resolveUnnamed(&withUnnamed, from: registry).isEmpty)
+        XCTAssertEqual(withUnnamed[1]["unidentified"] as? Bool, true)
+        XCTAssertNil(withUnnamed[1]["serial_number"])
+    }
+
+    func testUnknownVendorNeverTakesAnInactiveOrNamelessEDID() {
+        var inactive = transport(id: 1, serial: "UNIT0001")
+        inactive["Active"] = false
+        var rows: [[String: Any]] = [
+            ["name": "spdisplays_display", "type": "external", "vendor_id": "756e6b6e"],
+        ]
+        XCTAssertTrue(RegistryDisplay.resolveUnnamed(&rows, from: RegistryDisplay.collect(from: [inactive])).isEmpty)
+        XCTAssertEqual(rows[0]["unidentified"] as? Bool, true)
+        XCTAssertNil(rows[0]["serial_number"])
+
+        let nameless = RegistryDisplay.collect(from: [["IOObjectClass": "IOPortTransportStateDisplayPort", "IORegistryEntryID": 1, "ParentPortTypeDescription": "HDMI", "EDID": edid(serial: "UNIT0001", name: nil)]])
+        var unnamed: [[String: Any]] = [
+            ["name": "spdisplays_display", "type": "external", "vendor_id": "756e6b6e"],
+        ]
+        XCTAssertTrue(RegistryDisplay.resolveUnnamed(&unnamed, from: nameless).isEmpty)
+        XCTAssertEqual(unnamed[0]["name"] as? String, RegistryDisplay.unidentifiedName)
+        XCTAssertEqual(unnamed[0]["unidentified"] as? Bool, true)
+        XCTAssertEqual(unnamed[0]["vendor_id"] as? String, "756e6b6e")
+        XCTAssertNil(unnamed[0]["serial_number"])
+    }
+}
+
+private extension Data {
+    /// Same EDID with a different product code, so it reads as another model.
+    func withProduct(_ code: UInt16) -> Data {
+        var bytes = [UInt8](self)
+        bytes[10] = UInt8(code & 0xFF)
+        bytes[11] = UInt8(code >> 8)
+        return Data(bytes)
+    }
 }
