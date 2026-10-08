@@ -416,180 +416,9 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let systemDict = systemInfo
         let modelId = systemDict["hardware_model"] as? String ?? ""
         
-        if let gpuArray = graphicsInfo["SPDisplaysDataType"] as? [[String: Any]] {
-            var displaysArray: [[String: Any]] = []
-            
-            // Iterate through all GPUs to find displays
-            for gpu in gpuArray {
-                if let displays = gpu["spdisplays_ndrvs"] as? [[String: Any]] {
-                    for display in displays {
-                        var displayInfo: [String: Any] = [:]
-                        
-                        // Display name
-                        displayInfo["name"] = display["_name"] as? String ?? "Unknown Display"
-                        
-                        // Serial number - use human-readable serial (spdisplays_display-serial-number)
-                        // NOT the hex version (_spdisplays_display-serial-number) - snake_case
-                        if let serial = EDIDDisplay.usableSerial(display["spdisplays_display-serial-number"] as? String) {
-                            displayInfo["serial_number"] = serial
-                        }
-                        
-                        // Display type (Retina LCD, etc.) - snake_case
-                        if let displayType = display["spdisplays_display_type"] as? String {
-                            displayInfo["display_type"] = cleanDisplayType(displayType)
-                        }
-                        
-                        // Resolution - use pixel resolution for display (e.g., "5120 x 2880")
-                        displayInfo["resolution"] = display["_spdisplays_pixels"] as? String ?? "Unknown"
-                        
-                        // Scaled resolution (e.g., "2560 x 1440 @ 60.00Hz") - snake_case
-                        displayInfo["scaled_resolution"] = display["_spdisplays_resolution"] as? String
-                        
-                        // Firmware version - parse from "Version 17.0 (Build 21A329)" to "17.0.21A329" - snake_case
-                        if let firmware = display["spdisplays_display-fw-version"] as? String, !firmware.isEmpty {
-                            // Parse "Version X.Y (Build ZZ...)" format to "X.Y.ZZ"
-                            let parsedFirmware = parseFirmwareVersion(firmware)
-                            displayInfo["firmware_version"] = parsedFirmware
-                        }
-                        
-                        // Is main display - snake_case
-                        let isMain = display["spdisplays_main"] as? String == "spdisplays_yes"
-                        displayInfo["is_main_display"] = isMain
-                        
-                        // Mirror status
-                        let isMirrored = display["spdisplays_mirror"] as? String == "spdisplays_on"
-                        displayInfo["mirror"] = isMirrored
-                        
-                        // Online status
-                        let isOnline = display["spdisplays_online"] as? String == "spdisplays_yes"
-                        displayInfo["online"] = isOnline
-                        
-                        // Ambient brightness support - snake_case
-                        let hasAmbient = display["spdisplays_ambient_brightness"] as? String == "spdisplays_yes"
-                        displayInfo["ambient_brightness_enabled"] = hasAmbient
-                        
-                        // Connection type (if available) - snake_case
-                        if let connType = display["spdisplays_connection_type"] as? String {
-                            displayInfo["connection_type"] = connType.replacingOccurrences(of: "spdisplays_", with: "")
-                        }
-                        
-                        // Vendor/product/manufacture info for external displays
-                        if let vendorId = display["_spdisplays_display-vendor-id"] as? String, !vendorId.isEmpty {
-                            displayInfo["vendor_id"] = vendorId
-                        }
-                        if let productId = display["_spdisplays_display-product-id"] as? String, !productId.isEmpty {
-                            displayInfo["product_id"] = productId
-                        }
-                        // Hex of the EDID header serial: not reported, only used to join this
-                        // row to the EDID on its transport
-                        if let headerSerial = display["_spdisplays_display-serial-number"] as? String, !headerSerial.isEmpty {
-                            displayInfo["edid_header_serial"] = headerSerial
-                        }
-                        if let mfgYear = display["_spdisplays_display-year"] as? String, !mfgYear.isEmpty {
-                            displayInfo["manufacture_year"] = Int(mfgYear) ?? mfgYear
-                        }
-                        if let mfgWeek = display["_spdisplays_display-week"] as? String, !mfgWeek.isEmpty {
-                            displayInfo["manufacture_week"] = Int(mfgWeek) ?? mfgWeek
-                        }
-                        
-                        // Display type (internal/external). spdisplays_connection_type is the
-                        // authoritative signal wherever system_profiler reports it: an all-in-one's
-                        // built-in panel says "spdisplays_internal" but is named after the machine
-                        // ("iMac"), so a name-only test types it external and it reaches inventory
-                        // as a standalone monitor. The key is absent on most external displays, so
-                        // the name and display_type heuristics stay as the fallback.
-                        let displayName = displayInfo["name"] as? String ?? ""
-                        let rawDisplayType = display["spdisplays_display_type"] as? String ?? ""
-                        let rawConnectionType = display["spdisplays_connection_type"] as? String ?? ""
-                        if rawConnectionType == "spdisplays_internal"
-                            || displayName.contains("Built-in")
-                            || displayName == "Color LCD"
-                            || rawDisplayType.contains("built-in") {
-                            displayInfo["type"] = "internal"
-                        } else {
-                            displayInfo["type"] = "external"
-                        }
-                        
-                        displaysArray.append(displayInfo)
-                    }
-                }
-            }
-            
-            // Enrich built-in "Color LCD" displays with proper model-based data
-            // system_profiler reports built-in laptop displays as "Color LCD" with no useful name
-            for i in 0..<displaysArray.count {
-                let name = displaysArray[i]["name"] as? String ?? ""
-                let type = displaysArray[i]["type"] as? String ?? ""
-                if type == "internal" && (name == "Color LCD" || name == "iMac" || name == "MacBook Pro" || name == "MacBook Air") {
-                    if let builtIn = getBuiltInDisplayInfo(from: modelId) {
-                        // Merge model lookup data but preserve live data (resolution, online, is_main_display)
-                        let liveResolution = displaysArray[i]["resolution"] as? String
-                        let liveIsMain = displaysArray[i]["is_main_display"]
-                        let liveOnline = displaysArray[i]["online"]
-                        let liveScaledRes = displaysArray[i]["scaled_resolution"]
-                        let liveMirror = displaysArray[i]["mirror"]
-                        let liveAmbient = displaysArray[i]["ambient_brightness_enabled"]
-                        
-                        // Apply model lookup data
-                        for (key, value) in builtIn {
-                            displaysArray[i][key] = value
-                        }
-                        
-                        // Restore live data (overrides model lookup)
-                        if let res = liveResolution, res != "Unknown" { displaysArray[i]["resolution"] = res }
-                        if let main = liveIsMain { displaysArray[i]["is_main_display"] = main }
-                        if let online = liveOnline { displaysArray[i]["online"] = online }
-                        if let scaled = liveScaledRes { displaysArray[i]["scaled_resolution"] = scaled }
-                        if let mirror = liveMirror { displaysArray[i]["mirror"] = mirror }
-                        if let ambient = liveAmbient { displaysArray[i]["ambient_brightness_enabled"] = ambient }
-                        displaysArray[i]["data_source"] = "model_lookup"
-                        print("[\(timestamp())] Enriched built-in display '\(name)' with model data for \(modelId)")
-                    }
-                }
-            }
-            
-            // system_profiler lists only what the window server has in a session: with no
-            // console user it returns an empty display list while the GPU is still reported.
-            // The EDID on each transport survives that, so join rows to it for serials, and
-            // report it directly when system_profiler lists no external display at all.
-            let registryDisplays = await collectRegistryDisplays()
-            for (index, serial) in RegistryDisplay.enrich(&displaysArray, from: registryDisplays).sorted(by: { $0.key < $1.key }) {
-                print("[\(timestamp())] EDID serial for '\(displaysArray[index]["name"] as? String ?? "")': \(serial)")
-            }
-
-            if !displaysArray.contains(where: { $0["type"] as? String == "external" }) {
-                let attached = registryDisplays.filter { !$0.isBuiltIn }
-                for display in attached {
-                    displaysArray.append(display.displayInfo)
-                }
-                if !attached.isEmpty {
-                    print("[\(timestamp())] system_profiler listed no external display; reported \(attached.count) from the IO registry")
-                }
-            }
-
-            // Add the built-in panel from the model database when nothing listed it: a laptop
-            // with its lid closed, or any Mac with a built-in panel at the login window.
-            let isLaptop = modelId.hasPrefix("MacBookAir") || modelId.hasPrefix("MacBookPro") || modelId.hasPrefix("Mac14,") || modelId.hasPrefix("Mac15,")
-            let hasBuiltIn = displaysArray.contains { display in
-                (display["type"] as? String == "internal") ||
-                (display["data_source"] as? String == "model_lookup")
-            }
-            if !hasBuiltIn, var builtInDisplay = getBuiltInDisplayInfo(from: modelId) {
-                let lidClosed = isLaptop && !displaysArray.isEmpty
-                builtInDisplay["is_main_display"] = !lidClosed
-                builtInDisplay["online"] = !lidClosed
-                builtInDisplay["data_source"] = "model_lookup"
-                displaysArray.append(builtInDisplay)
-                print("[\(timestamp())] Added built-in display from model data for \(modelId)\(lidClosed ? " (lid closed)" : "")")
-            }
-
-            for i in displaysArray.indices {
-                displaysArray[i].removeValue(forKey: "edid_header_serial")
-            }
-
-            if !displaysArray.isEmpty {
-                hardwareData["displays"] = displaysArray
-            }
+        let displaysArray = await buildDisplays(graphicsInfo: graphicsInfo, modelId: modelId)
+        if !displaysArray.isEmpty {
+            hardwareData["displays"] = displaysArray
         }
         
         // 8. memory - Enhanced with type and manufacturer
@@ -1076,6 +905,194 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         return modelYearMap[modelIdentifier] ?? ""
     }
     
+    // MARK: - Displays
+
+    /// The connected display list on its own, as the hardware module reports it under
+    /// `displays`. The peripherals module projects it into `displayDevices`.
+    func collectDisplays() async -> [[String: Any]] {
+        guard let graphicsInfo = try? await collectGraphicsInfo() else { return [] }
+        let modelId = (try? await BashService.execute("sysctl -n hw.model 2>/dev/null"))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return await buildDisplays(graphicsInfo: graphicsInfo, modelId: modelId)
+    }
+
+    /// Build the display list from system_profiler's SPDisplaysDataType, joined to the EDIDs
+    /// in the IO registry and filled from the model database for a built-in panel.
+    private func buildDisplays(graphicsInfo: [String: Any], modelId: String) async -> [[String: Any]] {
+        guard let gpuArray = graphicsInfo["SPDisplaysDataType"] as? [[String: Any]] else { return [] }
+        var displaysArray: [[String: Any]] = []
+        
+        // Iterate through all GPUs to find displays
+        for gpu in gpuArray {
+            if let displays = gpu["spdisplays_ndrvs"] as? [[String: Any]] {
+                for display in displays {
+                    var displayInfo: [String: Any] = [:]
+                    
+                    // Display name
+                    displayInfo["name"] = display["_name"] as? String ?? "Unknown Display"
+                    
+                    // Serial number - use human-readable serial (spdisplays_display-serial-number)
+                    // NOT the hex version (_spdisplays_display-serial-number) - snake_case
+                    if let serial = EDIDDisplay.usableSerial(display["spdisplays_display-serial-number"] as? String) {
+                        displayInfo["serial_number"] = serial
+                    }
+                    
+                    // Display type (Retina LCD, etc.) - snake_case
+                    if let displayType = display["spdisplays_display_type"] as? String {
+                        displayInfo["display_type"] = cleanDisplayType(displayType)
+                    }
+                    
+                    // Resolution - use pixel resolution for display (e.g., "5120 x 2880")
+                    displayInfo["resolution"] = display["_spdisplays_pixels"] as? String ?? "Unknown"
+                    
+                    // Scaled resolution (e.g., "2560 x 1440 @ 60.00Hz") - snake_case
+                    displayInfo["scaled_resolution"] = display["_spdisplays_resolution"] as? String
+                    
+                    // Firmware version - parse from "Version 17.0 (Build 21A329)" to "17.0.21A329" - snake_case
+                    if let firmware = display["spdisplays_display-fw-version"] as? String, !firmware.isEmpty {
+                        // Parse "Version X.Y (Build ZZ...)" format to "X.Y.ZZ"
+                        let parsedFirmware = parseFirmwareVersion(firmware)
+                        displayInfo["firmware_version"] = parsedFirmware
+                    }
+                    
+                    // Is main display - snake_case
+                    let isMain = display["spdisplays_main"] as? String == "spdisplays_yes"
+                    displayInfo["is_main_display"] = isMain
+                    
+                    // Mirror status
+                    let isMirrored = display["spdisplays_mirror"] as? String == "spdisplays_on"
+                    displayInfo["mirror"] = isMirrored
+                    
+                    // Online status
+                    let isOnline = display["spdisplays_online"] as? String == "spdisplays_yes"
+                    displayInfo["online"] = isOnline
+                    
+                    // Ambient brightness support - snake_case
+                    let hasAmbient = display["spdisplays_ambient_brightness"] as? String == "spdisplays_yes"
+                    displayInfo["ambient_brightness_enabled"] = hasAmbient
+                    
+                    // Connection type (if available) - snake_case
+                    if let connType = display["spdisplays_connection_type"] as? String {
+                        displayInfo["connection_type"] = connType.replacingOccurrences(of: "spdisplays_", with: "")
+                    }
+                    
+                    // Vendor/product/manufacture info for external displays
+                    if let vendorId = display["_spdisplays_display-vendor-id"] as? String, !vendorId.isEmpty {
+                        displayInfo["vendor_id"] = vendorId
+                    }
+                    if let productId = display["_spdisplays_display-product-id"] as? String, !productId.isEmpty {
+                        displayInfo["product_id"] = productId
+                    }
+                    // Hex of the EDID header serial: not reported, only used to join this
+                    // row to the EDID on its transport
+                    if let headerSerial = display["_spdisplays_display-serial-number"] as? String, !headerSerial.isEmpty {
+                        displayInfo["edid_header_serial"] = headerSerial
+                    }
+                    if let mfgYear = display["_spdisplays_display-year"] as? String, !mfgYear.isEmpty {
+                        displayInfo["manufacture_year"] = Int(mfgYear) ?? mfgYear
+                    }
+                    if let mfgWeek = display["_spdisplays_display-week"] as? String, !mfgWeek.isEmpty {
+                        displayInfo["manufacture_week"] = Int(mfgWeek) ?? mfgWeek
+                    }
+                    
+                    // Display type (internal/external). spdisplays_connection_type is the
+                    // authoritative signal wherever system_profiler reports it: an all-in-one's
+                    // built-in panel says "spdisplays_internal" but is named after the machine
+                    // ("iMac"), so a name-only test types it external and it reaches inventory
+                    // as a standalone monitor. The key is absent on most external displays, so
+                    // the name and display_type heuristics stay as the fallback.
+                    let displayName = displayInfo["name"] as? String ?? ""
+                    let rawDisplayType = display["spdisplays_display_type"] as? String ?? ""
+                    let rawConnectionType = display["spdisplays_connection_type"] as? String ?? ""
+                    if rawConnectionType == "spdisplays_internal"
+                        || displayName.contains("Built-in")
+                        || displayName == "Color LCD"
+                        || rawDisplayType.contains("built-in") {
+                        displayInfo["type"] = "internal"
+                    } else {
+                        displayInfo["type"] = "external"
+                    }
+                    
+                    displaysArray.append(displayInfo)
+                }
+            }
+        }
+        
+        // Enrich built-in "Color LCD" displays with proper model-based data
+        // system_profiler reports built-in laptop displays as "Color LCD" with no useful name
+        for i in 0..<displaysArray.count {
+            let name = displaysArray[i]["name"] as? String ?? ""
+            let type = displaysArray[i]["type"] as? String ?? ""
+            if type == "internal" && (name == "Color LCD" || name == "iMac" || name == "MacBook Pro" || name == "MacBook Air") {
+                if let builtIn = getBuiltInDisplayInfo(from: modelId) {
+                    // Merge model lookup data but preserve live data (resolution, online, is_main_display)
+                    let liveResolution = displaysArray[i]["resolution"] as? String
+                    let liveIsMain = displaysArray[i]["is_main_display"]
+                    let liveOnline = displaysArray[i]["online"]
+                    let liveScaledRes = displaysArray[i]["scaled_resolution"]
+                    let liveMirror = displaysArray[i]["mirror"]
+                    let liveAmbient = displaysArray[i]["ambient_brightness_enabled"]
+                    
+                    // Apply model lookup data
+                    for (key, value) in builtIn {
+                        displaysArray[i][key] = value
+                    }
+                    
+                    // Restore live data (overrides model lookup)
+                    if let res = liveResolution, res != "Unknown" { displaysArray[i]["resolution"] = res }
+                    if let main = liveIsMain { displaysArray[i]["is_main_display"] = main }
+                    if let online = liveOnline { displaysArray[i]["online"] = online }
+                    if let scaled = liveScaledRes { displaysArray[i]["scaled_resolution"] = scaled }
+                    if let mirror = liveMirror { displaysArray[i]["mirror"] = mirror }
+                    if let ambient = liveAmbient { displaysArray[i]["ambient_brightness_enabled"] = ambient }
+                    displaysArray[i]["data_source"] = "model_lookup"
+                    print("[\(timestamp())] Enriched built-in display '\(name)' with model data for \(modelId)")
+                }
+            }
+        }
+        
+        // system_profiler lists only what the window server has in a session: with no
+        // console user it returns an empty display list while the GPU is still reported.
+        // The EDID on each transport survives that, so join rows to it for serials, and
+        // report it directly when system_profiler lists no external display at all.
+        let registryDisplays = await collectRegistryDisplays()
+        for (index, serial) in RegistryDisplay.enrich(&displaysArray, from: registryDisplays).sorted(by: { $0.key < $1.key }) {
+            print("[\(timestamp())] EDID serial for '\(displaysArray[index]["name"] as? String ?? "")': \(serial)")
+        }
+
+        if !displaysArray.contains(where: { $0["type"] as? String == "external" }) {
+            let attached = registryDisplays.filter { !$0.isBuiltIn }
+            for display in attached {
+                displaysArray.append(display.displayInfo)
+            }
+            if !attached.isEmpty {
+                print("[\(timestamp())] system_profiler listed no external display; reported \(attached.count) from the IO registry")
+            }
+        }
+
+        // Add the built-in panel from the model database when nothing listed it: a laptop
+        // with its lid closed, or any Mac with a built-in panel at the login window.
+        let isLaptop = modelId.hasPrefix("MacBookAir") || modelId.hasPrefix("MacBookPro") || modelId.hasPrefix("Mac14,") || modelId.hasPrefix("Mac15,")
+        let hasBuiltIn = displaysArray.contains { display in
+            (display["type"] as? String == "internal") ||
+            (display["data_source"] as? String == "model_lookup")
+        }
+        if !hasBuiltIn, var builtInDisplay = getBuiltInDisplayInfo(from: modelId) {
+            let lidClosed = isLaptop && !displaysArray.isEmpty
+            builtInDisplay["is_main_display"] = !lidClosed
+            builtInDisplay["online"] = !lidClosed
+            builtInDisplay["data_source"] = "model_lookup"
+            displaysArray.append(builtInDisplay)
+            print("[\(timestamp())] Added built-in display from model data for \(modelId)\(lidClosed ? " (lid closed)" : "")")
+        }
+
+        for i in displaysArray.indices {
+            displaysArray[i].removeValue(forKey: "edid_header_serial")
+        }
+
+        return displaysArray
+    }
+
     // MARK: - Built-in Display Info
     
     /// Get built-in display specifications for known Mac models
