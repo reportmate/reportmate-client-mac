@@ -317,4 +317,102 @@ struct RegistryDisplay: Equatable, Sendable {
         }
         return filled
     }
+
+    /// Vendor id system_profiler reports when macOS read no EDID at all: ASCII "unkn".
+    static let unknownVendorId = "756e6b6e"
+    /// Name a row gets when nothing on the machine can say what the display is.
+    static let unidentifiedName = "Unidentified Display"
+
+    /// system_profiler names a display with the literal localization key
+    /// `spdisplays_display` when its EDID has no name descriptor, and reports the vendor
+    /// as `756e6b6e` when there was no EDID to read: KVMs, adapters, virtual and AirPlay
+    /// displays. Neither is a name, and both read as a monitor model downstream.
+    static func isUnresolved(_ row: [String: Any]) -> Bool {
+        let name = (row["name"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+        let vendorId = (row["vendor_id"] as? String ?? "").lowercased()
+        return name.isEmpty || name == "spdisplays_display" || vendorId == unknownVendorId
+            || vendorId == "0x" + unknownVendorId
+    }
+
+    /// Name unresolved external rows from the EDID on their connector, and mark the rest
+    /// `unidentified` so consumers skip them by rule rather than by an unrecognised name.
+    ///
+    /// A row with a real vendor id joins as `enrich` does, on vendor, product and header
+    /// serial or on a unique vendor and product. A row with no EDID has nothing to join
+    /// on, so it takes the registry's one attached EDID that no other row claims, and only
+    /// when it is the only such row: two unknowns and two spare EDIDs could pair either way.
+    /// Returns the names it recovered, by row index.
+    @discardableResult
+    static func resolveUnnamed(_ displays: inout [[String: Any]], from registry: [RegistryDisplay]) -> [Int: String] {
+        var resolved: [Int: String] = [:]
+        let unresolved = displays.indices.filter {
+            displays[$0]["type"] as? String == "external" && isUnresolved(displays[$0])
+        }
+        guard !unresolved.isEmpty else { return resolved }
+
+        func modelKey(_ vendorId: String, _ productId: String) -> String {
+            EDIDDisplay.joinKey(vendorId: vendorId, productId: productId, headerSerial: "0")
+        }
+        func hasEDID(_ row: [String: Any]) -> Bool {
+            guard let vendorId = row["vendor_id"] as? String, !vendorId.isEmpty else { return false }
+            let bare = vendorId.lowercased().hasPrefix("0x") ? String(vendorId.dropFirst(2)) : vendorId.lowercased()
+            return bare != unknownVendorId
+        }
+
+        let attached = registry.filter { !$0.isBuiltIn }
+        let registryByKey = Dictionary(grouping: attached) { $0.edid.joinKey }
+        let registryByModel = Dictionary(grouping: attached) { modelKey($0.edid.vendorId, $0.edid.productId) }
+        let rowsByModel = Dictionary(grouping: displays.indices.filter { hasEDID(displays[$0]) }) { index -> String in
+            modelKey(displays[index]["vendor_id"] as? String ?? "", displays[index]["product_id"] as? String ?? "")
+        }
+
+        // Every attached EDID whose model some row with a real vendor id already reports
+        // is spoken for, matched or not.
+        let claimedModels = Set(rowsByModel.keys)
+        let spare = attached.filter { !claimedModels.contains(modelKey($0.edid.vendorId, $0.edid.productId)) }
+        let withoutEDID = unresolved.filter { !hasEDID(displays[$0]) }
+
+        for i in unresolved {
+            var match: RegistryDisplay?
+            if hasEDID(displays[i]) {
+                let vendorId = displays[i]["vendor_id"] as? String ?? ""
+                let productId = displays[i]["product_id"] as? String ?? ""
+                if let headerSerial = displays[i]["edid_header_serial"] as? String,
+                   let candidates = registryByKey[EDIDDisplay.joinKey(vendorId: vendorId, productId: productId, headerSerial: headerSerial)] {
+                    match = candidates.count == 1 ? candidates[0] : nil
+                } else if let candidates = registryByModel[modelKey(vendorId, productId)], candidates.count == 1,
+                          rowsByModel[modelKey(vendorId, productId)]?.count == 1 {
+                    match = candidates[0]
+                }
+            } else if withoutEDID.count == 1, spare.count == 1 {
+                match = spare[0]
+                let edid = spare[0].edid
+                displays[i]["vendor_id"] = edid.vendorId
+                displays[i]["product_id"] = edid.productId
+                if displays[i]["serial_number"] == nil, let serial = edid.serialNumber {
+                    displays[i]["serial_number"] = serial
+                }
+                if displays[i]["manufacturer"] == nil, !edid.manufacturerCode.isEmpty {
+                    displays[i]["manufacturer"] = edid.manufacturerCode
+                }
+                if displays[i]["connection_type"] == nil, let connectionType = spare[0].connectionType {
+                    displays[i]["connection_type"] = connectionType
+                }
+            }
+
+            let recovered = match.flatMap { display -> String? in
+                if let productName = display.productName, !productName.isEmpty { return productName }
+                return display.edid.name
+            }
+            if let recovered {
+                displays[i]["name"] = recovered
+                displays[i]["unidentified"] = false
+                resolved[i] = recovered
+            } else {
+                displays[i]["name"] = unidentifiedName
+                displays[i]["unidentified"] = true
+            }
+        }
+        return resolved
+    }
 }
