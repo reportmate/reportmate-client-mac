@@ -215,11 +215,13 @@ public class InstallsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         for line in psOutput.split(separator: "\n") {
             let fields = line.split(separator: " ", omittingEmptySubsequences: true)
             guard fields.count > 5 else { continue }
-            // Match the executable path itself (directly, under Munki's Python, or under its
-            // supervisor), not a grep or tail that merely mentions the name.
+            // Match the executable itself: its full path (directly, under Munki's Python, or under
+            // its supervisor), or a bare argv[0] from `sudo managedsoftwareupdate` resolved through
+            // /etc/paths.d/munki. Never a grep or tail that merely mentions the name.
             let arguments = fields.dropFirst(5)
-            guard arguments.contains(where: { $0.hasPrefix("/") && $0.hasSuffix("/managedsoftwareupdate") }),
-                  !arguments.contains("--version") else { continue }
+            let isMunki = arguments.first == "managedsoftwareupdate"
+                || arguments.contains(where: { $0.hasPrefix("/") && $0.hasSuffix("/managedsoftwareupdate") })
+            guard isMunki, !arguments.contains("--version") else { continue }
             guard let start = formatter.date(from: fields.prefix(5).joined(separator: " ")) else { continue }
             if oldest == nil || start < oldest! { oldest = start }
         }

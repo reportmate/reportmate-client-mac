@@ -29,6 +29,18 @@ final class MunkiLivenessTests: XCTestCase {
         )
     }
 
+    func testBareArgvZeroFromSudoIsMatched() {
+        let ps = """
+        Wed Oct  7 03:00:00 2026     sudo managedsoftwareupdate -v
+        Wed Oct  7 03:00:01 2026     managedsoftwareupdate -v
+        Wed Oct  7 03:01:00 2026     less managedsoftwareupdate
+        """
+        XCTAssertEqual(
+            InstallsModuleProcessor.oldestRunningMunkiStart(psOutput: ps, timeZone: utc),
+            date("2026-10-07T03:00:01Z")
+        )
+    }
+
     func testSingleDigitAndDoubleDigitDaysParse() {
         let ps = """
         Sat Oct 17 09:41:00 2026     /usr/local/munki/managedsoftwareupdate --auto
