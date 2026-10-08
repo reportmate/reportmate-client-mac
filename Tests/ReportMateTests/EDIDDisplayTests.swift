@@ -259,6 +259,47 @@ final class EDIDDisplayTests: XCTestCase {
         XCTAssertEqual(rows[0]["unidentified"] as? Bool, true)
         XCTAssertEqual(rows[0]["vendor_id"] as? String, "5c23")
     }
+
+    func testNamedRowWithNoEDIDKeepsItsNameAndAdoptsNothing() {
+        let registry = RegistryDisplay.collect(from: [transport(id: 1, serial: "UNIT0001")])
+        var rows: [[String: Any]] = [
+            ["name": "Living Room", "type": "external", "vendor_id": "756e6b6e"],
+        ]
+        XCTAssertTrue(RegistryDisplay.resolveUnnamed(&rows, from: registry).isEmpty)
+        XCTAssertEqual(rows[0]["name"] as? String, "Living Room")
+        XCTAssertEqual(rows[0]["unidentified"] as? Bool, true)
+        XCTAssertEqual(rows[0]["vendor_id"] as? String, "756e6b6e")
+        XCTAssertNil(rows[0]["serial_number"])
+
+        var withUnnamed: [[String: Any]] = [
+            ["name": "Living Room", "type": "external", "vendor_id": "756e6b6e"],
+            ["name": "spdisplays_display", "type": "external", "vendor_id": "756e6b6e"],
+        ]
+        XCTAssertTrue(RegistryDisplay.resolveUnnamed(&withUnnamed, from: registry).isEmpty)
+        XCTAssertEqual(withUnnamed[1]["unidentified"] as? Bool, true)
+        XCTAssertNil(withUnnamed[1]["serial_number"])
+    }
+
+    func testUnknownVendorNeverTakesAnInactiveOrNamelessEDID() {
+        var inactive = transport(id: 1, serial: "UNIT0001")
+        inactive["Active"] = false
+        var rows: [[String: Any]] = [
+            ["name": "spdisplays_display", "type": "external", "vendor_id": "756e6b6e"],
+        ]
+        XCTAssertTrue(RegistryDisplay.resolveUnnamed(&rows, from: RegistryDisplay.collect(from: [inactive])).isEmpty)
+        XCTAssertEqual(rows[0]["unidentified"] as? Bool, true)
+        XCTAssertNil(rows[0]["serial_number"])
+
+        let nameless = RegistryDisplay.collect(from: [["IOObjectClass": "IOPortTransportStateDisplayPort", "IORegistryEntryID": 1, "ParentPortTypeDescription": "HDMI", "EDID": edid(serial: "UNIT0001", name: nil)]])
+        var unnamed: [[String: Any]] = [
+            ["name": "spdisplays_display", "type": "external", "vendor_id": "756e6b6e"],
+        ]
+        XCTAssertTrue(RegistryDisplay.resolveUnnamed(&unnamed, from: nameless).isEmpty)
+        XCTAssertEqual(unnamed[0]["name"] as? String, RegistryDisplay.unidentifiedName)
+        XCTAssertEqual(unnamed[0]["unidentified"] as? Bool, true)
+        XCTAssertEqual(unnamed[0]["vendor_id"] as? String, "756e6b6e")
+        XCTAssertNil(unnamed[0]["serial_number"])
+    }
 }
 
 private extension Data {
