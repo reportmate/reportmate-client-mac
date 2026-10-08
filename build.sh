@@ -1651,11 +1651,12 @@ POSTINSTALL_SCRIPT
 # check-in first, so the device appears in ReportMate within seconds; then one
 # forced collection of every enabled module, so a Mac shelved straight after
 # enrolment still has identity and logged-in user data as of install.
+# Quick storage keeps that run short; the daily deep task does the full walk.
 # The client writes its own log; nothing here needs capturing.
 log_message "Running initial check-in, then a full collection..."
 nohup /bin/sh -c '
     /usr/local/reportmate/managedreportsrunner --hello
-    exec /usr/local/reportmate/managedreportsrunner --force
+    exec /usr/local/reportmate/managedreportsrunner --force --storage-mode quick
 ' >/dev/null 2>&1 &
 disown
 
