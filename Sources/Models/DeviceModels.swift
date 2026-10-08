@@ -189,6 +189,9 @@ public struct EventMetadata: Codable, Sendable {
     public let platform: String
     public let collectionType: String
     public let enabledModules: [String]
+    /// Basic identifying details the API reads when no module data names the device,
+    /// which is what lets a check-in without modules still register it by name.
+    public let additional: [String: String]?
     
     public init(
         deviceId: String,
@@ -197,7 +200,8 @@ public struct EventMetadata: Codable, Sendable {
         clientVersion: String = AppVersion.current,
         platform: String = "macOS",
         collectionType: String = "Full",
-        enabledModules: [String] = []
+        enabledModules: [String] = [],
+        additional: [String: String]? = nil
     ) {
         self.deviceId = deviceId
         self.serialNumber = serialNumber
@@ -206,6 +210,7 @@ public struct EventMetadata: Codable, Sendable {
         self.platform = platform
         self.collectionType = collectionType
         self.enabledModules = enabledModules
+        self.additional = additional
     }
 }
 

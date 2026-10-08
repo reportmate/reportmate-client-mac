@@ -26,6 +26,9 @@ struct ReportMateClient: AsyncParsableCommand {
     @Flag(name: .long, help: "Transmit cached data only, do not collect new data")
     var transmitOnly: Bool = false
     
+    @Flag(name: .long, help: "Send a check-in with device identity only (no modules) and exit")
+    var hello: Bool = false
+
     @Option(name: .long, help: "Run specific module only")
     var runModule: String?
     
@@ -213,7 +216,9 @@ struct ReportMateClient: AsyncParsableCommand {
         print("[\(timestamp)] INFO    Run Modules: \(runModules ?? "NONE")")
         
         let effectiveMode: String
-        if let module = runModule {
+        if hello {
+            effectiveMode = "Hello (identity only, no modules)"
+        } else if let module = runModule {
             effectiveMode = "Single Module: \(module)"
         } else if let modules = runModules {
             effectiveMode = "Multiple Modules: \(modules)"
@@ -340,7 +345,11 @@ struct ReportMateClient: AsyncParsableCommand {
         
         var modulesToRun: [String] = []
         
-        if let module = runModule {
+        if hello {
+            // Identity only: the envelope below is enough for the API to register the
+            // device, so it shows up seconds after install instead of after a full run.
+            print("[\(timestamp)] INFO  === HELLO CHECK-IN ===")
+        } else if let module = runModule {
             modulesToRun = [module]
             print("[\(timestamp)] INFO  === SINGLE MODULE COLLECTION ===")
         } else if let modules = runModules {
@@ -386,8 +395,8 @@ struct ReportMateClient: AsyncParsableCommand {
         let osVersion = SystemUtils.getOSVersion()
         let model = SystemUtils.getHardwareModel()
         let architecture = SystemUtils.getArchitecture()
-        let deviceName = ProcessInfo.processInfo.hostName
-        
+        let deviceName = SystemUtils.getComputerName()
+
         // Use configured device ID or generate a UUID if not set
         // API requires deviceId to be in UUID format
         let finalDeviceId: String
@@ -420,7 +429,14 @@ struct ReportMateClient: AsyncParsableCommand {
             clientVersion: AppVersion.current,
             platform: "macOS",
             collectionType: "Full",
-            enabledModules: modulesToRun
+            enabledModules: modulesToRun,
+            additional: [
+                "deviceName": deviceName,
+                "manufacturer": "Apple",
+                "model": model,
+                "osVersion": osVersion,
+                "architecture": architecture
+            ]
         )
         
         // Generate event message: "Hardware, System, Network data reported"
@@ -466,7 +482,17 @@ struct ReportMateClient: AsyncParsableCommand {
             )
             events.append(summaryEvent)
         }
-        
+
+        if hello {
+            events.append(ReportMateEvent(
+                moduleId: "collection",
+                eventType: "info",
+                message: "Device checked in",
+                timestamp: Date(),
+                stringDetails: ["collectionType": "Hello"]
+            ))
+        }
+
         // Create UnifiedDevicePayload matching Windows format for API
         let unifiedPayload = UnifiedDevicePayload(
             metadata: metadata,
@@ -502,7 +528,9 @@ struct ReportMateClient: AsyncParsableCommand {
         let cacheService = CacheService()
         let apiClient = APIClient(configuration: config)
         
-        if let payloadDict = payloadDict {
+        // A hello carries no module data, so it must not replace the last real
+        // collection that --transmit-only would resend.
+        if let payloadDict = payloadDict, !hello {
             // Cache the data
             await cacheService.setCachedData(payloadDict)
             await cacheService.setLastCollectionTimestamp(Date())
