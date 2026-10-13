@@ -4,7 +4,9 @@
 //
 //  Main tab — centered app info header, then a 50/50 two-column layout.
 //  Left column: Connection + osquery. Right column: Collection Schedules + Modules.
-//  MDM-managed settings display a lock icon and are disabled.
+//  Below them, a read-only Services card lists the installed launchd jobs.
+//  Settings a profile manages are disabled (gray); one banner under the
+//  header explains why, instead of a caption on every field.
 //
 
 import SwiftUI
@@ -50,6 +52,10 @@ struct SettingsView: View {
             VStack(spacing: 16) {
                 appInfoHeader
 
+                if viewModel.hasManagedSettings {
+                    ProfileManagedBanner()
+                }
+
                 Divider()
 
                 // Two-column layout — boxes stack within each column
@@ -68,6 +74,13 @@ struct SettingsView: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
+
+                ServicesSection(
+                    prefixes: ["com.github.reportmate"],
+                    extraDaemonDirectories: [
+                        Bundle.main.bundleURL.appendingPathComponent("Contents/Library/LaunchDaemons").path
+                    ]
+                )
 
                 HStack {
                     Text("v\(marketingVersion) (\(buildNumber))")
@@ -339,12 +352,6 @@ struct SettingsView: View {
                         moduleCard(module: module, managed: managed)
                     }
                 }
-
-                if managed {
-                    Label("Managed by MDM", systemImage: "lock.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
             }
             .padding(.vertical, 8)
         } label: {
@@ -402,11 +409,6 @@ struct SettingsView: View {
             }
             content()
                 .disabled(managed)
-            if managed {
-                Label("Managed by MDM", systemImage: "lock.fill")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
         }
     }
 }

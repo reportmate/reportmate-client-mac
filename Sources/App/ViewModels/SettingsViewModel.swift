@@ -73,6 +73,9 @@ final class SettingsViewModel {
     private static let preferencesDomain = "com.github.reportmate"
     private static let globalPrefsPath = "/Library/Preferences/com.github.reportmate.plist"
 
+    /// True when a profile forces at least one of the app's keys.
+    var hasManagedSettings: Bool { !managedKeys.isEmpty }
+
     func isManaged(_ key: String) -> Bool {
         managedKeys.contains(key)
     }
