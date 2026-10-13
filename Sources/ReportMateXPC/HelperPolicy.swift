@@ -24,9 +24,10 @@ public enum HelperPolicy {
         "anchor apple generic and identifier \"\(kReportMateGUIIdentifier)\" and certificate leaf[subject.OU] = \"\(teamID)\""
     }
 
-    /// Preference keys the GUI's Prefs tab edits. The helper writes nothing else.
+    /// Preference keys the GUI's Prefs tab edits. The helper writes nothing else;
+    /// in particular it never writes the client passphrase.
     public static let writableKeys: Set<String> = [
-        "ApiUrl", "DeviceId", "Passphrase", "ValidateSSL", "CollectionInterval",
+        "ApiUrl", "DeviceId", "ValidateSSL", "CollectionInterval",
         "LogLevel", "StorageMode", "Timeout", "OsqueryPath", "OsqueryExtensionPath",
         "ExtensionEnabled", "UseAltSystemInfo", "EnabledModules",
     ]

@@ -66,4 +66,21 @@ final class SettingsViewModelTests: XCTestCase {
         let snapshot = SettingsSnapshot(apiUrl: "https://a.example.com")
         XCTAssertTrue(SettingsViewModel.writes(from: snapshot, to: snapshot, managed: []).isEmpty)
     }
+
+    func testPassphraseIsStatusOnly() {
+        let model = SettingsViewModel()
+        model.load(from: stored, managed: [])
+        XCTAssertEqual(model.passphraseState, .notSet)
+
+        var withPassphrase = stored
+        withPassphrase["Passphrase"] = String(repeating: "x", count: 4)
+        model.load(from: withPassphrase, managed: [])
+        XCTAssertEqual(model.passphraseState, .set)
+        XCTAssertFalse(model.hasUnsavedChanges)
+
+        model.load(from: withPassphrase, managed: ["Passphrase"])
+        XCTAssertEqual(model.passphraseState, .managed)
+        XCTAssertFalse(model.isManaged("Passphrase"))
+        XCTAssertFalse(SettingsViewModel.editableKeys.contains("Passphrase"))
+    }
 }

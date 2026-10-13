@@ -195,10 +195,7 @@ struct SettingsView: View {
                         .textFieldStyle(.roundedBorder)
                 }
 
-                settingRow("Passphrase", label: "Passphrase") {
-                    SecureField("Client passphrase", text: $viewModel.passphrase)
-                        .textFieldStyle(.roundedBorder)
-                }
+                passphraseRow
 
                 settingRow("ValidateSSL") {
                     Toggle("Validate SSL Certificates", isOn: $viewModel.validateSSL)
@@ -208,6 +205,34 @@ struct SettingsView: View {
         } label: {
             Label("Connection", systemImage: "network")
                 .font(.headline)
+        }
+    }
+
+    /// Status only: the passphrase is never shown or edited here.
+    @ViewBuilder
+    private var passphraseRow: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Passphrase")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            switch viewModel.passphraseState {
+            case .managed:
+                HStack(spacing: 6) {
+                    Text("Set by profile")
+                    Label("Managed", systemImage: "lock.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            case .set:
+                Text("Set")
+            case .notSet:
+                Text("Not set")
+            }
+            if viewModel.passphraseState != .managed {
+                Text("Set by a configuration profile.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
