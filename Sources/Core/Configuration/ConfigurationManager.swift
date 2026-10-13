@@ -83,7 +83,7 @@ public class ConfigurationManager {
     private static func loadConfiguration(overrides: [String: Any] = [:]) throws -> ReportMateConfiguration {
         resolve(
             userPlist: loadUserPlist(),
-            environment: loadEnvironmentVariables(),
+            environment: environmentValues(from: ProcessInfo.processInfo.environment),
             systemPlist: loadSystemPlist(),
             policy: loadConfigurationProfiles(),
             overrides: overrides
@@ -141,16 +141,15 @@ public class ConfigurationManager {
         return config.isEmpty ? nil : config
     }
 
-    private static func loadEnvironmentVariables() -> [String: Any] {
+    /// Maps REPORTMATE_* environment variables to configuration keys. Secrets
+    /// (Passphrase, ApiKey) are deliberately never read from the environment: they
+    /// come only from the system plist or a configuration profile.
+    static func environmentValues(from environment: [String: String]) -> [String: Any] {
         var config: [String: Any] = [:]
-        let environment = ProcessInfo.processInfo.environment
-        
-        // Map environment variables to configuration keys
+
         let envMappings: [String: String] = [
             "REPORTMATE_API_URL": "ApiUrl",
             "REPORTMATE_DEVICE_ID": "DeviceId",
-            "REPORTMATE_PASSPHRASE": "Passphrase",
-            "REPORTMATE_API_KEY": "ApiKey",
             "REPORTMATE_COLLECTION_INTERVAL": "CollectionInterval",
             "REPORTMATE_LOG_LEVEL": "LogLevel",
             "REPORTMATE_QUERY_TIMEOUT": "QueryTimeoutSeconds",
@@ -211,10 +210,12 @@ public struct ReportMateConfiguration {
     public var apiUrl: String?
     public var deviceId: String?
     /// Client passphrase for API authentication (X-Client-Passphrase header)
-    /// Configured via REPORTMATE_PASSPHRASE environment variable or Passphrase plist key
+    /// Configured via the Passphrase key in the system plist or a configuration profile;
+    /// never read from the environment.
     public var passphrase: String?
     /// Scoped API key for API authentication (X-API-Key header)
-    /// Configured via REPORTMATE_API_KEY environment variable or ApiKey plist key.
+    /// Configured via the ApiKey key in the system plist or a configuration profile;
+    /// never read from the environment.
     /// Sent alongside the passphrase; the API falls through to the passphrase if the
     /// key is absent or invalid, so this is safe to roll out incrementally.
     public var apiKey: String?
