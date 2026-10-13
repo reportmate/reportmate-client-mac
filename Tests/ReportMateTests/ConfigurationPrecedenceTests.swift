@@ -38,6 +38,17 @@ final class ConfigurationPrecedenceTests: XCTestCase {
         XCTAssertEqual(config.logLevel, "debug")
     }
 
+    func testEnvironmentNeverSuppliesPassphraseOrApiKey() {
+        let values = ConfigurationManager.environmentValues(from: [
+            "REPORTMATE_PASSPHRASE": "xxxx",
+            "REPORTMATE_API_KEY": "xxxx",
+            "REPORTMATE_LOG_LEVEL": "debug",
+        ])
+        XCTAssertNil(values["Passphrase"])
+        XCTAssertNil(values["ApiKey"])
+        XCTAssertEqual(values["LogLevel"] as? String, "debug")
+    }
+
     func testRunFlagBeatsProfile() {
         let config = ConfigurationManager.resolve(
             userPlist: nil,
