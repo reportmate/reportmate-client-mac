@@ -164,7 +164,6 @@ struct RunView: View {
     // MARK: - Actions
 
     private func startRun() {
-        viewModel.save(using: xpcClient)
         xpcClient.runCollection(modules: selectedModules.sorted())
     }
 

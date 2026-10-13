@@ -505,6 +505,21 @@ else
     EXECUTABLE_PATH="${BUILD_PATH}/${PRODUCT_NAME}"
 fi
 
+# Stamp a copied GUI or helper binary with the SDK it was built against. The
+# -platform_version linker flag above can be lost on its way to the linker in a
+# universal SwiftPM build, leaving the binary marked with the 14.0 SDK, and
+# AppKit then draws the pre-macOS 26 window chrome. vtool rewrites the load
+# command after linking, before signing, which always takes.
+stamp_build_version() {
+    local bin="$1"
+    local sdk
+    sdk="$(xcrun --show-sdk-version 2>/dev/null)"
+    [ -n "$sdk" ] || { log_warn "No SDK version from xcrun; ${bin} keeps its linked build version"; return 0; }
+    vtool -set-build-version macos 14.0 "$sdk" -replace -output "${bin}.stamped" "$bin" \
+        && mv "${bin}.stamped" "$bin" \
+        || { log_error "vtool could not stamp ${bin}"; exit 1; }
+}
+
 # Copy binaries to release
 cp "$EXECUTABLE_PATH" "${DIST_DIR}/${PRODUCT_NAME}"
 
@@ -521,6 +536,7 @@ fi
 GUI_APP_PATH="${BUILD_PATH}/ReportMateApp"
 if [ -f "$GUI_APP_PATH" ]; then
     cp "$GUI_APP_PATH" "${DIST_DIR}/ReportMateApp"
+    stamp_build_version "${DIST_DIR}/ReportMateApp"
     log_success "GUI app binary copied to dist"
 else
     log_warn "ReportMateApp not found at: $GUI_APP_PATH (GUI will not be packaged)"
@@ -530,6 +546,7 @@ fi
 HELPER_PATH="${BUILD_PATH}/ReportMateHelper"
 if [ -f "$HELPER_PATH" ]; then
     cp "$HELPER_PATH" "${DIST_DIR}/ReportMateHelper"
+    stamp_build_version "${DIST_DIR}/ReportMateHelper"
     log_success "Privileged helper binary copied to dist"
 else
     log_warn "ReportMateHelper not found at: $HELPER_PATH (helper will not be packaged)"
@@ -645,6 +662,7 @@ if [ "$SKIP_PKG" = false ]; then
     GUI_EXECUTABLE="${BUILD_PATH}/ReportMateApp"
     if [ -f "$GUI_EXECUTABLE" ]; then
         cp "$GUI_EXECUTABLE" "$APP_MACOS/ReportMateApp"
+        stamp_build_version "$APP_MACOS/ReportMateApp"
         log_success "GUI app binary copied to app bundle"
     else
         log_warn "ReportMateApp not found at: $GUI_EXECUTABLE (GUI will not be available)"
@@ -654,6 +672,7 @@ if [ "$SKIP_PKG" = false ]; then
     HELPER_EXECUTABLE="${BUILD_PATH}/ReportMateHelper"
     if [ -f "$HELPER_EXECUTABLE" ]; then
         cp "$HELPER_EXECUTABLE" "$APP_MACOS/ReportMateHelper"
+        stamp_build_version "$APP_MACOS/ReportMateHelper"
         log_success "Helper binary copied to app bundle"
         
         # The package installs the helper as a system LaunchDaemon: postinstall

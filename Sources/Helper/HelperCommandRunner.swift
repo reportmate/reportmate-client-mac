@@ -8,6 +8,7 @@
 
 import Foundation
 import os
+import Security
 import ReportMateXPC
 
 final class HelperCommandRunner: NSObject, HelperXPCProtocol, @unchecked Sendable {
@@ -90,31 +91,64 @@ final class HelperCommandRunner: NSObject, HelperXPCProtocol, @unchecked Sendabl
         cancelRunningProcess()
     }
 
-    func setPreference(key: String, stringValue: String, domain: String, withReply reply: @escaping (Bool) -> Void) {
-        reply(write(key: key, value: stringValue as CFString, domain: domain))
+    func setPreference(key: String, stringValue: String, domain: String, authorization: Data, withReply reply: @escaping (Bool) -> Void) {
+        reply(write(key: key, value: stringValue as CFString, domain: domain, authorization: authorization))
     }
 
-    func setBoolPreference(key: String, boolValue: Bool, domain: String, withReply reply: @escaping (Bool) -> Void) {
-        reply(write(key: key, value: boolValue as CFPropertyList, domain: domain))
+    func setBoolPreference(key: String, boolValue: Bool, domain: String, authorization: Data, withReply reply: @escaping (Bool) -> Void) {
+        reply(write(key: key, value: boolValue as CFPropertyList, domain: domain, authorization: authorization))
     }
 
-    func setIntPreference(key: String, intValue: Int, domain: String, withReply reply: @escaping (Bool) -> Void) {
-        reply(write(key: key, value: intValue as CFNumber as CFPropertyList, domain: domain))
+    func setIntPreference(key: String, intValue: Int, domain: String, authorization: Data, withReply reply: @escaping (Bool) -> Void) {
+        reply(write(key: key, value: intValue as CFNumber as CFPropertyList, domain: domain, authorization: authorization))
     }
 
-    func setArrayPreference(key: String, arrayValue: [String], domain: String, withReply reply: @escaping (Bool) -> Void) {
-        reply(write(key: key, value: arrayValue as CFArray as CFPropertyList, domain: domain))
+    func setArrayPreference(key: String, arrayValue: [String], domain: String, authorization: Data, withReply reply: @escaping (Bool) -> Void) {
+        reply(write(key: key, value: arrayValue as CFArray as CFPropertyList, domain: domain, authorization: authorization))
     }
 
-    func removePreference(key: String, domain: String, withReply reply: @escaping (Bool) -> Void) {
-        reply(write(key: key, value: nil, domain: domain))
+    func removePreference(key: String, domain: String, authorization: Data, withReply reply: @escaping (Bool) -> Void) {
+        reply(write(key: key, value: nil, domain: domain, authorization: authorization))
+    }
+
+    // MARK: - Authorization
+
+    /// True when `externalForm` is an authorization reference that already
+    /// holds the admin right. The helper never prompts: the GUI asked the
+    /// administrator when the user clicked Save, and this only confirms the
+    /// credential it was given.
+    static func isAdminAuthorized(_ externalForm: Data) -> Bool {
+        guard externalForm.count == MemoryLayout<AuthorizationExternalForm>.size else { return false }
+        var form = AuthorizationExternalForm()
+        withUnsafeMutableBytes(of: &form) { buffer in
+            _ = externalForm.copyBytes(to: buffer)
+        }
+        var authRef: AuthorizationRef?
+        guard AuthorizationCreateFromExternalForm(&form, &authRef) == errAuthorizationSuccess, let authRef else {
+            return false
+        }
+        defer { AuthorizationFree(authRef, []) }
+
+        return kReportMateAdminRight.withCString { name in
+            var item = AuthorizationItem(name: name, valueLength: 0, value: nil, flags: 0)
+            return withUnsafeMutablePointer(to: &item) { itemPointer in
+                var rights = AuthorizationRights(count: 1, items: itemPointer)
+                let status = AuthorizationCopyRights(authRef, &rights, nil, [.extendRights], nil)
+                return status == errAuthorizationSuccess
+            }
+        }
     }
 
     /// Writes one key to /Library/Preferences/<domain>.plist (any user, any
     /// host), the file the runner reads below a configuration profile. Only
     /// the keys the Prefs tab edits, in the ReportMate domain, are accepted,
-    /// and never one a configuration profile manages.
-    private func write(key: String, value: CFPropertyList?, domain: String) -> Bool {
+    /// never one a configuration profile manages, and only with an
+    /// administrator's authorization.
+    private func write(key: String, value: CFPropertyList?, domain: String, authorization: Data) -> Bool {
+        guard Self.isAdminAuthorized(authorization) else {
+            log.error("Refused preference write for \(domain, privacy: .public) \(key, privacy: .public): no administrator authorization")
+            return false
+        }
         guard HelperPolicy.canWrite(key: key, domain: domain) else {
             log.error("Refused preference write for \(domain, privacy: .public) \(key, privacy: .public)")
             return false
