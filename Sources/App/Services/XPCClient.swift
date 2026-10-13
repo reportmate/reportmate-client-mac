@@ -209,82 +209,56 @@ final class XPCClient: NSObject {
 
     // MARK: - Preference Management
 
-    func setStringPreference(key: String, value: String) {
-        if helperAvailable {
-            connect()
-            helperProxy { proxy in
-                proxy.setPreference(key: key, stringValue: value, domain: kReportMatePreferenceDomain) { _ in }
-            }
-        } else {
-            writePreferenceDirect(key: key, value: value)
+    // Machine settings are written only by the privileged helper, and only
+    // with an administrator's authorization from the Save prompt. Each call
+    // waits for the helper's reply; a refused or missing helper counts as a
+    // failed write.
+
+    func setStringPreference(key: String, value: String, authorization: Data) async -> Bool {
+        await callHelper { proxy, reply in
+            proxy.setPreference(key: key, stringValue: value, domain: kReportMatePreferenceDomain, authorization: authorization, withReply: reply)
         }
     }
 
-    func setBoolPreference(key: String, value: Bool) {
-        if helperAvailable {
-            connect()
-            helperProxy { proxy in
-                proxy.setBoolPreference(key: key, boolValue: value, domain: kReportMatePreferenceDomain) { _ in }
-            }
-        } else {
-            writePreferenceDirect(key: key, value: value ? "true" : "false", type: "-bool")
+    func setBoolPreference(key: String, value: Bool, authorization: Data) async -> Bool {
+        await callHelper { proxy, reply in
+            proxy.setBoolPreference(key: key, boolValue: value, domain: kReportMatePreferenceDomain, authorization: authorization, withReply: reply)
         }
     }
 
-    func setIntPreference(key: String, value: Int) {
-        if helperAvailable {
-            connect()
-            helperProxy { proxy in
-                proxy.setIntPreference(key: key, intValue: value, domain: kReportMatePreferenceDomain) { _ in }
-            }
-        } else {
-            writePreferenceDirect(key: key, value: String(value), type: "-int")
+    func setIntPreference(key: String, value: Int, authorization: Data) async -> Bool {
+        await callHelper { proxy, reply in
+            proxy.setIntPreference(key: key, intValue: value, domain: kReportMatePreferenceDomain, authorization: authorization, withReply: reply)
         }
     }
 
-    func setArrayPreference(key: String, value: [String]) {
-        if helperAvailable {
-            connect()
-            helperProxy { proxy in
-                proxy.setArrayPreference(key: key, arrayValue: value, domain: kReportMatePreferenceDomain) { _ in }
-            }
-        } else {
-            writeArrayPreferenceDirect(key: key, value: value)
+    func setArrayPreference(key: String, value: [String], authorization: Data) async -> Bool {
+        await callHelper { proxy, reply in
+            proxy.setArrayPreference(key: key, arrayValue: value, domain: kReportMatePreferenceDomain, authorization: authorization, withReply: reply)
         }
     }
 
-    func removePreference(key: String) {
-        if helperAvailable {
-            connect()
-            helperProxy { proxy in
-                proxy.removePreference(key: key, domain: kReportMatePreferenceDomain) { _ in }
-            }
-        } else {
-            deletePreferenceDirect(key: key)
+    func removePreference(key: String, authorization: Data) async -> Bool {
+        await callHelper { proxy, reply in
+            proxy.removePreference(key: key, domain: kReportMatePreferenceDomain, authorization: authorization, withReply: reply)
         }
     }
 
-    // MARK: - Direct Preference Writes (user-level fallback)
-
-    private func writePreferenceDirect(key: String, value: String, type: String = "-string") {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
-        task.arguments = ["write", kReportMatePreferenceDomain, key, type, value]
-        try? task.run()
-    }
-
-    private func writeArrayPreferenceDirect(key: String, value: [String]) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
-        task.arguments = ["write", kReportMatePreferenceDomain, key, "-array"] + value
-        try? task.run()
-    }
-
-    private func deletePreferenceDirect(key: String) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
-        task.arguments = ["delete", kReportMatePreferenceDomain, key]
-        try? task.run()
+    /// Calls the helper and waits for its reply; a refused or broken connection
+    /// counts as a failed write rather than leaving the caller waiting.
+    private func callHelper(
+        _ body: @escaping @Sendable (HelperXPCProtocol, @escaping @Sendable (Bool) -> Void) -> Void
+    ) async -> Bool {
+        connect()
+        guard let conn = connection else { return false }
+        return await withCheckedContinuation { continuation in
+            let once = ResumeOnce(continuation)
+            guard let proxy = conn.remoteObjectProxyWithErrorHandler({ _ in once.resume(false) }) as? HelperXPCProtocol else {
+                once.resume(false)
+                return
+            }
+            body(proxy) { ok in once.resume(ok) }
+        }
     }
 
     // MARK: - Private
@@ -336,6 +310,25 @@ final class XPCClient: NSObject {
             return
         }
         block(proxy)
+    }
+}
+
+/// Resumes a continuation exactly once, whichever of the reply or the
+/// connection error arrives first.
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    init(_ continuation: CheckedContinuation<Bool, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ value: Bool) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
     }
 }
 

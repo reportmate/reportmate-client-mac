@@ -20,8 +20,15 @@ public let kReportMateCLIPath = "/Applications/Utilities/Managed Reports Runner.
 /// Helper LaunchDaemon plist name (used by SMAppService)
 public let kHelperPlistName = "com.github.reportmate.helper.plist"
 
+/// The authorization right an administrator must hold before the helper
+/// writes a machine setting. The GUI obtains it with the system's
+/// administrator prompt at the moment of Save; the helper only verifies it.
+public let kReportMateAdminRight = "system.privilege.admin"
+
 /// Protocol exposed by the privileged helper daemon.
-/// All methods run with root privileges.
+/// All methods run with root privileges. Every preference write and removal
+/// carries `authorization`, an AuthorizationExternalForm that must already
+/// hold `kReportMateAdminRight`; without it the helper refuses the write.
 @objc public protocol HelperXPCProtocol: Sendable {
     /// Launch the CLI binary with the given arguments.
     /// Output is streamed back via the client protocol.
@@ -31,19 +38,19 @@ public let kHelperPlistName = "com.github.reportmate.helper.plist"
     func stopCollection()
 
     /// Write a string preference at system level (kCFPreferencesAnyUser).
-    func setPreference(key: String, stringValue: String, domain: String, withReply reply: @escaping (Bool) -> Void)
+    func setPreference(key: String, stringValue: String, domain: String, authorization: Data, withReply reply: @escaping (Bool) -> Void)
 
     /// Write a boolean preference at system level.
-    func setBoolPreference(key: String, boolValue: Bool, domain: String, withReply reply: @escaping (Bool) -> Void)
+    func setBoolPreference(key: String, boolValue: Bool, domain: String, authorization: Data, withReply reply: @escaping (Bool) -> Void)
 
     /// Write an integer preference at system level.
-    func setIntPreference(key: String, intValue: Int, domain: String, withReply reply: @escaping (Bool) -> Void)
+    func setIntPreference(key: String, intValue: Int, domain: String, authorization: Data, withReply reply: @escaping (Bool) -> Void)
 
     /// Write an array preference at system level.
-    func setArrayPreference(key: String, arrayValue: [String], domain: String, withReply reply: @escaping (Bool) -> Void)
+    func setArrayPreference(key: String, arrayValue: [String], domain: String, authorization: Data, withReply reply: @escaping (Bool) -> Void)
 
     /// Remove a preference key at system level.
-    func removePreference(key: String, domain: String, withReply reply: @escaping (Bool) -> Void)
+    func removePreference(key: String, domain: String, authorization: Data, withReply reply: @escaping (Bool) -> Void)
 
     /// Return the helper's version string for version-mismatch detection.
     func getHelperVersion(withReply reply: @escaping (String) -> Void)

@@ -5,8 +5,11 @@
 //  Main tab — centered app info header, then a 50/50 two-column layout.
 //  Left column: Connection + osquery. Right column: Collection Schedules + Modules.
 //  Below them, a read-only Services card lists the installed launchd jobs.
-//  Settings a profile manages are disabled (gray); one banner under the
-//  header explains why, instead of a caption on every field.
+//  Settings a profile manages are disabled (gray) and only the profile can
+//  change them; one banner under the header explains why, instead of a
+//  caption on every field. Other settings are editable; Save asks for an
+//  administrator's name and password, then writes them through the helper.
+//  When a profile manages every setting the tab is read-only, with no Save.
 //
 
 import SwiftUI
@@ -88,6 +91,9 @@ struct SettingsView: View {
                         .foregroundStyle(.tertiary)
                     Spacer()
                     saveStatusLabel
+                    if !viewModel.isFullyManaged {
+                        saveButtons
+                    }
                 }
                 .padding(.top, 4)
             }
@@ -127,7 +133,26 @@ struct SettingsView: View {
         .padding(.top, 8)
     }
 
-    // MARK: - Auto-Save Status
+    // MARK: - Save
+
+    @ViewBuilder
+    private var saveButtons: some View {
+        Button("Revert") {
+            viewModel.revert()
+        }
+        .disabled(!viewModel.hasUnsavedChanges || viewModel.saveStatus == .saving)
+        .help("Discard changes that have not been saved")
+
+        Button("Save") {
+            Task { await viewModel.save() }
+        }
+        .keyboardShortcut("s", modifiers: .command)
+        .buttonStyle(.borderedProminent)
+        .disabled(!viewModel.hasUnsavedChanges || viewModel.saveStatus == .saving)
+        .help("An administrator name and password is needed to save")
+    }
+
+    // MARK: - Save Status
 
     @ViewBuilder
     private var saveStatusLabel: some View {
