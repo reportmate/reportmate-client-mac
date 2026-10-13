@@ -39,6 +39,10 @@ struct SettingsView: View {
     @State private var plistPopoverSchedule: String?
     @State private var plistContent: String = ""
 
+    /// Bound to the first field so the window opens with nothing focused rather
+    /// than drawing a focus ring on whichever control comes first; Tab still works.
+    @FocusState private var apiUrlFocused: Bool
+
     private var marketingVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "–"
     }
@@ -89,6 +93,11 @@ struct SettingsView: View {
                     Text("v\(marketingVersion) (\(buildNumber))")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                    HStack(spacing: 12) {
+                        Link("Documentation", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/wiki")!)
+                        Link("Report Issue", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/issues")!)
+                    }
+                    .font(.caption)
                     Spacer()
                     saveStatusLabel
                     if !viewModel.isFullyManaged {
@@ -102,6 +111,7 @@ struct SettingsView: View {
         .onAppear {
             viewModel.configure(client: xpcClient)
             viewModel.load()
+            Task { @MainActor in apiUrlFocused = false }
         }
     }
 
@@ -123,12 +133,6 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            HStack(spacing: 16) {
-                Link("Documentation", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/wiki")!)
-                    .font(.caption)
-                Link("Report Issue", destination: URL(string: "https://github.com/reportmate/reportmate-client-mac/issues")!)
-                    .font(.caption)
-            }
         }
         .padding(.top, 8)
     }
@@ -183,6 +187,7 @@ struct SettingsView: View {
                 settingRow("ApiUrl", label: "API URL") {
                     TextField("https://reportmate.example.com", text: $viewModel.apiUrl)
                         .textFieldStyle(.roundedBorder)
+                        .focused($apiUrlFocused)
                 }
 
                 settingRow("DeviceId", label: "Device ID") {
