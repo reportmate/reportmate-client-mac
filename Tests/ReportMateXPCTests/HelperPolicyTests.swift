@@ -31,6 +31,7 @@ final class HelperPolicyTests: XCTestCase {
         XCTAssertTrue(HelperPolicy.canWrite(key: "EnabledModules", domain: "com.github.reportmate"))
         XCTAssertFalse(HelperPolicy.canWrite(key: "ApiUrl", domain: "com.apple.loginwindow"))
         XCTAssertFalse(HelperPolicy.canWrite(key: "SomethingElse", domain: "com.github.reportmate"))
+        XCTAssertFalse(HelperPolicy.canWrite(key: "Passphrase", domain: "com.github.reportmate"))
     }
 
     func testPathTrustRules() {

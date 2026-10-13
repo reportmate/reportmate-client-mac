@@ -24,7 +24,6 @@ import Foundation
 struct SettingsSnapshot: Equatable {
     var apiUrl = ""
     var deviceId = ""
-    var passphrase = ""
     var validateSSL = true
     var collectionInterval = "3600"
     var logLevel = "info"
@@ -68,8 +67,24 @@ final class SettingsViewModel {
 
     var apiUrl = ""
     var deviceId = ""
-    var passphrase = ""
     var validateSSL = true
+
+    /// Whether a passphrase is configured. Its value is never read into the
+    /// window, and the window cannot change it.
+    enum SecretState: Equatable {
+        case notSet, set, managed
+
+        init(managed: Bool, stored: Any?) {
+            if managed {
+                self = .managed
+            } else if let text = stored as? String, !text.isEmpty {
+                self = .set
+            } else {
+                self = .notSet
+            }
+        }
+    }
+    private(set) var passphraseState: SecretState = .notSet
 
     // MARK: - Collection Settings
 
@@ -105,7 +120,7 @@ final class SettingsViewModel {
 
     /// Every key the Prefs tab edits.
     static let editableKeys = [
-        "ApiUrl", "DeviceId", "Passphrase", "ValidateSSL",
+        "ApiUrl", "DeviceId", "ValidateSSL",
         "CollectionInterval", "LogLevel", "StorageMode", "Timeout",
         "OsqueryPath", "OsqueryExtensionPath", "ExtensionEnabled",
         "UseAltSystemInfo", "EnabledModules",
@@ -113,7 +128,7 @@ final class SettingsViewModel {
     private static let globalPrefsPath = "/Library/Preferences/com.github.reportmate.plist"
 
     /// True when a profile forces at least one of the app's keys.
-    var hasManagedSettings: Bool { !managedKeys.isEmpty }
+    var hasManagedSettings: Bool { !managedKeys.isEmpty || passphraseState == .managed }
 
     /// True when a profile manages every key the tab edits, so the window is
     /// read-only and offers no Save.
@@ -132,6 +147,7 @@ final class SettingsViewModel {
 
     func load() {
         detectManagedKeys()
+        let passphraseManaged = CFPreferencesAppValueIsForced("Passphrase" as CFString, Self.preferencesDomain as CFString)
 
         // Read global preferences plist — written by Munki preinstall and XPC helper GUI writes.
         // Use direct file I/O: PlistBuddy (used by preinstall) writes directly without cfprefsd,
@@ -150,17 +166,17 @@ final class SettingsViewModel {
             }
         }
 
-        load(from: dict, managed: managedKeys)
+        load(from: dict, managed: passphraseManaged ? managedKeys.union(["Passphrase"]) : managedKeys)
     }
 
     /// Shows `dict` as the saved settings, with `managed` the keys a profile
     /// forces. `load()` passes what is on disk; tests pass their own.
     func load(from dict: [String: Any], managed: Set<String>) {
-        managedKeys = managed
+        passphraseState = SecretState(managed: managed.contains("Passphrase"), stored: dict["Passphrase"])
+        managedKeys = managed.subtracting(["Passphrase"])
         var snapshot = SettingsSnapshot()
         snapshot.apiUrl               = dict["ApiUrl"]             as? String ?? ""
         snapshot.deviceId             = dict["DeviceId"]           as? String ?? ""
-        snapshot.passphrase           = dict["Passphrase"]         as? String ?? ""
         snapshot.validateSSL          = dict["ValidateSSL"]        as? Bool   ?? true
         snapshot.collectionInterval   = Self.plistString(dict["CollectionInterval"]) ?? "3600"
         snapshot.logLevel             = dict["LogLevel"]           as? String ?? "info"
@@ -188,7 +204,6 @@ final class SettingsViewModel {
     private func apply(_ snapshot: SettingsSnapshot) {
         apiUrl = snapshot.apiUrl
         deviceId = snapshot.deviceId
-        passphrase = snapshot.passphrase
         validateSSL = snapshot.validateSSL
         collectionInterval = snapshot.collectionInterval
         logLevel = snapshot.logLevel
@@ -205,7 +220,6 @@ final class SettingsViewModel {
         SettingsSnapshot(
             apiUrl: apiUrl,
             deviceId: deviceId,
-            passphrase: passphrase,
             validateSSL: validateSSL,
             collectionInterval: collectionInterval,
             logLevel: logLevel,
@@ -240,7 +254,6 @@ final class SettingsViewModel {
 
         string("ApiUrl", old.apiUrl, new.apiUrl)
         string("DeviceId", old.deviceId, new.deviceId)
-        string("Passphrase", old.passphrase, new.passphrase)
         bool("ValidateSSL", old.validateSSL, new.validateSSL)
         int("CollectionInterval", old.collectionInterval, new.collectionInterval, default: 3600)
         string("LogLevel", old.logLevel, new.logLevel)
@@ -300,7 +313,6 @@ final class SettingsViewModel {
         switch key {
         case "ApiUrl": snapshot.apiUrl = target.apiUrl
         case "DeviceId": snapshot.deviceId = target.deviceId
-        case "Passphrase": snapshot.passphrase = target.passphrase
         case "ValidateSSL": snapshot.validateSSL = target.validateSSL
         case "CollectionInterval": snapshot.collectionInterval = target.collectionInterval
         case "LogLevel": snapshot.logLevel = target.logLevel
