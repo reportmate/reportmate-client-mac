@@ -105,6 +105,11 @@ let package = Package(
             path: "Tests/ReportMateLoggingTests"
         ),
         .testTarget(
+            name: "AppTests",
+            dependencies: ["App"],
+            path: "Tests/AppTests"
+        ),
+        .testTarget(
             name: "ReportMateTests",
             dependencies: ["ReportMate"],
             path: "Tests/ReportMateTests"
