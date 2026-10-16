@@ -96,9 +96,19 @@ public class NetworkModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         dictionary["vpnConnections"] = vpnConnections
         
         // Merge DNS configuration (overwrite the empty one from NetworkInfo)
+        let fqdnDomain = (dictionary["dnsConfiguration"] as? [String: Any])?["domainName"] as? String
         if !dnsConfig.isEmpty {
             dictionary["dnsConfiguration"] = dnsConfig
         }
+
+        // Emit the same dns shape the Windows client sends ({servers, domain, searchDomains}),
+        // so consumers read one key on both platforms. dnsConfiguration stays populated
+        // until every reader has moved over.
+        dictionary["dns"] = Self.unifiedDNS(
+            nameservers: dnsConfig["nameservers"] as? [String] ?? [],
+            searchDomains: dnsConfig["searchDomains"] as? [String] ?? [],
+            domain: fqdnDomain
+        )
         
         // Merge saved WiFi into wifiInfo
         if var wifiInfo = dictionary["wifiInfo"] as? [String: Any] {
@@ -1240,6 +1250,15 @@ networksetup -listpreferredwirelessnetworks "$wifi_if" 2>/dev/null | tail -n +2 
         return networks
     }
     
+    /// Builds the cross-platform `dns` object, matching the Windows client's DnsConfiguration keys.
+    static func unifiedDNS(nameservers: [String], searchDomains: [String], domain: String?) -> [String: Any] {
+        [
+            "servers": nameservers,
+            "domain": domain ?? "",
+            "searchDomains": searchDomains
+        ]
+    }
+
     private func collectDNSConfiguration() async throws -> [String: Any] {
         // Collect DNS configuration using scutil --dns
         let output = try await BashService.execute(#"""
