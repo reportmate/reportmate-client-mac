@@ -57,6 +57,15 @@ public struct MunkiInfo: Codable, Sendable {
     public var consoleUser: String?
     public var startTime: String?
     public var endTime: String?
+
+    // Run liveness, readable whether or not the last run finished
+    /// Modification time of ManagedInstallReport.plist (ISO 8601)
+    public var reportModifiedTime: String?
+    /// Start time of the oldest managedsoftwareupdate still running (ISO 8601), nil when idle.
+    /// The postflight kickstarts the installs module while its own run is still finishing, so a
+    /// healthy report usually carries this too; a run is only stuck when it started after
+    /// reportModifiedTime (it has not saved its report) and has been running for hours.
+    public var runningSince: String?
     
     // Run errors/warnings (from munki_info table)
     public var errors: String?
