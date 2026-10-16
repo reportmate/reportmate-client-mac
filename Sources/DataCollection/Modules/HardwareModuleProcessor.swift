@@ -556,6 +556,9 @@ public class HardwareModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             for (index, serial) in RegistryDisplay.enrich(&displaysArray, from: registryDisplays).sorted(by: { $0.key < $1.key }) {
                 print("[\(timestamp())] EDID serial for '\(displaysArray[index]["name"] as? String ?? "")': \(serial)")
             }
+            for (_, name) in RegistryDisplay.resolveUnnamed(&displaysArray, from: registryDisplays).sorted(by: { $0.key < $1.key }) {
+                print("[\(timestamp())] Named an unresolved display from its EDID: \(name)")
+            }
 
             if !displaysArray.contains(where: { $0["type"] as? String == "external" }) {
                 let attached = registryDisplays.filter { !$0.isBuiltIn }
