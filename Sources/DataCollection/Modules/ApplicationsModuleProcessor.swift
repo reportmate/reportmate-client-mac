@@ -1,4 +1,20 @@
 import Foundation
+import Logging
+
+/// Raised when the installed-application scan comes back with nothing. Every Mac
+/// has applications under /System/Applications, so an empty list means the scan
+/// failed, not that the machine has no software.
+public enum ApplicationsModuleError: Error, LocalizedError, Equatable {
+    case emptyInstalledApplications(scanSeconds: Double)
+
+    public var errorDescription: String? {
+        switch self {
+        case .emptyInstalledApplications(let seconds):
+            return "installed application scan returned no applications after \(String(format: "%.2f", seconds))s; "
+                + "skipping the applications module so the last reported inventory is kept"
+        }
+    }
+}
 
 /// Applications module processor - uses osquery first with bash fallback
 /// Based on MunkiReport patterns for application and process collection
@@ -9,6 +25,8 @@ public class ApplicationsModuleProcessor: BaseModuleProcessor, @unchecked Sendab
     
     /// Reference to application usage service for usage data
     private let applicationUsageService: ApplicationUsageService?
+
+    private let logger = Logger(label: "reportmate.applications")
     
     public init(configuration: ReportMateConfiguration, applicationUsageService: ApplicationUsageService? = nil) {
         self.applicationUsageService = applicationUsageService
@@ -21,7 +39,20 @@ public class ApplicationsModuleProcessor: BaseModuleProcessor, @unchecked Sendab
         
         // Collect application data sequentially with progress tracking
         ConsoleFormatter.writeQueryProgress(queryName: "installed_apps", current: 1, total: totalSteps)
+        let scanStart = Date()
         let apps = try await collectInstalledApplications()
+        let scanSeconds = Date().timeIntervalSince(scanStart)
+
+        // An empty scan must not reach the API: it stores the module as sent, so
+        // an empty list would replace the device's last good inventory. Throwing
+        // here leaves the module out of the payload. It also happens before usage
+        // collection, so unsent usage sessions stay queued for the next run.
+        if apps.isEmpty {
+            let error = ApplicationsModuleError.emptyInstalledApplications(scanSeconds: scanSeconds)
+            logger.warning("\(error.localizedDescription)")
+            ConsoleFormatter.writeWarning(error.localizedDescription)
+            throw error
+        }
         
         ConsoleFormatter.writeQueryProgress(queryName: "running_processes", current: 2, total: totalSteps)
         let processes = try await collectRunningProcesses()
@@ -62,7 +93,8 @@ public class ApplicationsModuleProcessor: BaseModuleProcessor, @unchecked Sendab
     
     // MARK: - Installed Applications (osquery: apps)
     
-    private func collectInstalledApplications() async throws -> [[String: Any]] {
+    /// Internal rather than private so tests can stand in for the scan.
+    func collectInstalledApplications() async throws -> [[String: Any]] {
         // osquery apps table provides comprehensive app info
         let osqueryScript = """
             SELECT 
