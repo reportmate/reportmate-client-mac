@@ -16,8 +16,7 @@ import Foundation
 /// - Printers (CUPS, network, direct-connect) - HIGH EMPHASIS
 /// - Scanners
 /// - External Storage (USB drives, SD cards, external SSDs)
-///
-/// NOTE: Displays are NOT collected here - they are part of Hardware module
+/// - Displays (attached monitors, projected from the Hardware module display list)
 public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     public init(configuration: ReportMateConfiguration) {
@@ -33,7 +32,7 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
     
     public override func collectData() async throws -> ModuleData {
         let startTime = Date()
-        let totalSteps = 10
+        let totalSteps = 11
         
         // Collect peripheral data with progress tracking
         ConsoleFormatter.writeQueryProgress(queryName: "usb_devices", current: 1, total: totalSteps)
@@ -66,6 +65,11 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
         ConsoleFormatter.writeQueryProgress(queryName: "serial_ports", current: 10, total: totalSteps)
         let serialPorts = try await collectSerialPorts()
         
+        ConsoleFormatter.writeQueryProgress(queryName: "display_devices", current: 11, total: totalSteps)
+        let displayDevices = PeripheralDisplays.displayDevices(
+            from: await HardwareModuleProcessor(configuration: configuration).collectDisplays()
+        )
+        
         let duration = Date().timeIntervalSince(startTime)
         
         // Build structured output matching Windows parity
@@ -80,7 +84,8 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
             "printers": printerInfo,
             "scanners": scannerDevices,
             "externalStorage": externalStorage,
-            "serialPorts": serialPorts
+            "serialPorts": serialPorts,
+            "displayDevices": displayDevices
         ]
         
         // Log summary
@@ -95,6 +100,7 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
         print("[\(timestamp())]   Printers: \(printerInfo.count)")
         print("[\(timestamp())]   Scanners: \(scannerDevices.count)")
         print("[\(timestamp())]   External Storage: \(externalStorage.count)")
+        print("[\(timestamp())]   Display Devices: \(displayDevices.count)")
         
         return BaseModuleData(moduleId: moduleId, data: peripheralsData)
     }
