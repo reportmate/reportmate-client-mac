@@ -1372,8 +1372,10 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         let bashScript = #"""
             # Fallback when osquery is unavailable: emit rows shaped like osquery's
             # certificates table so one mapping serves both paths.
-            jq_bin=$(command -v jq || true)
-            if [ -z "$jq_bin" ]; then echo "[]"; exit 0; fi
+            # The runner is root: only the system jq (macOS 15+), never one found on PATH.
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin
+            jq_bin=/usr/bin/jq
+            if [ ! -x "$jq_bin" ]; then echo "[]"; exit 0; fi
 
             tmp=$(mktemp -d "${TMPDIR:-/tmp}/reportmate-certs.XXXXXX") || { echo "[]"; exit 0; }
             trap 'rm -rf "$tmp"' EXIT
