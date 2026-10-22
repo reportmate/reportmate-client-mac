@@ -1341,12 +1341,13 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     }
     
     // MARK: - Certificates (osquery: certificates table + security command)
-    
+
     private func collectCertificates() async throws -> [[String: Any]] {
-        // osquery: certificates table provides system keychain certificates
-        // Collects from System.keychain and login.keychain
+        // osquery's certificates table covers the system, root and per-user keychains. The API
+        // classifies each certificate, so collect what it needs: the keychain path, `ca`,
+        // `key_usage` and `sha1` (which pairs the certificate with a private key below).
         let osqueryScript = """
-            SELECT 
+            SELECT
                 common_name,
                 subject,
                 issuer,
@@ -1359,259 +1360,142 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 key_strength,
                 key_usage,
                 serial,
+                sha1,
                 path
             FROM certificates
-            WHERE path LIKE '/Library/Keychains/%' 
+            WHERE path LIKE '/Library/Keychains/%'
                OR path LIKE '/Users/%/Library/Keychains/%'
                OR path LIKE '/System/Library/Keychains/%'
             ORDER BY not_valid_after DESC;
         """
-        
-        let bashScript = """
-            # Fallback: Use security command to list certificates
-            # Get certificates from System keychain and user's login keychain
-            
-            now_epoch=$(date +%s)
-            thirty_days_ahead=$((now_epoch + 30*24*60*60))
-            
-            output="["
-            first=true
-            
-            # Function to process certificates from a keychain
+
+        let bashScript = #"""
+            # Fallback when osquery is unavailable: emit rows shaped like osquery's
+            # certificates table so one mapping serves both paths.
+            jq_bin=$(command -v jq || true)
+            if [ -z "$jq_bin" ]; then echo "[]"; exit 0; fi
+
+            tmp=$(mktemp -d "${TMPDIR:-/tmp}/reportmate-certs.XXXXXX") || { echo "[]"; exit 0; }
+            trap 'rm -rf "$tmp"' EXIT
+            rows="$tmp/rows.jsonl"
+            : > "$rows"
+
+            to_epoch() {
+                [ -n "$1" ] && date -j -u -f "%b %e %T %Y %Z" "$1" +%s 2>/dev/null
+            }
+
+            field() {
+                printf '%s\n' "$1" | sed -n "s/^$2//p" | head -1
+            }
+
             process_keychain() {
                 keychain="$1"
-                store_name="$2"
-                
-                # List all certificates with their details
-                security find-certificate -a -p "$keychain" 2>/dev/null | while IFS= read -r line; do
-                    echo "$line"
-                done | openssl crl2pkcs7 -nocrl -certfile /dev/stdin 2>/dev/null | \
-                openssl pkcs7 -print_certs -text -noout 2>/dev/null | \
-                awk -v store="$store_name" -v now="$now_epoch" -v soon="$thirty_days_ahead" '
-                    BEGIN { cert_count=0; first=1 }
-                    /Certificate:/ { 
-                        if (cert_count > 0 && subject != "") {
-                            # Output previous certificate
-                            if (!first) print ","
-                            first=0
-                            is_expired = (not_after_epoch != "" && not_after_epoch < now) ? "true" : "false"
-                            is_expiring_soon = (not_after_epoch != "" && not_after_epoch >= now && not_after_epoch <= soon) ? "true" : "false"
-                            days_until = (not_after_epoch != "") ? int((not_after_epoch - now) / 86400) : 0
-                            status = (is_expired == "true") ? "Expired" : ((is_expiring_soon == "true") ? "ExpiringSoon" : "Valid")
-                            
-                            print "{"
-                            print "  \\"commonName\\": \\"" common_name "\\","
-                            print "  \\"subject\\": \\"" subject "\\","
-                            print "  \\"issuer\\": \\"" issuer "\\","
-                            print "  \\"serialNumber\\": \\"" serial "\\","
-                            print "  \\"storeName\\": \\"" store "\\","
-                            print "  \\"storeLocation\\": \\"System\\","
-                            print "  \\"notBefore\\": \\"" not_before "\\","
-                            print "  \\"notAfter\\": \\"" not_after "\\","
-                            print "  \\"keyAlgorithm\\": \\"" key_algo "\\","
-                            print "  \\"signingAlgorithm\\": \\"" sig_algo "\\","
-                            print "  \\"isSelfSigned\\": " is_self_signed ","
-                            print "  \\"isExpired\\": " is_expired ","
-                            print "  \\"isExpiringSoon\\": " is_expiring_soon ","
-                            print "  \\"daysUntilExpiry\\": " days_until ","
-                            print "  \\"status\\": \\"" status "\\""
-                            print -n "}"
-                        }
-                        cert_count++
-                        common_name=""; subject=""; issuer=""; serial=""
-                        not_before=""; not_after=""; key_algo=""; sig_algo=""
-                        not_after_epoch=""; is_self_signed="false"
-                    }
-                    /Subject:/ { 
-                        gsub(/^.*Subject: */, "")
-                        subject=$0
-                        # Extract CN from subject
-                        if (match($0, /CN ?= ?[^,]+/)) {
-                            common_name = substr($0, RSTART+3, RLENGTH-3)
-                            gsub(/^ +| +$/, "", common_name)
-                        }
-                    }
-                    /Issuer:/ { 
-                        gsub(/^.*Issuer: */, "")
-                        issuer=$0
-                        # Check if self-signed (issuer == subject)
-                        if (issuer == subject) is_self_signed="true"
-                    }
-                    /Serial Number:/ { 
-                        gsub(/^.*Serial Number: */, "")
-                        serial=$0
-                    }
-                    /Not Before:/ { 
-                        gsub(/^.*Not Before: */, "")
-                        not_before=$0
-                    }
-                    /Not After *:/ { 
-                        gsub(/^.*Not After *: */, "")
-                        not_after=$0
-                        # Try to convert to epoch for comparison
-                        cmd = "date -j -f \"%b %d %H:%M:%S %Y\" \"" not_after "\" +%s 2>/dev/null"
-                        cmd | getline not_after_epoch
-                        close(cmd)
-                    }
-                    /Public Key Algorithm:/ { 
-                        gsub(/^.*Public Key Algorithm: */, "")
-                        key_algo=$0
-                    }
-                    /Signature Algorithm:/ && sig_algo=="" { 
-                        gsub(/^.*Signature Algorithm: */, "")
-                        sig_algo=$0
-                    }
-                    END {
-                        if (cert_count > 0 && subject != "") {
-                            if (!first) print ","
-                            is_expired = (not_after_epoch != "" && not_after_epoch < now) ? "true" : "false"
-                            is_expiring_soon = (not_after_epoch != "" && not_after_epoch >= now && not_after_epoch <= soon) ? "true" : "false"
-                            days_until = (not_after_epoch != "") ? int((not_after_epoch - now) / 86400) : 0
-                            status = (is_expired == "true") ? "Expired" : ((is_expiring_soon == "true") ? "ExpiringSoon" : "Valid")
-                            
-                            print "{"
-                            print "  \\"commonName\\": \\"" common_name "\\","
-                            print "  \\"subject\\": \\"" subject "\\","
-                            print "  \\"issuer\\": \\"" issuer "\\","
-                            print "  \\"serialNumber\\": \\"" serial "\\","
-                            print "  \\"storeName\\": \\"" store "\\","
-                            print "  \\"storeLocation\\": \\"System\\","
-                            print "  \\"notBefore\\": \\"" not_before "\\","
-                            print "  \\"notAfter\\": \\"" not_after "\\","
-                            print "  \\"keyAlgorithm\\": \\"" key_algo "\\","
-                            print "  \\"signingAlgorithm\\": \\"" sig_algo "\\","
-                            print "  \\"isSelfSigned\\": " is_self_signed ","
-                            print "  \\"isExpired\\": " is_expired ","
-                            print "  \\"isExpiringSoon\\": " is_expiring_soon ","
-                            print "  \\"daysUntilExpiry\\": " days_until ","
-                            print "  \\"status\\": \\"" status "\\""
-                            print -n "}"
-                        }
-                    }
+                [ -f "$keychain" ] || return 0
+                dir=$(mktemp -d "$tmp/kc.XXXXXX") || return 0
+
+                /usr/bin/security find-certificate -a -Z -p "$keychain" 2>/dev/null | awk -v dir="$dir" '
+                    /^SHA-1 hash:/ { n++; out = dir "/" n ".sha1"; print $3 > out; close(out); next }
+                    /-----BEGIN CERTIFICATE-----/ { f = dir "/" n ".pem" }
+                    f != "" { print > f }
+                    /-----END CERTIFICATE-----/ { if (f != "") close(f); f = "" }
                 '
+
+                for pem in "$dir"/*.pem; do
+                    [ -f "$pem" ] || continue
+                    info=$(/usr/bin/openssl x509 -in "$pem" -noout -subject -issuer -serial -startdate -enddate -text -nameopt RFC2253 2>/dev/null) || continue
+
+                    sha1=$(cat "${pem%.pem}.sha1" 2>/dev/null)
+                    subject=$(field "$info" 'subject= *')
+                    issuer=$(field "$info" 'issuer= *')
+                    serial=$(field "$info" 'serial=')
+                    not_before=$(to_epoch "$(field "$info" 'notBefore=')")
+                    not_after=$(to_epoch "$(field "$info" 'notAfter=')")
+                    key_algorithm=$(field "$info" ' *Public Key Algorithm: *')
+                    signing_algorithm=$(field "$info" ' *Signature Algorithm: *')
+                    key_strength=$(printf '%s\n' "$info" | sed -n 's/.*Public-Key: *(\([0-9]*\) bit.*/\1/p' | head -1)
+                    key_usage=$(printf '%s\n' "$info" | awk '/X509v3 Key Usage/ { getline; gsub(/^ +| +$/, ""); print; exit }')
+                    common_name=$(printf '%s\n' "$subject" | tr ',' '\n' | sed -n 's/^CN=//p' | head -1)
+                    if printf '%s\n' "$info" | grep -q 'CA:TRUE'; then ca=1; else ca=0; fi
+                    if [ -n "$subject" ] && [ "$subject" = "$issuer" ]; then self_signed=1; else self_signed=0; fi
+
+                    "$jq_bin" -nc \
+                        --arg common_name "$common_name" --arg subject "$subject" --arg issuer "$issuer" \
+                        --arg ca "$ca" --arg self_signed "$self_signed" \
+                        --arg not_valid_before "$not_before" --arg not_valid_after "$not_after" \
+                        --arg signing_algorithm "$signing_algorithm" --arg key_algorithm "$key_algorithm" \
+                        --arg key_strength "$key_strength" --arg key_usage "$key_usage" \
+                        --arg serial "$serial" --arg sha1 "$sha1" --arg path "$keychain" \
+                        '$ARGS.named' >> "$rows"
+                done
             }
-            
-            # Process System keychain
-            system_certs=$(process_keychain "/Library/Keychains/System.keychain" "System")
-            
-            # Process user login keychain if it exists
-            user_keychain="$HOME/Library/Keychains/login.keychain-db"
-            if [ ! -f "$user_keychain" ]; then
-                user_keychain="$HOME/Library/Keychains/login.keychain"
-            fi
-            
-            user_certs=""
-            if [ -f "$user_keychain" ]; then
-                user_certs=$(process_keychain "$user_keychain" "User")
-            fi
-            
-            # Combine results
-            if [ -n "$system_certs" ] && [ -n "$user_certs" ]; then
-                echo "[$system_certs,$user_certs]"
-            elif [ -n "$system_certs" ]; then
-                echo "[$system_certs]"
-            elif [ -n "$user_certs" ]; then
-                echo "[$user_certs]"
-            else
-                echo "[]"
-            fi
-        """
-        
+
+            process_keychain "/Library/Keychains/System.keychain"
+            for home in /Users/*; do
+                for kc in "$home/Library/Keychains/login.keychain-db" "$home/Library/Keychains/login.keychain"; do
+                    if [ -f "$kc" ]; then
+                        process_keychain "$kc"
+                        break
+                    fi
+                done
+            done
+
+            "$jq_bin" -s '.' "$rows"
+        """#
+
         let result = try await executeWithFallback(
             osquery: osqueryScript,
             bash: bashScript
         )
-        
-        // Process results into certificate array
-        var certificates: [[String: Any]] = []
-        let now = Date()
-        let thirtyDaysFromNow = Calendar.current.date(byAdding: .day, value: 30, to: now)!
-        
-        if let items = result["items"] as? [[String: Any]] {
-            ConsoleFormatter.writeDebug("Certificate collection: found \(items.count) raw certificates from osquery")
-            
-            for item in items {
-                var cert: [String: Any] = [:]
-                
-                cert["commonName"] = item["common_name"] as? String ?? ""
-                cert["subject"] = item["subject"] as? String ?? ""
-                cert["issuer"] = item["issuer"] as? String ?? ""
-                cert["serialNumber"] = item["serial"] as? String ?? ""
-                cert["keyAlgorithm"] = item["key_algorithm"] as? String ?? ""
-                cert["signingAlgorithm"] = item["signing_algorithm"] as? String ?? ""
-                cert["keyLength"] = item["key_strength"] as? Int ?? 0
-                cert["isSelfSigned"] = (item["self_signed"] as? String == "1") || (item["self_signed"] as? Int == 1)
-                
-                // Parse store info from path - INCLUDE the actual path for keychain identification
-                if let path = item["path"] as? String {
-                    cert["path"] = path  // Include actual path/keychain location
-                    if path.contains("/Users/") {
-                        cert["storeLocation"] = "User"
-                    } else {
-                        cert["storeLocation"] = "System"
-                    }
-                }
-                
-                // Parse dates - osquery returns Unix timestamps (can be String or Int)
-                // Helper to get timestamp from either String or numeric type
-                func getTimestamp(_ value: Any?) -> Double? {
-                    if let str = value as? String, let ts = Double(str) {
-                        return ts
-                    } else if let intVal = value as? Int64 {
-                        return Double(intVal)
-                    } else if let intVal = value as? Int {
-                        return Double(intVal)
-                    } else if let dblVal = value as? Double {
-                        return dblVal
-                    }
-                    return nil
-                }
-                
-                if let notBeforeTimestamp = getTimestamp(item["not_valid_before"]) {
-                    let notBefore = Date(timeIntervalSince1970: notBeforeTimestamp)
-                    cert["notBefore"] = ISO8601DateFormatter().string(from: notBefore)
-                }
-                
-                if let notAfterTimestamp = getTimestamp(item["not_valid_after"]) {
-                    let notAfter = Date(timeIntervalSince1970: notAfterTimestamp)
-                    cert["notAfter"] = ISO8601DateFormatter().string(from: notAfter)
-                    
-                    // Calculate expiry status
-                    let daysUntilExpiry = Calendar.current.dateComponents([.day], from: now, to: notAfter).day ?? 0
-                    cert["daysUntilExpiry"] = daysUntilExpiry
-                    cert["isExpired"] = notAfter < now
-                    cert["isExpiringSoon"] = notAfter >= now && notAfter <= thirtyDaysFromNow
-                    
-                    if notAfter < now {
-                        cert["status"] = "Expired"
-                    } else if notAfter <= thirtyDaysFromNow {
-                        cert["status"] = "ExpiringSoon"
-                    } else {
-                        cert["status"] = "Valid"
-                    }
-                } else {
-                    cert["status"] = "Unknown"
-                    cert["isExpired"] = false
-                    cert["isExpiringSoon"] = false
-                    cert["daysUntilExpiry"] = 0
-                }
-                
-                certificates.append(cert)
-            }
-            
-            // Debug logging: status breakdown
-            let validCount = certificates.filter { ($0["status"] as? String) == "Valid" }.count
-            let expiredCount = certificates.filter { ($0["status"] as? String) == "Expired" }.count
-            let expiringCount = certificates.filter { ($0["status"] as? String) == "ExpiringSoon" }.count
-            let unknownCount = certificates.filter { ($0["status"] as? String) == "Unknown" }.count
-            ConsoleFormatter.writeDebug("Certificate processing complete: \(certificates.count) total - Valid: \(validCount), Expired: \(expiredCount), ExpiringSoon: \(expiringCount), Unknown: \(unknownCount)")
-        } else {
+
+        guard let items = result["items"] as? [[String: Any]] else {
             ConsoleFormatter.writeDebug("Certificate collection: no 'items' key in result, keys: \(result.keys)")
+            return []
         }
-        
+        ConsoleFormatter.writeDebug("Certificate collection: found \(items.count) raw certificates")
+
+        let now = Date()
+        let mapped = items.map { CertificateInventory.certificate(from: $0, now: now) }
+        let certificates = CertificateInventory.applyPrivateKeyFlags(
+            to: mapped,
+            identities: await collectKeychainIdentities(CertificateInventory.keychainPaths(of: mapped))
+        )
+
+        let validCount = certificates.filter { ($0["status"] as? String) == "Valid" }.count
+        let expiredCount = certificates.filter { ($0["status"] as? String) == "Expired" }.count
+        let expiringCount = certificates.filter { ($0["status"] as? String) == "ExpiringSoon" }.count
+        let unknownCount = certificates.filter { ($0["status"] as? String) == "Unknown" }.count
+        let withKey = certificates.filter { ($0["hasPrivateKey"] as? Bool) == true }.count
+        ConsoleFormatter.writeDebug("Certificate processing complete: \(certificates.count) total - Valid: \(validCount), Expired: \(expiredCount), ExpiringSoon: \(expiringCount), Unknown: \(unknownCount), WithPrivateKey: \(withKey)")
+
         return certificates
     }
-    
+
+    /// Identity thumbprints per keychain, from one `security find-identity` call each.
+    ///
+    /// No `-v`, so expired identities still count. A keychain whose lookup fails is left out of
+    /// the result, and its certificates then carry no `hasPrivateKey` rather than a false one.
+    private func collectKeychainIdentities(_ keychains: [String]) async -> [String: Set<String>] {
+        var identities: [String: Set<String>] = [:]
+        for keychain in keychains where FileManager.default.fileExists(atPath: keychain) {
+            do {
+                let result = try await ProcessRunner.run(
+                    executable: "/usr/bin/security",
+                    arguments: ["find-identity", keychain],
+                    timeout: 30
+                )
+                guard !result.timedOut, result.exitCode == 0,
+                      let hashes = CertificateInventory.parseIdentityHashes(result.standardOutput) else {
+                    ConsoleFormatter.writeDebug("Identity lookup gave no usable result for a keychain (exit \(result.exitCode))")
+                    continue
+                }
+                identities[keychain] = hashes
+            } catch {
+                ConsoleFormatter.writeDebug("Identity lookup failed for a keychain: \(error)")
+            }
+        }
+        return identities
+    }
+
     // MARK: - EDR Products (Microsoft Defender, CrowdStrike, SentinelOne, Carbon Black)
     
     /// Collect EDR/AV product details for security analyst reporting
