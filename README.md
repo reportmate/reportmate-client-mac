@@ -4,6 +4,8 @@ ReportMate Client-side macOS application for gathering endpoint telemetry for mo
 
 Written in Swift 6.2. Designed to run as a native macOS binary with async/await and modern concurrency. It collects detailed device information using `osquery` with bash and Python fallbacks, and securely transmits it to the ReportMate API.
 
+Development guide: [wiki](wiki/README.md)
+
 ## Quick Start
 
 ### Prerequisites
