@@ -39,6 +39,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         ConsoleFormatter.writeQueryProgress(queryName: "pending_updates", current: 8, total: totalSteps)
         let pendingUpdates = try await collectPendingAppleUpdates()
+        let updateSearch = await collectUpdateSearch()
         
         ConsoleFormatter.writeQueryProgress(queryName: "install_history", current: 9, total: totalSteps)
         let installHistory = try await collectInstallHistory()
@@ -81,9 +82,35 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "privilegedHelperTools": privilegedHelpers
         ]
         
-        return BaseModuleData(moduleId: moduleId, data: systemData)
+        var payload = systemData
+        if let updateSearch {
+            payload["updateSearch"] = updateSearch
+        }
+        return BaseModuleData(moduleId: moduleId, data: payload)
     }
     
+    // MARK: - Update Search
+
+    /// Whether the last Apple software update search succeeded. Omitted when nothing on the
+    /// device records it, so the API reports it as not reported rather than as succeeded.
+    private func collectUpdateSearch() async -> [String: Any]? {
+        var exitCode: Int32?
+        var errorText: String?
+        if let run = try? await ProcessRunner.run(
+            executable: "/usr/sbin/softwareupdate",
+            arguments: ["--list", "--no-scan"],
+            timeout: 60
+        ) {
+            exitCode = run.timedOut ? -1 : run.exitCode
+            errorText = run.timedOut ? "softwareupdate --list did not finish within 60 seconds" : run.standardError
+        }
+        return UpdateSearch.status(
+            preferences: UpdateSearch.readPreferences(),
+            listExitCode: exitCode,
+            listError: errorText
+        )
+    }
+
     // MARK: - OS Version Info (osquery: os_version)
     
     private func collectOSInfo() async throws -> [String: Any] {
