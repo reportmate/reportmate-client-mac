@@ -14,7 +14,7 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     public override func collectData() async throws -> ModuleData {
         // Total collection steps for progress tracking
-        let totalSteps = 22
+        let totalSteps = 23
         
         // Collect security data sequentially with progress tracking
         ConsoleFormatter.writeQueryProgress(queryName: "sip_status", current: 1, total: totalSteps)
@@ -85,9 +85,12 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         ConsoleFormatter.writeQueryProgress(queryName: "edr_products", current: 22, total: totalSteps)
         let edrProducts = try await collectEDRProducts()
+
+        ConsoleFormatter.writeQueryProgress(queryName: "threat_detections", current: 23, total: totalSteps)
+        let threatDetections = await collectThreatDetections(edrProducts: edrProducts)
         
         // Build security data dictionary
-        let securityData: [String: Any] = [
+        var securityData: [String: Any] = [
             "systemIntegrityProtection": sip,
             "gatekeeper": gatekeeper,
             "firewall": firewall,
@@ -104,13 +107,25 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "secureEnclave": secureEnclave,
             "activationLock": activationLock,
             "authorizationDB": authdb,
-            "unpatchedCVEs": unpatchedCVEs,
             "securityReleaseInfo": securityRelease,
             "remoteManagement": remoteMgmt,
             "certificates": certificates,
             "endpointSecurity": endpointSecurity,
-            "edrProducts": edrProducts
+            "edrProducts": edrProducts,
+            "detectionSources": threatDetections.sources
         ]
+
+        // A list is sent only when it was actually read: a missing key tells the API the device
+        // did not report it, where an empty list would claim it was checked and found nothing.
+        if let cves = unpatchedCVEs {
+            let bounded = UnpatchedCVEList.bounded(cves)
+            securityData["unpatchedCVEs"] = bounded.entries
+            securityData["unpatchedCVEsTotal"] = bounded.total
+            securityData["unpatchedCVEsTruncated"] = bounded.truncated
+        }
+        if let detections = threatDetections.detections {
+            securityData["detections"] = detections
+        }
         
         return BaseModuleData(moduleId: moduleId, data: securityData)
     }
@@ -1229,10 +1244,15 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     // MARK: - SOFA Unpatched CVEs (extension: sofa_unpatched_cves)
     
-    private func collectSofaUnpatchedCVEs() async throws -> [[String: Any]] {
+    /// The full SOFA unpatched CVE list, actively exploited first, or nil when the table could
+    /// not be read. It is bounded later by `UnpatchedCVEList`, which also reports the full count.
+    ///
+    /// There is deliberately no bash fallback: `softwareupdate` names updates, not CVEs, so a
+    /// fallback could only invent CVE rows. An unreadable table is reported as not reported.
+    private func collectSofaUnpatchedCVEs() async throws -> [[String: Any]]? {
         // macadmins extension: sofa_unpatched_cves table
         // Columns: os_version, cve, patched_version, actively_exploited, url
-        let osqueryScript = """
+        let query = """
             SELECT 
                 os_version,
                 cve,
@@ -1240,56 +1260,20 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
                 actively_exploited,
                 url
             FROM sofa_unpatched_cves
-            ORDER BY actively_exploited DESC
-            LIMIT 50;
+            ORDER BY actively_exploited DESC, cve DESC;
         """
-        
-        let bashScript = """
-            # Fallback: Use softwareupdate to check for security updates
-            os_version=$(sw_vers -productVersion)
-            
-            echo "["
-            
-            # Check for available security updates
-            updates=$(softwareupdate --list --no-scan 2>/dev/null || echo "")
-            
-            if echo "$updates" | grep -qi "security"; then
-                first=true
-                while IFS= read -r line; do
-                    if echo "$line" | grep -qi "security"; then
-                        if [ "$first" = true ]; then
-                            first=false
-                        else
-                            echo ","
-                        fi
-                        
-                        update_name=$(echo "$line" | sed 's/^[* ]*//' | sed 's/-.*//')
-                        
-                        echo "  {"
-                        echo "    \\"os_version\\": \\"$os_version\\","
-                        echo "    \\"cve\\": \\"Unknown\\","
-                        echo "    \\"product_name\\": \\"$update_name\\","
-                        echo "    \\"actively_exploited\\": false,"
-                        echo "    \\"release_date\\": \\"\\""
-                        echo -n "  }"
-                    fi
-                done <<< "$updates"
-            fi
-            
-            echo
-            echo "]"
-        """
-        
-        let result = try await executeWithFallback(
-            osquery: osqueryScript,
-            bash: bashScript
-        )
-        
-        if let items = result["items"] as? [[String: Any]] {
-            return items
+
+        let osqueryService = OSQueryService(configuration: configuration)
+        guard await osqueryService.isAvailable() else {
+            ConsoleFormatter.writeDebug("SOFA unpatched CVEs: osquery not available, not reported")
+            return nil
         }
-        
-        return []
+        do {
+            return try await osqueryService.executeQuery(query)
+        } catch {
+            ConsoleFormatter.writeDebug("SOFA unpatched CVEs: query failed, not reported: \(error)")
+            return nil
+        }
     }
     
     // MARK: - SOFA Security Release Info (extension: sofa_security_release_info)
@@ -1496,6 +1480,85 @@ public class SecurityModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             }
         }
         return identities
+    }
+
+    // MARK: - Threat Detections (XProtect Remediator log, mdatp threat list)
+
+    /// Individual threat detections in the Windows `detections` row shape, plus one
+    /// `detectionSources` entry per source saying whether it could be read.
+    ///
+    /// `detections` is nil when no source could be read, so the device is reported as not
+    /// reporting detections rather than as clean. XProtect Remediator results come from the
+    /// unified log, so they reach back only as far as the log retains them (at most
+    /// `ThreatDetections.logWindowDays`). CrowdStrike and SentinelOne expose no local detection
+    /// list, so they are listed as not available.
+    private func collectThreatDetections(edrProducts: [String: Any]) async -> (detections: [[String: Any]]?, sources: [[String: Any]]) {
+        var rows: [[String: Any]] = []
+        var sources: [[String: Any]] = []
+        var anyRead = false
+
+        // XProtect Remediator
+        let pluginsPresent = (try? FileManager.default.contentsOfDirectory(atPath: ThreatDetections.xprotectDirectory))?
+            .contains { $0.hasPrefix(ThreatDetections.xprotectPluginPrefix) } ?? false
+        if pluginsPresent {
+            let run = try? await ProcessRunner.run(
+                executable: "/usr/bin/log",
+                arguments: [
+                    "show", "--style", "ndjson",
+                    "--last", "\(ThreatDetections.logWindowDays)d",
+                    "--predicate", ThreatDetections.xprotectPredicate
+                ],
+                timeout: 90,
+                label: "log show (XProtect Remediator results)"
+            )
+            if let run, !run.timedOut, run.exitCode == 0 {
+                let found = ThreatDetections.parseXProtectRemediatorLog(run.standardOutput)
+                rows += found
+                anyRead = true
+                sources.append([
+                    "source": "XProtectRemediator", "status": "read",
+                    "windowDays": ThreatDetections.logWindowDays, "entries": found.count
+                ])
+            } else {
+                let detail = run.map { $0.timedOut ? "log show timed out" : "log show exited with status \($0.exitCode)" }
+                    ?? "log show could not be started"
+                sources.append(["source": "XProtectRemediator", "status": "error", "detail": detail])
+            }
+        } else {
+            sources.append(["source": "XProtectRemediator", "status": "not_available", "detail": "XProtect Remediator is not installed"])
+        }
+
+        // Microsoft Defender for Endpoint
+        if FileManager.default.isExecutableFile(atPath: "/usr/local/bin/mdatp") {
+            let run = try? await ProcessRunner.run(
+                executable: "/usr/local/bin/mdatp",
+                arguments: ["threat", "list", "--output", "json"],
+                timeout: 30
+            )
+            if let run, !run.timedOut, run.exitCode == 0,
+               let found = ThreatDetections.parseDefenderThreatList(run.standardOutput) {
+                rows += found
+                anyRead = true
+                sources.append(["source": "MicrosoftDefender", "status": "read", "entries": found.count])
+            } else {
+                let detail = run.map { $0.timedOut ? "mdatp threat list timed out" : "mdatp threat list output could not be read" }
+                    ?? "mdatp could not be started"
+                sources.append(["source": "MicrosoftDefender", "status": "error", "detail": detail])
+            }
+        }
+
+        // EDR products installed without a local detection list.
+        let products = edrProducts["products"] as? [[String: Any]] ?? []
+        for product in products {
+            guard let vendor = product["vendor"] as? String, vendor != "Microsoft" else { continue }
+            sources.append([
+                "source": vendor, "status": "not_available",
+                "detail": "No local detection list; detections are held in the vendor console"
+            ])
+        }
+
+        ConsoleFormatter.writeDebug("Threat detections: \(rows.count) raw rows from \(sources.count) sources")
+        return (anyRead ? ThreatDetections.collapse(rows) : nil, sources)
     }
 
     // MARK: - EDR Products (Microsoft Defender, CrowdStrike, SentinelOne, Carbon Black)
