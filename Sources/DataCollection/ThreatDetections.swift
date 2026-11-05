@@ -26,18 +26,38 @@ enum ThreatDetections {
 
     /// Unified log predicate for the structured result each XProtect Remediator plugin logs
     /// after a scan. Clean scans are filtered out in the predicate so they never cross the pipe.
+    /// The image path restriction keeps out lines another process logs under the same
+    /// subsystem; `log` records the real image path of the process that wrote each line.
     static let xprotectPredicate = """
         subsystem == "com.apple.XProtectFramework.PluginAPI" AND category == "XPEvent.structured" \
+        AND processImagePath BEGINSWITH "/Library/Apple/System/Library/CoreServices/XProtect.app/" \
         AND NOT eventMessage CONTAINS "NoThreatDetected"
         """
+
+    /// The XProtect Remediator status messages that report a threat.
+    static let threatStatuses: Set<String> = [
+        "ThreatDetected",
+        "ThreatDetectedRemediatorDispatched",
+        "ThreatRemediated",
+        "ThreatPartiallyRemediated",
+        "FailedToRemediate"
+    ]
+
+    /// The plugin name when `path` is a remediator binary directly inside the XProtect
+    /// directory, or nil for anything else.
+    static func remediatorPlugin(atPath path: String) -> String? {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        guard url.deletingLastPathComponent().path == xprotectDirectory else { return nil }
+        let name = url.lastPathComponent
+        guard name.hasPrefix(xprotectPluginPrefix), name.count > xprotectPluginPrefix.count else { return nil }
+        return name
+    }
 
     /// XProtect Remediator status messages that mean a threat was found. Everything else the
     /// plugins log (Success, NoThreatDetected, PluginCanceled, ...) is a scan outcome, not a
     /// detection.
     static func isThreatStatus(_ status: String) -> Bool {
-        let lower = status.lowercased()
-        if lower == "failedtoremediate" { return true }
-        return lower.contains("threat") && lower != "nothreatdetected"
+        threatStatuses.contains(status)
     }
 
     static func xprotectAction(_ status: String) -> String? {
@@ -61,16 +81,11 @@ enum ThreatDetections {
                   let messageData = message.data(using: .utf8),
                   let payload = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any],
                   let status = payload["status_message"] as? String,
-                  isThreatStatus(status) else {
+                  isThreatStatus(status),
+                  let plugin = remediatorPlugin(atPath: event["processImagePath"] as? String ?? "") else {
                 continue
             }
-
-            let imagePath = event["processImagePath"] as? String ?? ""
-            let plugin = (imagePath as NSString).lastPathComponent
-            var family = plugin.hasPrefix(xprotectPluginPrefix)
-                ? String(plugin.dropFirst(xprotectPluginPrefix.count))
-                : plugin
-            if family.isEmpty { family = plugin }
+            let family = String(plugin.dropFirst(xprotectPluginPrefix.count))
 
             var row: [String: Any] = [
                 "source": "XProtectRemediator",
@@ -78,8 +93,8 @@ enum ThreatDetections {
                 "status": status,
                 "description": String(message.prefix(maxDescriptionLength))
             ]
-            if !plugin.isEmpty { row["threatId"] = plugin }
-            if !family.isEmpty { row["threatName"] = family }
+            row["threatId"] = plugin
+            row["threatName"] = family
             if let action = xprotectAction(status) { row["actionTaken"] = action }
             if let stamp = event["timestamp"] as? String, let iso = isoFromLogTimestamp(stamp) {
                 row["detectedAt"] = iso

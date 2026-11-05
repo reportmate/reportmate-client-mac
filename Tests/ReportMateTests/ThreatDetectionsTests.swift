@@ -3,12 +3,12 @@ import XCTest
 
 final class ThreatDetectionsTests: XCTestCase {
 
-    private func logLine(plugin: String, timestamp: String, message: [String: Any]) -> String {
+    private func logLine(plugin: String, timestamp: String, message: [String: Any], directory: String? = nil) -> String {
         let messageData = try! JSONSerialization.data(withJSONObject: message)
         let event: [String: Any] = [
             "subsystem": "com.apple.XProtectFramework.PluginAPI",
             "category": "XPEvent.structured",
-            "processImagePath": "/Library/Apple/System/Library/CoreServices/XProtect.app/Contents/MacOS/\(plugin)",
+            "processImagePath": "\(directory ?? ThreatDetections.xprotectDirectory)/\(plugin)",
             "timestamp": timestamp,
             "eventMessage": String(data: messageData, encoding: .utf8)!
         ]
@@ -50,6 +50,24 @@ final class ThreatDetectionsTests: XCTestCase {
         XCTAssertTrue(ThreatDetections.isThreatStatus("FailedToRemediate"))
         XCTAssertTrue(ThreatDetections.isThreatStatus("ThreatDetected"))
         XCTAssertFalse(ThreatDetections.isThreatStatus("NoThreatDetected"))
+        XCTAssertFalse(ThreatDetections.isThreatStatus("SomeOtherThreatWording"))
+    }
+
+    func testSpoofedImagePathsAreIgnored() {
+        let message: [String: Any] = ["status_message": "ThreatRemediated", "caused_by": []]
+        let stamp = "2026-01-02 03:04:05.000000-0700"
+        let spoofed = [
+            logLine(plugin: "XProtectRemediatorAdload", timestamp: stamp, message: message, directory: "/tmp/fake"),
+            logLine(plugin: "XProtectRemediatorAdload", timestamp: stamp, message: message,
+                    directory: ThreatDetections.xprotectDirectory + "/nested"),
+            logLine(plugin: "XProtectRemediatorAdload", timestamp: stamp, message: message,
+                    directory: ThreatDetections.xprotectDirectory + "/../../../../../../../../tmp"),
+            logLine(plugin: "SomeTool", timestamp: stamp, message: message),
+            logLine(plugin: "XProtectRemediator", timestamp: stamp, message: message)
+        ].joined(separator: "\n")
+        XCTAssertTrue(ThreatDetections.parseXProtectRemediatorLog(spoofed).isEmpty)
+        XCTAssertTrue(ThreatDetections.xprotectPredicate.contains(
+            "processImagePath BEGINSWITH \"/Library/Apple/System/Library/CoreServices/XProtect.app/\""))
     }
 
     func testRepeatsCollapseWithCountAndSpan() {
