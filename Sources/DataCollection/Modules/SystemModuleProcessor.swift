@@ -13,7 +13,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     public override func collectData() async throws -> ModuleData {
         // Total collection steps for progress tracking
-        let totalSteps = 15
+        let totalSteps = 16
         
         // Collect all system data sequentially with progress tracking
         ConsoleFormatter.writeQueryProgress(queryName: "os_info", current: 1, total: totalSteps)
@@ -61,6 +61,9 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         
         ConsoleFormatter.writeQueryProgress(queryName: "privileged_helpers", current: 15, total: totalSteps)
         let privilegedHelpers = try await collectPrivilegedHelperTools()
+
+        ConsoleFormatter.writeQueryProgress(queryName: "binaries", current: 16, total: totalSteps)
+        let binaries = await SystemBinaryInventory.collect()
         
         // Build the combined system data dictionary
         let systemData: [String: Any] = [
@@ -79,7 +82,8 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             "loginItems": loginItems,
             "systemExtensions": systemExtensions,
             "kernelExtensions": kernelExtensions,
-            "privilegedHelperTools": privilegedHelpers
+            "privilegedHelperTools": privilegedHelpers,
+            "binaries": binaries
         ]
         
         var payload = systemData
