@@ -655,17 +655,20 @@ if [ "$SKIP_PKG" = false ]; then
     # Add reportmate to PATH
     echo "/usr/local/reportmate" > "$PACKAGE_ROOT/etc/paths.d/reportmate"
     
-    # Copy CLI executable to app bundle
-    cp "${DIST_DIR}/${PRODUCT_NAME}" "$APP_MACOS/"
-    
-    # Copy GUI executable to app bundle (CFBundleExecutable)
+    # Copy the app's main executable (CFBundleExecutable). It is also the
+    # collector: Contents/MacOS/managedreportsrunner is a symlink to it, and that
+    # name selects collector mode (Sources/App/AppEntry.swift). Running the
+    # collector as the main executable makes macOS privacy controls see a single
+    # client, the app, so one Full Disk Access grant covers it.
     GUI_EXECUTABLE="${BUILD_PATH}/ReportMateApp"
     if [ -f "$GUI_EXECUTABLE" ]; then
         cp "$GUI_EXECUTABLE" "$APP_MACOS/ReportMateApp"
         stamp_build_version "$APP_MACOS/ReportMateApp"
-        log_success "GUI app binary copied to app bundle"
+        ln -s ReportMateApp "$APP_MACOS/${PRODUCT_NAME}"
+        log_success "App executable copied; ${PRODUCT_NAME} links to it"
     else
-        log_warn "ReportMateApp not found at: $GUI_EXECUTABLE (GUI will not be available)"
+        log_warn "ReportMateApp not found at: $GUI_EXECUTABLE (GUI will not be available); bundling the standalone collector"
+        cp "${DIST_DIR}/${PRODUCT_NAME}" "$APP_MACOS/"
     fi
     
     # Copy privileged helper binary to app bundle
@@ -1203,8 +1206,11 @@ EOF
             CODESIGN_ARGS+=(--verbose)
         fi
         
-        # Sign the CLI executable
-        codesign "${CODESIGN_ARGS[@]}" "$APP_MACOS/${PRODUCT_NAME}"
+        # Sign the standalone collector, if bundled (normally a symlink to the
+        # main executable, which the bundle signature covers)
+        if [ -f "$APP_MACOS/${PRODUCT_NAME}" ] && [ ! -L "$APP_MACOS/${PRODUCT_NAME}" ]; then
+            codesign "${CODESIGN_ARGS[@]}" "$APP_MACOS/${PRODUCT_NAME}"
+        fi
         
         # Sign the GUI executable (if present)
         if [ -f "$APP_MACOS/ReportMateApp" ]; then

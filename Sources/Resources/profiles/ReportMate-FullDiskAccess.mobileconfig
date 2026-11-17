@@ -8,6 +8,10 @@
   profile do not prompt the user.
 
   Why three identifiers, not one:
+    The collector runs as the app's main executable (the LaunchDaemons start
+    Contents/MacOS/managedreportsrunner, a symlink to it), so the app's bundle
+    identifier, com.github.reportmate, covers both the window and the scheduled
+    runs: System Settings shows one locked "Managed Reports Runner" entry.
     TCC permissions do NOT inherit to child processes. The runner shells out to
     osqueryi, and osqueryi loads the macadmins extension as its own process. All
     three need their own grants or the management module will hang in a sandbox
@@ -45,11 +49,11 @@
 						<key>Allowed</key>
 						<true/>
 						<key>CodeRequirement</key>
-						<string>identifier "com.github.reportmate.managedreportsrunner" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "TEAMID0000"</string>
+						<string>identifier "com.github.reportmate" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "TEAMID0000"</string>
 						<key>Comment</key>
-						<string>ReportMate macOS Client - Full Disk Access for system telemetry collection</string>
+						<string>Managed Reports Runner.app (the window and the managedreportsrunner collector it runs) - Full Disk Access for system telemetry collection</string>
 						<key>Identifier</key>
-						<string>com.github.reportmate.managedreportsrunner</string>
+						<string>com.github.reportmate</string>
 						<key>IdentifierType</key>
 						<string>bundleID</string>
 					</dict>
@@ -84,11 +88,11 @@
 						<key>Allowed</key>
 						<true/>
 						<key>CodeRequirement</key>
-						<string>identifier "com.github.reportmate.managedreportsrunner" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "TEAMID0000"</string>
+						<string>identifier "com.github.reportmate" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "TEAMID0000"</string>
 						<key>Comment</key>
-						<string>ReportMate macOS Client - System Admin Files for MDM and profile data</string>
+						<string>Managed Reports Runner.app (the window and the managedreportsrunner collector it runs) - System Admin Files for MDM and profile data</string>
 						<key>Identifier</key>
-						<string>com.github.reportmate.managedreportsrunner</string>
+						<string>com.github.reportmate</string>
 						<key>IdentifierType</key>
 						<string>bundleID</string>
 					</dict>
@@ -121,7 +125,7 @@
 		</dict>
 	</array>
 	<key>PayloadDescription</key>
-	<string>Grants Full Disk Access and System Admin Files permissions to the ReportMate macOS client (managedreportsrunner), the osquery binary it shells out to, and the macadmins osquery extension it loads. Required for full system telemetry collection.</string>
+	<string>Grants Full Disk Access and System Admin Files to Managed Reports Runner.app (its window and the managedreportsrunner collector, which runs as the app's main executable), the osquery binary it shells out to, and the macadmins osquery extension it loads. Required for full system telemetry collection.</string>
 	<key>PayloadDisplayName</key>
 	<string>ReportMate Full Disk Access</string>
 	<key>PayloadIdentifier</key>

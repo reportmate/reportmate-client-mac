@@ -525,13 +525,14 @@ ReportMate requires **Full Disk Access** and other privacy permissions to collec
 - System Policy Admin Files - MDM enrollment data, configuration profiles
 
 **For Enterprise Deployment:**
-Deploy the `ReportMate-PrivacyPermissions.mobileconfig` via your MDM solution (Jamf Pro, Intune, Workspace ONE, etc.) to automatically grant permissions across all managed devices.
+Deploy [`Sources/Resources/profiles/ReportMate-FullDiskAccess.mobileconfig`](Sources/Resources/profiles/ReportMate-FullDiskAccess.mobileconfig) through your MDM (Jamf Pro, Intune, Workspace ONE, and so on). First replace the placeholder Team ID in the app's code requirements with the Team ID that signs your build.
 
-**Full Documentation:** See [PRIVACY_PROFILE_README.md](PRIVACY_PROFILE_README.md) for:
-- Detailed permission explanations
-- MDM deployment guides
-- Team ID configuration
-- Troubleshooting steps
-- Verification commands
+The profile grants access to the app's bundle identifier, `com.github.reportmate`. The LaunchDaemons run the collector as the app's main executable through the `Contents/MacOS/managedreportsrunner` symlink, so a single grant covers the window and the scheduled runs. System Settings shows one locked **Managed Reports Runner** entry that users cannot switch off. The profile also grants access to osquery (`io.osquery.agent`) and the macadmins extension, which run as their own processes.
+
+Check that the code requirement matches your signed build:
+
+```bash
+codesign -dr - "/Applications/Utilities/Managed Reports Runner.app"
+```
 
 This project represents a complete rewrite optimized for macOS while maintaining compatibility with the ReportMate ecosystem. The build system provides a complete solution for developing, testing, and distributing the ReportMate macOS client with comprehensive tooling for code signing, packaging, and deployment.

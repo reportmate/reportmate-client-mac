@@ -3,10 +3,16 @@ import Foundation
 import Logging
 import ReportMateLogging
 
-/// ReportMate macOS Client - Device data collection and reporting
-@main
-struct ReportMateClient: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
+/// ReportMate macOS Client - Device data collection and reporting.
+///
+/// The command lives in a library so the app's main executable can run it. The
+/// LaunchDaemons start `Contents/MacOS/managedreportsrunner`, a symlink to that
+/// executable, so macOS privacy controls see one client, the app, instead of a
+/// separate unbundled tool. `Sources/Runner` builds the standalone binary.
+public struct ReportMateClient: AsyncParsableCommand {
+    public init() {}
+
+    public static let configuration = CommandConfiguration(
         commandName: "managedreportsrunner",
         abstract: "ReportMate - Device data collection and reporting",
         version: AppVersion.current
@@ -55,7 +61,7 @@ struct ReportMateClient: AsyncParsableCommand {
     
     // MARK: - Main Execution
     
-    mutating func run() async throws {
+    public mutating func run() async throws {
         // Check for root privileges (required for system data collection and writing to /Library)
         guard getuid() == 0 else {
             fputs("ERROR: You must run this as root!\n", stderr)
@@ -1065,4 +1071,4 @@ public enum VerboseLevel: Int, Sendable {
     }
 }
 
-// Entry point handled by @main attribute
+// Entry points: Sources/Runner/main.swift and Sources/App/AppEntry.swift
