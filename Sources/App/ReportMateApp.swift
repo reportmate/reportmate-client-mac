@@ -1,6 +1,5 @@
 import SwiftUI
 
-@main
 struct ReportMateApp: App {
     @State private var xpcClient = XPCClient()
 

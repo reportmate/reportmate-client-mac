@@ -11,7 +11,7 @@ let package = Package(
     products: [
         .executable(
             name: "managedreportsrunner",
-            targets: ["ReportMate"]
+            targets: ["Runner"]
         ),
         .executable(
             name: "reportmate-appusage",
@@ -58,7 +58,9 @@ let package = Package(
             ],
             path: "Sources/ReportMateLogging"
         ),
-        .executableTarget(
+        // The collector, as a library: the standalone runner and the app's main
+        // executable both run it.
+        .target(
             name: "ReportMate",
             dependencies: [
                 "ReportMateLogging",
@@ -69,10 +71,15 @@ let package = Package(
                 .product(name: "Yams", package: "Yams"),
             ],
             path: "Sources",
-            exclude: ["Watcher", "App", "ReportMateXPC", "Helper", "ReportMateLogging"],
+            exclude: ["Watcher", "App", "ReportMateXPC", "Helper", "ReportMateLogging", "Runner"],
             resources: [
                 .copy("Resources")
             ]
+        ),
+        .executableTarget(
+            name: "Runner",
+            dependencies: ["ReportMate"],
+            path: "Sources/Runner"
         ),
         .executableTarget(
             name: "Watcher",
@@ -86,7 +93,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "App",
-            dependencies: ["ReportMateXPC"],
+            dependencies: ["ReportMateXPC", "ReportMate"],
             path: "Sources/App"
         ),
         .executableTarget(
