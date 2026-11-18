@@ -13,7 +13,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     
     public override func collectData() async throws -> ModuleData {
         // Total collection steps for progress tracking
-        let totalSteps = 16
+        let totalSteps = 15
         
         // Collect all system data sequentially with progress tracking
         ConsoleFormatter.writeQueryProgress(queryName: "os_info", current: 1, total: totalSteps)
@@ -34,35 +34,32 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         ConsoleFormatter.writeQueryProgress(queryName: "launchd_services", current: 6, total: totalSteps)
         let launchdServices = try await collectLaunchdServices()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "software_updates", current: 7, total: totalSteps)
-        _ = try await collectSoftwareUpdates()  // Collected but not used; pendingAppleUpdates provides this data
-        
-        ConsoleFormatter.writeQueryProgress(queryName: "pending_updates", current: 8, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "pending_updates", current: 7, total: totalSteps)
         let pendingUpdates = try await collectPendingAppleUpdates()
         let updateSearch = await collectUpdateSearch()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "install_history", current: 9, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "install_history", current: 8, total: totalSteps)
         let installHistory = try await collectInstallHistory()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "system_config", current: 10, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "system_config", current: 9, total: totalSteps)
         let systemConfig = try await collectSystemConfiguration()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "environment", current: 11, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "environment", current: 10, total: totalSteps)
         let environment = try await collectEnvironment()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "login_items", current: 12, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "login_items", current: 11, total: totalSteps)
         let loginItems = try await collectLoginItems()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "system_extensions", current: 13, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "system_extensions", current: 12, total: totalSteps)
         let systemExtensions = try await collectSystemExtensions()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "kernel_extensions", current: 14, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "kernel_extensions", current: 13, total: totalSteps)
         let kernelExtensions = try await collectKernelExtensions()
         
-        ConsoleFormatter.writeQueryProgress(queryName: "privileged_helpers", current: 15, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "privileged_helpers", current: 14, total: totalSteps)
         let privilegedHelpers = try await collectPrivilegedHelperTools()
 
-        ConsoleFormatter.writeQueryProgress(queryName: "binaries", current: 16, total: totalSteps)
+        ConsoleFormatter.writeQueryProgress(queryName: "binaries", current: 15, total: totalSteps)
         let binaries = await SystemBinaryInventory.collect()
         
         // Build the combined system data dictionary
@@ -98,21 +95,7 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
     /// Whether the last Apple software update search succeeded. Omitted when nothing on the
     /// device records it, so the API reports it as not reported rather than as succeeded.
     private func collectUpdateSearch() async -> [String: Any]? {
-        var exitCode: Int32?
-        var errorText: String?
-        if let run = try? await ProcessRunner.run(
-            executable: "/usr/sbin/softwareupdate",
-            arguments: ["--list", "--no-scan"],
-            timeout: 60
-        ) {
-            exitCode = run.timedOut ? -1 : run.exitCode
-            errorText = run.timedOut ? "softwareupdate --list did not finish within 60 seconds" : run.standardError
-        }
-        return UpdateSearch.status(
-            preferences: UpdateSearch.readPreferences(),
-            listExitCode: exitCode,
-            listError: errorText
-        )
+        UpdateSearch.status(preferences: UpdateSearch.readPreferences())
     }
 
     // MARK: - OS Version Info (osquery: os_version)
@@ -622,70 +605,24 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
         return services
     }
     
-    // MARK: - Software Updates (bash: softwareupdate)
-    
-    private func collectSoftwareUpdates() async throws -> [[String: Any]] {
-        let bashScript = """
-            # Get pending software updates (no-scan uses cached results)
-            updates_output=$(softwareupdate --list --no-scan 2>/dev/null)
-            
-            if echo "$updates_output" | grep -q "No new software available"; then
-                echo "[]"
-                exit 0
-            fi
-            
-            echo "["
-            first=true
-            current_name=""
-            current_version=""
-            current_size=""
-            current_recommended="false"
-            current_restart="false"
-            
-            echo "$updates_output" | while IFS= read -r line; do
-                # New update starts with *
-                if echo "$line" | grep -q "^\\s*\\*"; then
-                    # Output previous if exists
-                    if [ -n "$current_name" ]; then
-                        if [ "$first" = "false" ]; then echo ","; fi
-                        first=false
-                        echo "{\\"name\\": \\"$current_name\\", \\"version\\": \\"$current_version\\", \\"size\\": \\"$current_size\\", \\"recommended\\": $current_recommended, \\"restart_required\\": $current_restart}"
-                    fi
-                    current_name=$(echo "$line" | sed 's/^[[:space:]]*\\*[[:space:]]*//' | cut -d',' -f1)
-                    current_version=""
-                    current_size=""
-                    current_recommended="false"
-                    current_restart="false"
-                elif echo "$line" | grep -qi "Version:"; then
-                    current_version=$(echo "$line" | sed 's/.*Version:[[:space:]]*//')
-                elif echo "$line" | grep -qi "Size:"; then
-                    current_size=$(echo "$line" | sed 's/.*Size:[[:space:]]*//')
-                elif echo "$line" | grep -qi "Recommended:.*YES"; then
-                    current_recommended="true"
-                elif echo "$line" | grep -qi "Restart:.*YES"; then
-                    current_restart="true"
-                fi
-            done
-            
-            # Output last item
-            if [ -n "$current_name" ]; then
-                if [ "$first" = "false" ]; then echo ","; fi
-                echo "{\\"name\\": \\"$current_name\\", \\"version\\": \\"$current_version\\", \\"size\\": \\"$current_size\\", \\"recommended\\": $current_recommended, \\"restart_required\\": $current_restart}"
-            fi
-            echo "]"
-        """
-        
-        let result = try await executeWithFallback(
-            osquery: nil,
-            bash: bashScript
-        )
-        
-        if let items = result["items"] as? [[String: Any]] {
-            return items
+    /// Recommended updates from the cached scan in com.apple.SoftwareUpdate.plist, in the
+    /// normalized pending-update shape.
+    static func cachedRecommendedUpdates(_ preferences: [String: Any]?) -> [[String: Any]] {
+        guard let recommended = preferences?["RecommendedUpdates"] as? [[String: Any]] else { return [] }
+        return recommended.map { update in
+            [
+                "name": update["Display Name"] as? String ?? update["Identifier"] as? String ?? "",
+                "productKey": update["Product Key"] as? String ?? "",
+                "version": update["Display Version"] as? String ?? "",
+                "installDate": "",
+                "deferred": false,
+                "recommended": true,
+                "isSecurity": false,
+                "restartRequired": false
+            ]
         }
-        return []
     }
-    
+
     // MARK: - Pending Apple Updates (macadmins extension: pending_apple_updates)
     
     private func collectPendingAppleUpdates() async throws -> [[String: Any]] {
@@ -702,54 +639,14 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             FROM pending_apple_updates;
         """
         
-        // Fallback to bash: checks both standard pending updates and MDM-deferred updates
+        // Fallback to bash for MDM-deferred updates. Standard pending updates come from the
+        // cached scan in the SoftwareUpdate preferences below, never from `softwareupdate --list`:
+        // that command starts a text-rendering agent which checks Input Monitoring access.
         let bashScript = """
             current_version=$(sw_vers -productVersion)
             items=""
 
-            # --- Part 1: Standard pending updates (non-deferred, from cached scan) ---
-            updates_output=$(softwareupdate --list --no-scan 2>/dev/null)
-            if ! echo "$updates_output" | grep -q "No new software available"; then
-                upd_name=""
-                upd_version=""
-                upd_recommended="false"
-                upd_restart="false"
-
-                while IFS= read -r line; do
-                    if echo "$line" | grep -q "^[[:space:]]*\\*"; then
-                        if [ -n "$upd_name" ]; then
-                            esc_name=$(printf '%s' "$upd_name" | sed 's/\\\\/\\\\\\\\/g;s/"/\\\\"/g')
-                            esc_ver=$(printf '%s' "$upd_version" | sed 's/\\\\/\\\\\\\\/g;s/"/\\\\"/g')
-                            item="{\\\"name\\\":\\\"$esc_name\\\",\\\"version\\\":\\\"$esc_ver\\\",\\\"recommended\\\":$upd_recommended,\\\"restartRequired\\\":$upd_restart,\\\"deferred\\\":false}"
-                            [ -n "$items" ] && items="$items,"
-                            items="$items$item"
-                        fi
-                        upd_name=$(echo "$line" | sed 's/^[[:space:]]*\\*[[:space:]]*//' | sed 's/^Label:[[:space:]]*//' | cut -d',' -f1)
-                        upd_version=""
-                        upd_recommended="false"
-                        upd_restart="false"
-                    elif echo "$line" | grep -qi "Version:"; then
-                        upd_version=$(echo "$line" | sed 's/.*Version:[[:space:]]*//' | cut -d',' -f1 | tr -d '\\r')
-                        # Also check inline fields on the same line
-                        echo "$line" | grep -qi "Recommended:.*YES" && upd_recommended="true"
-                        echo "$line" | grep -qiE "Restart:.*YES|Action:.*restart" && upd_restart="true"
-                    elif echo "$line" | grep -qi "Recommended:.*YES"; then
-                        upd_recommended="true"
-                    elif echo "$line" | grep -qiE "Restart:.*YES|Action:.*restart"; then
-                        upd_restart="true"
-                    fi
-                done <<< "$updates_output"
-
-                if [ -n "$upd_name" ]; then
-                    esc_name=$(printf '%s' "$upd_name" | sed 's/\\\\/\\\\\\\\/g;s/"/\\\\"/g')
-                    esc_ver=$(printf '%s' "$upd_version" | sed 's/\\\\/\\\\\\\\/g;s/"/\\\\"/g')
-                    item="{\\\"name\\\":\\\"$esc_name\\\",\\\"version\\\":\\\"$esc_ver\\\",\\\"recommended\\\":$upd_recommended,\\\"restartRequired\\\":$upd_restart,\\\"deferred\\\":false}"
-                    [ -n "$items" ] && items="$items,"
-                    items="$items$item"
-                fi
-            fi
-
-            # --- Part 2: MDM-deferred updates from SoftwareUpdate plist ---
+            # MDM-deferred updates from SoftwareUpdate plist ---
             # Running as root (LaunchDaemon), so direct read access is available
             sw_plist="/Library/Preferences/com.apple.SoftwareUpdate.plist"
             if [ -f "$sw_plist" ]; then
@@ -874,8 +771,15 @@ public class SystemModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
             }
         }
         
-        // Deduplicate: when the same version appears from both softwareupdate -l (Part 1)
-        // and the MDM plist (Part 2), keep the richer Part 2 entry which has deferred metadata
+        // osquery's pending_apple_updates reads the cached scan itself. When the bash fallback
+        // ran instead, add the cached scan's recommended updates from the preferences file.
+        let fromOsquery = (result["items"] as? [[String: Any]])?.contains { $0["display_name"] != nil } ?? false
+        if !fromOsquery {
+            updates.insert(contentsOf: Self.cachedRecommendedUpdates(UpdateSearch.readPreferences()), at: 0)
+        }
+
+        // Deduplicate: when the same version appears in both the cached scan and the MDM
+        // deferral records, keep the richer deferred entry
         var seenVersions: [String: Int] = [:]
         var indicesToRemove: Set<Int> = []
         for (index, update) in updates.enumerated() {

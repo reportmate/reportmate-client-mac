@@ -122,8 +122,7 @@ final class UpdateSearchTests: XCTestCase {
 
     func testSuccessfulSession() {
         let result = UpdateSearch.status(
-            preferences: ["LastSessionSuccessful": true, "LastResultCode": 2, "LastSuccessfulDate": success],
-            listExitCode: 0, listError: ""
+            preferences: ["LastSessionSuccessful": true, "LastResultCode": 2, "LastSuccessfulDate": success]
         )
         XCTAssertEqual(result?["status"] as? String, "succeeded")
         XCTAssertEqual(result?["checkedAt"] as? String, "2026-01-01T00:00:00Z")
@@ -132,27 +131,26 @@ final class UpdateSearchTests: XCTestCase {
 
     func testFailedSession() {
         let result = UpdateSearch.status(
-            preferences: ["LastSessionSuccessful": false, "LastResultCode": 100, "LastSuccessfulDate": success],
-            listExitCode: 0, listError: ""
+            preferences: ["LastSessionSuccessful": false, "LastResultCode": 100, "LastSuccessfulDate": success]
         )
         XCTAssertEqual(result?["status"] as? String, "failed")
         XCTAssertEqual(result?["error"] as? String, "The last software update scan failed (result code 100)")
         XCTAssertEqual(result?["lastSuccessfulAt"] as? String, "2026-01-01T00:00:00Z")
     }
 
-    func testFailedListCommandWins() {
-        let now = Date(timeIntervalSince1970: 1_767_312_000)
-        let result = UpdateSearch.status(
-            preferences: ["LastSessionSuccessful": true, "LastSuccessfulDate": success],
-            listExitCode: 1, listError: "Cannot connect to the update server", now: now
-        )
-        XCTAssertEqual(result?["status"] as? String, "failed")
-        XCTAssertEqual(result?["error"] as? String, "Cannot connect to the update server")
-        XCTAssertEqual(result?["checkedAt"] as? String, "2026-01-02T00:00:00Z")
-    }
 
     func testNoRecordIsNotReported() {
-        XCTAssertNil(UpdateSearch.status(preferences: nil, listExitCode: 0, listError: nil))
-        XCTAssertNil(UpdateSearch.status(preferences: [:], listExitCode: 0, listError: nil))
+        XCTAssertNil(UpdateSearch.status(preferences: nil))
+        XCTAssertNil(UpdateSearch.status(preferences: [:]))
+    }
+
+    func testCachedRecommendedUpdates() {
+        let updates = SystemModuleProcessor.cachedRecommendedUpdates([
+            "RecommendedUpdates": [["Display Name": "macOS Tahoe 26.7.3", "Display Version": "26.7.3", "Product Key": "MSU_UPDATE_25H1_patch_26.7.3"]]
+        ])
+        XCTAssertEqual(updates.count, 1)
+        XCTAssertEqual(updates.first?["version"] as? String, "26.7.3")
+        XCTAssertEqual(updates.first?["deferred"] as? Bool, false)
+        XCTAssertTrue(SystemModuleProcessor.cachedRecommendedUpdates(nil).isEmpty)
     }
 }
