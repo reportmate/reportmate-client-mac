@@ -5,10 +5,9 @@ import ReportMateLogging
 
 /// ReportMate macOS Client - Device data collection and reporting.
 ///
-/// The command lives in a library so the app's main executable can run it. The
-/// LaunchDaemons start `Contents/MacOS/managedreportsrunner`, a symlink to that
-/// executable, so macOS privacy controls see one client, the app, instead of a
-/// separate unbundled tool. `Sources/Runner` builds the standalone binary.
+/// The command lives in a library the app's one executable runs: the
+/// LaunchDaemons start `Contents/MacOS/managedreportsrunner` with collector
+/// arguments, so macOS privacy controls see one client, the app.
 public struct ReportMateClient: AsyncParsableCommand {
     public init() {}
 
@@ -58,6 +57,9 @@ public struct ReportMateClient: AsyncParsableCommand {
     
     @Flag(name: .long, help: "Build executable package")
     var build: Bool = false
+
+    @Option(name: .long, help: "Wait a random number of seconds, from 0 up to this many, before starting (spreads scheduled runs across the fleet)")
+    var randomDelay: Int?
     
     // MARK: - Main Execution
     
@@ -66,6 +68,12 @@ public struct ReportMateClient: AsyncParsableCommand {
         guard getuid() == 0 else {
             fputs("ERROR: You must run this as root!\n", stderr)
             throw ExitCode.failure
+        }
+
+        // launchd has no trigger jitter, so the calendar-scheduled daemons pass
+        // --random-delay and the wait happens here rather than in a shell.
+        if let randomDelay, randomDelay > 0 {
+            try await Task.sleep(for: .seconds(Int.random(in: 0...randomDelay)))
         }
         
         // Display startup banner

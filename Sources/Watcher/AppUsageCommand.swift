@@ -4,10 +4,13 @@ import Logging
 import ReportMateLogging
 import AppKit
 
-/// ReportMate Application Usage Watcher command
-struct ReportMateAppUsage: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "reportmate-appusage",
+/// ReportMate Application Usage Watcher command. The app's executable runs it
+/// when started with `--appusage`; the arguments after that flag are parsed here.
+public struct ReportMateAppUsage: ParsableCommand {
+    public init() {}
+
+    public static let configuration = CommandConfiguration(
+        commandName: "managedreportsrunner --appusage",
         abstract: "ReportMate Application Usage Watcher",
         discussion: """
             Monitors GUI application launches and terminations, persisting usage data
@@ -34,7 +37,7 @@ struct ReportMateAppUsage: ParsableCommand {
     @Flag(name: .long, help: "Print database stats and exit")
     var stats: Bool = false
     
-    func run() throws {
+    public func run() throws {
         // Configure logging: the rolled file is the log. The console only carries
         // warnings unless -v is given, so launchd's capture of stdout stays small.
         let logLevel: Logger.Level = verbose ? .debug : (quiet ? .warning : .info)
@@ -136,6 +139,3 @@ private func runForever() {
         }
     }
 }
-
-// Entry point
-ReportMateAppUsage.main()

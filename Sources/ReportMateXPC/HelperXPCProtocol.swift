@@ -14,11 +14,23 @@ public let kHelperMachServiceName = "com.github.reportmate.helper"
 /// Preference domain for ReportMate system-level settings
 public let kReportMatePreferenceDomain = "com.github.reportmate"
 
-/// Path to the CLI binary inside the app bundle
+/// The app's one executable, which is also the collector
 public let kReportMateCLIPath = "/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner"
 
-/// Helper LaunchDaemon plist name (used by SMAppService)
+/// Helper LaunchDaemon plist name, in Contents/Library/LaunchDaemons (registered with SMAppService)
 public let kHelperPlistName = "com.github.reportmate.helper.plist"
+
+/// Every LaunchDaemon plist the app registers with SMAppService, in
+/// Contents/Library/LaunchDaemons. The labels match the file names.
+public let kReportMateDaemonPlistNames = [
+    "com.github.reportmate.hourly.plist",
+    "com.github.reportmate.fourhourly.plist",
+    "com.github.reportmate.daily.plist",
+    "com.github.reportmate.allmodules.plist",
+    "com.github.reportmate.installs.plist",
+    "com.github.reportmate.appusage.plist",
+    kHelperPlistName,
+]
 
 /// The authorization right an administrator must hold before the helper
 /// writes a machine setting. The GUI obtains it with the system's

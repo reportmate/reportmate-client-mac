@@ -78,6 +78,18 @@ final class LaunchdServicesTests: XCTestCase {
         XCTAssertEqual(LaunchdJob.State.notLoaded.displayName, "Not loaded")
     }
 
+    func testJobResolvesBundleProgramAgainstTheApp() throws {
+        let plist: [String: Any] = [
+            "Label": "com.github.reportmate.hourly",
+            "BundleProgram": "Contents/MacOS/managedreportsrunner",
+            "ProgramArguments": ["managedreportsrunner", "--run-modules", "security"],
+        ]
+        let path = "/Applications/Utilities/Managed Reports Runner.app/Contents/Library/LaunchDaemons/com.github.reportmate.hourly.plist"
+        let job = try XCTUnwrap(LaunchdServices.job(fromPlist: plist, path: path, kind: .daemon))
+        XCTAssertEqual(job.program, "/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner")
+        XCTAssertEqual(job.arguments, ["--run-modules", "security"])
+    }
+
     func testJobReadsPlistFields() throws {
         let plist: [String: Any] = [
             "Label": "com.example.tool",

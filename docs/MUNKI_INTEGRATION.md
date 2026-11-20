@@ -219,7 +219,7 @@ sudo /usr/local/munki/postflight.d/00-original.sh auto
 ls -la /usr/local/munki/postflight.d/reportmate.sh
 
 # Check if ReportMate binary exists
-ls -la /usr/local/reportmate/managedreportsrunner
+ls -la "/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner"
 ```
 
 **Fix:**

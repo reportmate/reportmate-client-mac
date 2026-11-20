@@ -193,7 +193,9 @@ public enum LaunchdServices {
         guard let label = plist["Label"] as? String, !label.isEmpty else { return nil }
 
         let programArguments = (plist["ProgramArguments"] as? [String]) ?? []
-        let program = (plist["Program"] as? String) ?? programArguments.first
+        let program = (plist["Program"] as? String)
+            ?? bundleProgramPath(plist, plistPath: path)
+            ?? programArguments.first
 
         var startInterval: String?
         if let seconds = (plist["StartInterval"] as? NSNumber)?.intValue, seconds > 0 {
@@ -227,6 +229,16 @@ public enum LaunchdServices {
             standardErrorPath: plist["StandardErrorPath"] as? String,
             disabledInPlist: (plist["Disabled"] as? Bool) == true
         )
+    }
+
+    /// The absolute path of an SMAppService job's `BundleProgram`, which is
+    /// relative to the app bundle whose Contents/Library/LaunchDaemons holds
+    /// the plist.
+    static func bundleProgramPath(_ plist: [String: Any], plistPath: String) -> String? {
+        guard let relative = plist["BundleProgram"] as? String, !relative.isEmpty else { return nil }
+        var bundle = URL(fileURLWithPath: plistPath)
+        for _ in 0..<4 { bundle.deleteLastPathComponent() }
+        return bundle.appendingPathComponent(relative).path
     }
 
     // MARK: - Status

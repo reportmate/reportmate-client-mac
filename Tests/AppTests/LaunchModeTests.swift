@@ -2,21 +2,28 @@ import XCTest
 @testable import App
 
 final class LaunchModeTests: XCTestCase {
-    private let bundle = "/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS"
+    private let executable = "/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner"
 
-    func testRunnerNameSelectsCollector() {
-        XCTAssertTrue(LaunchMode.isCommandLine(["\(bundle)/managedreportsrunner"]))
-        XCTAssertTrue(LaunchMode.isCommandLine(["/usr/local/bin/managedreportsrunner", "--hello"]))
+    func testNoArgumentsOpensWindow() {
+        XCTAssertEqual(LaunchMode([executable]), .window)
+        XCTAssertEqual(LaunchMode([executable, "-psn_0_12345"]), .window)
+        XCTAssertEqual(LaunchMode([executable, "-NSDocumentRevisionsDebugMode", "YES"]), .window)
+        XCTAssertEqual(LaunchMode([]), .window)
     }
 
-    func testPlainLaunchOpensWindow() {
-        XCTAssertFalse(LaunchMode.isCommandLine(["\(bundle)/ReportMateApp"]))
-        XCTAssertFalse(LaunchMode.isCommandLine(["\(bundle)/ReportMateApp", "-psn_0_12345"]))
-        XCTAssertFalse(LaunchMode.isCommandLine(["\(bundle)/ReportMateApp", "-NSDocumentRevisionsDebugMode", "YES"]))
+    func testRoleFlags() {
+        XCTAssertEqual(LaunchMode([executable, "--helper"]), .helper)
+        XCTAssertEqual(LaunchMode([executable, "--appusage"]), .appUsage)
+        XCTAssertEqual(LaunchMode([executable, "--appusage", "--stats"]), .appUsage)
+        XCTAssertEqual(LaunchMode([executable, "--register-daemons"]), .registerDaemons)
+        XCTAssertEqual(LaunchMode([executable, "--unregister-daemons"]), .unregisterDaemons)
     }
 
-    func testCollectorArgumentsSelectCollector() {
-        XCTAssertTrue(LaunchMode.isCommandLine(["\(bundle)/ReportMateApp", "--run-modules", "hardware"]))
-        XCTAssertTrue(LaunchMode.isCommandLine(["\(bundle)/ReportMateApp", "-vv"]))
+    func testAnythingElseIsTheCollector() {
+        XCTAssertEqual(LaunchMode([executable, "--run-modules", "hardware"]), .collector)
+        XCTAssertEqual(LaunchMode([executable, "-vv"]), .collector)
+        XCTAssertEqual(LaunchMode([executable, "--random-delay", "7200"]), .collector)
+        XCTAssertEqual(LaunchMode([executable, "--hello"]), .collector)
+        XCTAssertEqual(LaunchMode([executable, "-vv", "--helper"]), .collector, "a role flag only counts in first position")
     }
 }

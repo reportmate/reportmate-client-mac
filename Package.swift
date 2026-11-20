@@ -9,21 +9,12 @@ let package = Package(
         .macOS(.v14) // macOS Sonoma minimum for Swift 6.2 features
     ],
     products: [
+        // The one executable: the app's CFBundleExecutable. It opens the window,
+        // runs the privileged helper (--helper), the usage watcher (--appusage)
+        // or the collector, chosen by its arguments (Sources/App/AppEntry.swift).
         .executable(
             name: "managedreportsrunner",
-            targets: ["Runner"]
-        ),
-        .executable(
-            name: "reportmate-appusage",
-            targets: ["Watcher"]
-        ),
-        .executable(
-            name: "ReportMateApp",
             targets: ["App"]
-        ),
-        .executable(
-            name: "ReportMateHelper",
-            targets: ["Helper"]
         ),
         .library(
             name: "ReportMateXPC",
@@ -58,8 +49,7 @@ let package = Package(
             ],
             path: "Sources/ReportMateLogging"
         ),
-        // The collector, as a library: the standalone runner and the app's main
-        // executable both run it.
+        // The collector, as a library the app's executable runs.
         .target(
             name: "ReportMate",
             dependencies: [
@@ -71,17 +61,12 @@ let package = Package(
                 .product(name: "Yams", package: "Yams"),
             ],
             path: "Sources",
-            exclude: ["Watcher", "App", "ReportMateXPC", "Helper", "ReportMateLogging", "Runner"],
+            exclude: ["Watcher", "App", "ReportMateXPC", "Helper", "ReportMateLogging"],
             resources: [
                 .copy("Resources")
             ]
         ),
-        .executableTarget(
-            name: "Runner",
-            dependencies: ["ReportMate"],
-            path: "Sources/Runner"
-        ),
-        .executableTarget(
+        .target(
             name: "Watcher",
             dependencies: [
                 "ReportMateLogging",
@@ -93,10 +78,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "App",
-            dependencies: ["ReportMateXPC", "ReportMate"],
+            dependencies: ["ReportMateXPC", "ReportMate", "Helper", "Watcher"],
             path: "Sources/App"
         ),
-        .executableTarget(
+        .target(
             name: "Helper",
             dependencies: ["ReportMateXPC"],
             path: "Sources/Helper"

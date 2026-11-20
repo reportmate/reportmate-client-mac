@@ -1,52 +1,76 @@
 import Foundation
+import Helper
 import ReportMate
+import Watcher
 
-/// The app's main executable is also the collector.
+/// The app's one executable, `Contents/MacOS/managedreportsrunner`.
 ///
 /// macOS privacy controls (Full Disk Access and the rest) identify a process by
-/// its code. When the collector was its own binary in Contents/MacOS, it showed up
-/// beside the app as a second, unbundled client that needed its own grant. Running
-/// the collector from the app's main executable puts both under the app's bundle
-/// identifier, so one grant covers them.
+/// its code, so every Mach-O in the bundle is a row of its own in Privacy &
+/// Security. The window, the privileged helper, the usage watcher and the
+/// collector are therefore one executable, and its arguments choose the role:
 ///
-/// The LaunchDaemons, the helper and the CLI wrappers all start
-/// `Contents/MacOS/managedreportsrunner`, a symlink to this executable. That name
-/// selects collector mode. Launching the app from Finder or the Dock opens the
-/// window as before.
+/// - none: open the window
+/// - `--helper`: serve the privileged XPC helper (its LaunchDaemon passes this)
+/// - `--appusage [options]`: run the application usage watcher
+/// - `--register-daemons` / `--unregister-daemons`: register or remove the
+///   LaunchDaemons with SMAppService (the package's scripts run these as root)
+/// - anything else: the collector's command line
 @main
 enum AppEntry {
     @MainActor
     static func main() {
-        if LaunchMode.isCommandLine(CommandLine.arguments) {
+        let arguments = CommandLine.arguments
+        switch LaunchMode(arguments) {
+        case .window:
+            ReportMateApp.main()
+        case .helper:
+            HelperDaemon.run()
+        case .appUsage:
+            ReportMateAppUsage.main(Array(arguments.dropFirst(2)))
+        case .registerDaemons:
+            exit(DaemonRegistration.registerAll() ? EXIT_SUCCESS : EXIT_FAILURE)
+        case .unregisterDaemons:
+            exit(DaemonRegistration.unregisterAll() ? EXIT_SUCCESS : EXIT_FAILURE)
+        case .collector:
             Task {
                 await ReportMateClient.main()
                 exit(EXIT_SUCCESS)
             }
             dispatchMain()
-        } else {
-            ReportMateApp.main()
         }
     }
 }
 
-enum LaunchMode {
-    static let runnerName = "managedreportsrunner"
+enum LaunchMode: Equatable {
+    case window
+    case helper
+    case appUsage
+    case registerDaemons
+    case unregisterDaemons
+    case collector
 
-    /// True when this process should run the collector instead of the window:
-    /// it was started under the runner's name, or given arguments other than the
-    /// ones AppKit and Xcode pass to an app (`-psn_…`, `-NS… <value>`, `-Apple… <value>`).
-    static func isCommandLine(_ arguments: [String]) -> Bool {
-        guard let first = arguments.first else { return false }
-        if URL(fileURLWithPath: first).lastPathComponent == runnerName { return true }
+    /// The role for these process arguments. Arguments AppKit and Xcode pass
+    /// to an app (`-psn_…`, `-NS… <value>`, `-Apple… <value>`) are not the
+    /// caller's, so a launch with only those still opens the window.
+    init(_ arguments: [String]) {
         var rest = arguments.dropFirst()[...]
+        var own: [String] = []
         while let arg = rest.popFirst() {
             if arg.hasPrefix("-psn_") { continue }
             if arg.hasPrefix("-NS") || arg.hasPrefix("-Apple") {
                 _ = rest.popFirst()
                 continue
             }
-            return true
+            own.append(arg)
         }
-        return false
+        switch own.first {
+        case nil: self = .window
+        case "--helper": self = .helper
+        case "--appusage": self = .appUsage
+        case "--register-daemons": self = .registerDaemons
+        case "--unregister-daemons": self = .unregisterDaemons
+        default: self = .collector
+        }
     }
 }
