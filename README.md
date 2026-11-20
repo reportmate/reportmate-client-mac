@@ -244,16 +244,16 @@ After deployment, files are organized following macOS conventions:
 
 ```bash
 # Run data collection (default action)
-/usr/local/reportmate/managedreportsrunner run [--force] [--device-id ID] [--api-url URL]
+managedreportsrunner run [--force] [--device-id ID] [--api-url URL]
 
 # Test configuration and connectivity  
-/usr/local/reportmate/managedreportsrunner test [--verbose]
+managedreportsrunner test [--verbose]
 
 # Display system information
-/usr/local/reportmate/managedreportsrunner info [--json]
+managedreportsrunner info [--json]
 
 # Install and configure
-sudo /usr/local/reportmate/managedreportsrunner install --api-url URL [--device-id ID] [--api-key KEY]
+sudo managedreportsrunner install --api-url URL [--device-id ID] [--api-key KEY]
 ```
 
 ## Configuration Management
@@ -527,7 +527,7 @@ ReportMate requires **Full Disk Access** and other privacy permissions to collec
 **For Enterprise Deployment:**
 Deploy [`Sources/Resources/profiles/ReportMate-FullDiskAccess.mobileconfig`](Sources/Resources/profiles/ReportMate-FullDiskAccess.mobileconfig) through your MDM (Jamf Pro, Intune, Workspace ONE, and so on). First replace the placeholder Team ID in the app's code requirements with the Team ID that signs your build.
 
-The profile grants access to the app's bundle identifier, `com.github.reportmate`. The LaunchDaemons run the collector as the app's main executable through the `Contents/MacOS/managedreportsrunner` symlink, so a single grant covers the window and the scheduled runs. System Settings shows one locked **Managed Reports Runner** entry that users cannot switch off. The profile also grants access to osquery (`io.osquery.agent`) and the macadmins extension, which run as their own processes.
+The profile grants access to the app's bundle identifier, `com.github.reportmate`. The app has a single executable, `Contents/MacOS/managedreportsrunner`, which is the window, the privileged helper, the usage watcher and the collector, so a single grant covers all of them. System Settings shows one locked **Managed Reports Runner** entry that users cannot switch off. The profile also grants access to osquery (`io.osquery.agent`) and the macadmins extension, which run as their own processes.
 
 Check that the code requirement matches your signed build:
 

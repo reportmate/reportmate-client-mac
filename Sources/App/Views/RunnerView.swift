@@ -191,6 +191,10 @@ struct RunView: View {
                 Label("Helper not installed: reinstall the package to run as root", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .font(.caption)
+            } else if xpcClient.helperStatus == .requiresApproval {
+                Label("Helper needs approval in System Settings > General > Login Items & Extensions", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.caption)
             } else {
                 Label("Running without helper (no root)", systemImage: "info.circle")
                     .foregroundStyle(.secondary)

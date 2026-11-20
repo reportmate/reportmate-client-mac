@@ -8,6 +8,7 @@
 
 import Foundation
 import ReportMateXPC
+import ServiceManagement
 
 @Observable
 @MainActor
@@ -37,6 +38,7 @@ final class XPCClient: NSObject {
     enum HelperStatus: String {
         case unknown = "Unknown"
         case registered = "Installed"
+        case requiresApproval = "Needs Approval"
         case notRegistered = "Not Installed"
     }
 
@@ -46,7 +48,7 @@ final class XPCClient: NSObject {
 
     // MARK: - Setup (called on app launch)
 
-    /// Checks whether the package installed the helper, then connects.
+    /// Checks whether the helper is registered, then connects.
     func setup() {
         checkHelperStatus()
         connect()
@@ -58,6 +60,12 @@ final class XPCClient: NSObject {
         guard connection == nil else { return }
 
         let conn = NSXPCConnection(machServiceName: kHelperMachServiceName, options: .privileged)
+        // The helper is this same signed executable, so pin it to our own
+        // designated requirement. An unsigned build has none, and the helper
+        // refuses unsigned clients anyway.
+        if let requirement = CodeIdentity.ownDesignatedRequirement {
+            conn.setCodeSigningRequirement(requirement)
+        }
         conn.remoteObjectInterface = NSXPCInterface(with: HelperXPCProtocol.self)
         conn.exportedInterface = NSXPCInterface(with: HelperXPCClientProtocol.self)
         conn.exportedObject = self
@@ -90,10 +98,17 @@ final class XPCClient: NSObject {
 
     // MARK: - Helper Status
 
-    /// The package installs the helper as a LaunchDaemon, so the app never
-    /// registers it and a standard user never has to approve it.
+    /// The package's postinstall registers the helper with SMAppService
+    /// (`managedreportsrunner --register-daemons`, as root); the window only
+    /// reads the registration, so a standard user is never asked to approve it.
+    /// A managed login-items profile for the bundle identifier approves it.
     func checkHelperStatus() {
-        helperStatus = FileManager.default.fileExists(atPath: kHelperLaunchDaemonPath) ? .registered : .notRegistered
+        switch SMAppService.daemon(plistName: kHelperPlistName).status {
+        case .enabled: helperStatus = .registered
+        case .requiresApproval: helperStatus = .requiresApproval
+        case .notRegistered, .notFound: helperStatus = .notRegistered
+        @unknown default: helperStatus = .unknown
+        }
     }
 
     // MARK: - Running Collection

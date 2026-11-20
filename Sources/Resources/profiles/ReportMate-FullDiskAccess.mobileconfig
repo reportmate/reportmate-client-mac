@@ -8,10 +8,11 @@
   profile do not prompt the user.
 
   Why three identifiers, not one:
-    The collector runs as the app's main executable (the LaunchDaemons start
-    Contents/MacOS/managedreportsrunner, a symlink to it), so the app's bundle
-    identifier, com.github.reportmate, covers both the window and the scheduled
-    runs: System Settings shows one locked "Managed Reports Runner" entry.
+    The app has one executable, Contents/MacOS/managedreportsrunner: the
+    window, the privileged helper, the usage watcher and the scheduled
+    collector are all that executable, so the app's bundle identifier,
+    com.github.reportmate, covers every one of them: System Settings shows one
+    locked "Managed Reports Runner" entry.
     TCC permissions do NOT inherit to child processes. The runner shells out to
     osqueryi, and osqueryi loads the macadmins extension as its own process. All
     three need their own grants or the management module will hang in a sandbox

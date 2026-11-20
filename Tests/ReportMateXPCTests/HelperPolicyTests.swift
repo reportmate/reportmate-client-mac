@@ -3,20 +3,13 @@ import XCTest
 
 final class HelperPolicyTests: XCTestCase {
 
-    func testRequirementPinsAppIdentifierAndTeam() {
-        let requirement = HelperPolicy.clientRequirement(teamID: "ABCDE12345")
-        XCTAssertTrue(requirement.contains("identifier \"com.github.reportmate\""))
-        XCTAssertTrue(requirement.contains("certificate leaf[subject.OU] = \"ABCDE12345\""))
-        XCTAssertTrue(requirement.hasPrefix("anchor apple generic"))
-    }
-
     func testRunArgumentsAllowVerbosityAndModules() {
-        XCTAssertTrue(HelperPolicy.isAllowedRun(arguments: []))
         XCTAssertTrue(HelperPolicy.isAllowedRun(arguments: ["-vvv"]))
         XCTAssertTrue(HelperPolicy.isAllowedRun(arguments: ["-vvv", "--run-modules", "hardware,network,system_info"]))
     }
 
     func testRunArgumentsRejectAnythingElse() {
+        XCTAssertFalse(HelperPolicy.isAllowedRun(arguments: []), "no arguments opens the window, as root")
         XCTAssertFalse(HelperPolicy.isAllowedRun(arguments: ["--api-url", "https://example.com"]))
         XCTAssertFalse(HelperPolicy.isAllowedRun(arguments: ["--run-modules"]))
         XCTAssertFalse(HelperPolicy.isAllowedRun(arguments: ["--run-modules", ""]))

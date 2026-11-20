@@ -520,37 +520,10 @@ stamp_build_version() {
         || { log_error "vtool could not stamp ${bin}"; exit 1; }
 }
 
-# Copy binaries to release
+# Copy the one executable to release. It is the app's CFBundleExecutable and
+# also the helper, the usage watcher and the collector (Sources/App/AppEntry.swift).
 cp "$EXECUTABLE_PATH" "${DIST_DIR}/${PRODUCT_NAME}"
-
-# Copy app usage watcher binary if it was built
-APPUSAGE_PATH="${BUILD_PATH}/reportmate-appusage"
-if [ -f "$APPUSAGE_PATH" ]; then
-    cp "$APPUSAGE_PATH" "${DIST_DIR}/reportmate-appusage"
-    log_success "App usage watcher binary copied to release"
-else
-    log_warn "reportmate-appusage not found at: $APPUSAGE_PATH (usage watcher will not be packaged)"
-fi
-
-# Copy GUI app binary if it was built
-GUI_APP_PATH="${BUILD_PATH}/ReportMateApp"
-if [ -f "$GUI_APP_PATH" ]; then
-    cp "$GUI_APP_PATH" "${DIST_DIR}/ReportMateApp"
-    stamp_build_version "${DIST_DIR}/ReportMateApp"
-    log_success "GUI app binary copied to dist"
-else
-    log_warn "ReportMateApp not found at: $GUI_APP_PATH (GUI will not be packaged)"
-fi
-
-# Copy privileged helper binary if it was built
-HELPER_PATH="${BUILD_PATH}/ReportMateHelper"
-if [ -f "$HELPER_PATH" ]; then
-    cp "$HELPER_PATH" "${DIST_DIR}/ReportMateHelper"
-    stamp_build_version "${DIST_DIR}/ReportMateHelper"
-    log_success "Privileged helper binary copied to dist"
-else
-    log_warn "ReportMateHelper not found at: $HELPER_PATH (helper will not be packaged)"
-fi
+stamp_build_version "${DIST_DIR}/${PRODUCT_NAME}"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CODE SIGNING
@@ -595,28 +568,7 @@ if [ "$SIGN" = true ]; then
     fi
     
     codesign "${CODESIGN_ARGS[@]}" "${DIST_DIR}/${PRODUCT_NAME}"
-    
-    # Sign app usage watcher if present
-    if [ -f "${DIST_DIR}/reportmate-appusage" ]; then
-        codesign "${CODESIGN_ARGS[@]}" "${DIST_DIR}/reportmate-appusage"
-        codesign --verify --verbose=2 "${DIST_DIR}/reportmate-appusage"
-        log_success "App usage watcher signed"
-    fi
-    
-    # Sign GUI app if present
-    if [ -f "${DIST_DIR}/ReportMateApp" ]; then
-        codesign "${CODESIGN_ARGS[@]}" "${DIST_DIR}/ReportMateApp"
-        codesign --verify --verbose=2 "${DIST_DIR}/ReportMateApp"
-        log_success "GUI app signed"
-    fi
-    
-    # Sign helper if present
-    if [ -f "${DIST_DIR}/ReportMateHelper" ]; then
-        codesign "${CODESIGN_ARGS[@]}" "${DIST_DIR}/ReportMateHelper"
-        codesign --verify --verbose=2 "${DIST_DIR}/ReportMateHelper"
-        log_success "Helper binary signed"
-    fi
-    
+
     # Verify signature
     codesign --verify --verbose=2 "${DIST_DIR}/${PRODUCT_NAME}"
     log_success "Code signing complete"
@@ -651,83 +603,18 @@ if [ "$SKIP_PKG" = false ]; then
     mkdir -p "$PACKAGE_ROOT/usr/local/reportmate"
     mkdir -p "$PACKAGE_ROOT/Library/Managed Reports/logs"
     mkdir -p "$PACKAGE_ROOT/etc/paths.d"
-    
-    # Add reportmate to PATH
-    echo "/usr/local/reportmate" > "$PACKAGE_ROOT/etc/paths.d/reportmate"
-    
-    # Copy the app's main executable (CFBundleExecutable). It is also the
-    # collector: Contents/MacOS/managedreportsrunner is a symlink to it, and that
-    # name selects collector mode (Sources/App/AppEntry.swift). Running the
-    # collector as the main executable makes macOS privacy controls see a single
-    # client, the app, so one Full Disk Access grant covers it.
-    GUI_EXECUTABLE="${BUILD_PATH}/ReportMateApp"
-    if [ -f "$GUI_EXECUTABLE" ]; then
-        cp "$GUI_EXECUTABLE" "$APP_MACOS/ReportMateApp"
-        stamp_build_version "$APP_MACOS/ReportMateApp"
-        ln -s ReportMateApp "$APP_MACOS/${PRODUCT_NAME}"
-        log_success "App executable copied; ${PRODUCT_NAME} links to it"
-    else
-        log_warn "ReportMateApp not found at: $GUI_EXECUTABLE (GUI will not be available); bundling the standalone collector"
-        cp "${DIST_DIR}/${PRODUCT_NAME}" "$APP_MACOS/"
-    fi
-    
-    # Copy privileged helper binary to app bundle
-    HELPER_EXECUTABLE="${BUILD_PATH}/ReportMateHelper"
-    if [ -f "$HELPER_EXECUTABLE" ]; then
-        cp "$HELPER_EXECUTABLE" "$APP_MACOS/ReportMateHelper"
-        stamp_build_version "$APP_MACOS/ReportMateHelper"
-        log_success "Helper binary copied to app bundle"
-        
-        # The package installs the helper as a system LaunchDaemon: postinstall
-        # copies this plist to /Library/LaunchDaemons and bootstraps it, so no
-        # user ever has to approve a login item. launchd starts the helper on
-        # demand when the GUI connects to its Mach service.
-        cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.helper.plist" << 'HELPERPLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.github.reportmate.helper</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/ReportMateHelper</string>
-    </array>
-    <key>MachServices</key>
-    <dict>
-        <key>com.github.reportmate.helper</key>
-        <true/>
-    </dict>
-    <key>AssociatedBundleIdentifiers</key>
-    <string>com.github.reportmate</string>
-</dict>
-</plist>
-HELPERPLIST
-        log_success "Helper LaunchDaemon plist created"
-    else
-        log_warn "ReportMateHelper not found at: $HELPER_EXECUTABLE (privileged helper will not be available)"
-    fi
-    
-    # Create wrapper script for CLI access from /usr/local/reportmate/
-    cat > "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner" << 'WRAPPER'
-#!/bin/sh
-# ReportMate CLI wrapper — forwards to app bundle in /Applications/Utilities/
-exec "/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner" "$@"
-WRAPPER
-    chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/managedreportsrunner"
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # APP USAGE WATCHER BINARY
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    if [ -f "${DIST_DIR}/reportmate-appusage" ]; then
-        log_info "Bundling app usage watcher..."
-        cp "${DIST_DIR}/reportmate-appusage" "$PACKAGE_ROOT/usr/local/reportmate/reportmate-appusage"
-        chmod 755 "$PACKAGE_ROOT/usr/local/reportmate/reportmate-appusage"
-        log_success "App usage watcher bundled: reportmate-appusage"
-    else
-        log_warn "reportmate-appusage not in release, watcher will not be included in package"
-    fi
+    # Put the app's executable on PATH, so `managedreportsrunner` runs the real
+    # binary with no symlink or wrapper in between
+    echo "/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS" > "$PACKAGE_ROOT/etc/paths.d/reportmate"
+    
+    # The bundle's one Mach-O, CFBundleExecutable. Its arguments choose the
+    # role: none opens the window, --helper serves the privileged XPC helper,
+    # --appusage runs the usage watcher, anything else is the collector. One
+    # executable is one row in Privacy & Security and one PPPC grant.
+    cp "${DIST_DIR}/${PRODUCT_NAME}" "$APP_MACOS/${PRODUCT_NAME}"
+    chmod 755 "$APP_MACOS/${PRODUCT_NAME}"
+    log_success "App executable copied: Contents/MacOS/${PRODUCT_NAME}"
 
     # ═══════════════════════════════════════════════════════════════════════════
     # OSQUERY MACADMINS EXTENSION
@@ -789,7 +676,7 @@ WRAPPER
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>ReportMateApp</string>
+    <string>${PRODUCT_NAME}</string>
     <key>CFBundleIconFile</key>
     <string>ReportMate</string>
     <key>CFBundleIconName</key>
@@ -822,266 +709,145 @@ EOF
     echo "APPL????" > "$APP_CONTENTS/PkgInfo"
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # LAUNCHDAEMONS (embedded in app bundle like Outset)
+    # LAUNCHDAEMONS (embedded in the app bundle, registered with SMAppService)
     # ═══════════════════════════════════════════════════════════════════════════
-    
-    # Hourly daemon - security, network, management
-    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.hourly.plist" << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.github.reportmate.hourly</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner</string>
-        <string>--run-modules</string>
-        <string>security,network,management,hardware</string>
-        <string>--storage-mode</string>
-        <string>quick</string>
-    </array>
-    <key>StartInterval</key>
-    <integer>3600</integer>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.hourly.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.hourly.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-    <key>Nice</key>
-    <integer>10</integer>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>AbandonProcessGroup</key>
-    <true/>
-    <key>AssociatedBundleIdentifiers</key>
-    <string>com.github.reportmate</string>
-</dict>
-</plist>
-EOF
-
-    # 4-hourly daemon - applications, inventory, system, identity
-    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.fourhourly.plist" << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.github.reportmate.fourhourly</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner</string>
-        <string>--run-modules</string>
-        <string>applications,inventory,system,identity,peripherals</string>
-    </array>
-    <key>StartInterval</key>
-    <integer>14400</integer>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.fourhourly.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.fourhourly.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-    <key>Nice</key>
-    <integer>10</integer>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>AbandonProcessGroup</key>
-    <true/>
-    <key>AssociatedBundleIdentifiers</key>
-    <string>com.github.reportmate</string>
-</dict>
-</plist>
-EOF
-
-    # Daily daemon - hardware deep scan, in the hour after 09:00.
     #
-    # StartCalendarInterval fires at the same absolute instant on every Mac,
-    # so a fixed 09:00 puts the whole fleet on the API in one minute. The
-    # hourly and fourhourly daemons do not have this problem -- StartInterval
-    # counts from daemon load, which is boot time, and that is already spread
-    # across the fleet. Same random-sleep wrapper the allmodules job uses.
-    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.daily.plist" << 'EOF'
+    # Each plist names the app's own executable through BundleProgram, relative
+    # to the bundle, with a role or collector flag in ProgramArguments (whose
+    # first element is argv[0]). The postinstall registers them all with
+    # `managedreportsrunner --register-daemons`, so launchd attributes every job
+    # to com.github.reportmate and nothing is copied to /Library/LaunchDaemons.
+    # No job goes through /bin/sh: the calendar jobs spread themselves across
+    # the fleet with the collector's --random-delay.
+
+    # write_daemon_plist <label> <schedule-and-extra-keys-xml> <argument>...
+    write_daemon_plist() {
+        local label="$1" extra="$2"
+        shift 2
+        local args="        <string>${PRODUCT_NAME}</string>"
+        local arg
+        for arg in "$@"; do
+            args="${args}
+        <string>${arg}</string>"
+        done
+        cat > "$APP_LAUNCHDAEMONS/${label}.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.github.reportmate.daily</string>
+    <string>${label}</string>
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/${PRODUCT_NAME}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/sh</string>
-        <string>-c</string>
-        <string>sleep $(/usr/bin/jot -r 1 0 3540); exec "/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner" --run-modules hardware --storage-mode deep</string>
+${args}
     </array>
-    <key>StartCalendarInterval</key>
+${extra}
+    <key>AssociatedBundleIdentifiers</key>
+    <string>${BUNDLE_ID}</string>
+</dict>
+</plist>
+EOF
+        plutil -lint -s "$APP_LAUNCHDAEMONS/${label}.plist" || { log_error "Invalid LaunchDaemon plist: ${label}"; exit 1; }
+    }
+
+    # Background jobs: a launchd log per label, a low priority and a PATH.
+    background_keys() {
+        cat << EOF
+    <key>StandardOutPath</key>
+    <string>/Library/Managed Reports/logs/launchd-$1.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Managed Reports/logs/launchd-$1.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+EOF
+    }
+    collector_keys() {
+        background_keys "$1"
+        cat << EOF
+    <key>RunAtLoad</key>
+    <false/>
+    <key>AbandonProcessGroup</key>
+    <true/>
+EOF
+    }
+
+    # Hourly: security, network, management and a quick hardware snapshot
+    write_daemon_plist com.github.reportmate.hourly "    <key>StartInterval</key>
+    <integer>3600</integer>
+$(collector_keys com.github.reportmate.hourly)" \
+        --run-modules security,network,management,hardware --storage-mode quick
+
+    # Four-hourly: applications, inventory, system, identity, peripherals
+    write_daemon_plist com.github.reportmate.fourhourly "    <key>StartInterval</key>
+    <integer>14400</integer>
+$(collector_keys com.github.reportmate.fourhourly)" \
+        --run-modules applications,inventory,system,identity,peripherals
+
+    # Daily hardware deep scan, in the hour after 09:00. StartCalendarInterval
+    # fires at the same instant on every Mac, so a fixed 09:00 would put the
+    # whole fleet on the API in one minute; --random-delay spreads it over the
+    # hour. The StartInterval jobs need no jitter: they count from daemon load,
+    # which is boot time, already spread across the fleet.
+    write_daemon_plist com.github.reportmate.daily "    <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
         <integer>9</integer>
         <key>Minute</key>
         <integer>0</integer>
     </dict>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.daily.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.daily.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-    <key>Nice</key>
-    <integer>10</integer>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>AbandonProcessGroup</key>
-    <true/>
-    <key>AssociatedBundleIdentifiers</key>
-    <string>com.github.reportmate</string>
-</dict>
-</plist>
-EOF
+$(collector_keys com.github.reportmate.daily)" \
+        --run-modules hardware --storage-mode deep --random-delay 3540
 
-    # All-modules daemon - full collection once daily in the 04:00-06:00 window.
-    # Full collection is expensive, so it must not run on a rolling StartInterval
-    # that drifts into working hours. launchd has no native trigger jitter, so the
-    # job is wrapped in a short shell that sleeps a random slice of the window;
-    # that spreads the fleet instead of every device hitting the API at 04:00.
-    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.allmodules.plist" << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.github.reportmate.allmodules</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/sh</string>
-        <string>-c</string>
-        <string>sleep $(/usr/bin/jot -r 1 0 7200); exec "/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner"</string>
-    </array>
-    <key>StartCalendarInterval</key>
+    # All modules once a day, spread across the 04:00-06:00 window. Full
+    # collection is expensive, so it must not drift into working hours on a
+    # rolling StartInterval.
+    write_daemon_plist com.github.reportmate.allmodules "    <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
         <integer>4</integer>
         <key>Minute</key>
         <integer>0</integer>
     </dict>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.allmodules.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.allmodules.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-    <key>Nice</key>
-    <integer>10</integer>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>AbandonProcessGroup</key>
-    <true/>
-    <key>AssociatedBundleIdentifiers</key>
-    <string>com.github.reportmate</string>
-</dict>
-</plist>
-EOF
+$(collector_keys com.github.reportmate.allmodules)" \
+        --random-delay 7200
 
-    # Installs daemon - no schedule of its own. The Munki postflight kickstarts
-    # it so the installs module runs under launchd instead of as a child of
+    # Installs: no schedule of its own. The Munki postflight kickstarts it so
+    # the installs module runs under launchd instead of as a child of
     # managedsoftwareupdate: Munki's own daemons do not set AbandonProcessGroup,
     # so launchd kills everything in that process group the moment the Munki
     # run ends, and a nohup'd runner died before it could log a line.
-    cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.installs.plist" << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.github.reportmate.installs</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner</string>
-        <string>--run-modules</string>
-        <string>installs</string>
-        <string>--force</string>
-    </array>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.installs.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.installs.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-    <key>Nice</key>
-    <integer>10</integer>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>AbandonProcessGroup</key>
-    <true/>
-    <key>AssociatedBundleIdentifiers</key>
-    <string>com.github.reportmate</string>
-</dict>
-</plist>
-EOF
+    write_daemon_plist com.github.reportmate.installs "$(collector_keys com.github.reportmate.installs)" \
+        --run-modules installs --force
 
-    # App usage watcher daemon - persistent background process for tracking app launches
-    if [ -f "${DIST_DIR}/reportmate-appusage" ]; then
-        cat > "$APP_LAUNCHDAEMONS/com.github.reportmate.appusage.plist" << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.github.reportmate.appusage</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/reportmate/reportmate-appusage</string>
-    </array>
-    <key>RunAtLoad</key>
+    # App usage watcher: a persistent process recording app launches and quits
+    write_daemon_plist com.github.reportmate.appusage "    <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <key>StandardOutPath</key>
-    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.appusage.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Library/Managed Reports/logs/launchd-com.github.reportmate.appusage.log</string>
-    <key>EnvironmentVariables</key>
+$(background_keys com.github.reportmate.appusage)" \
+        --appusage
+
+    # Privileged helper: launchd starts it on demand when the window connects
+    # to its Mach service. It accepts only this app's own signed executable.
+    # Standard priority and no launchd log, as before: a run the window starts
+    # through it should not be throttled.
+    write_daemon_plist com.github.reportmate.helper "    <key>MachServices</key>
     <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-    <key>Nice</key>
-    <integer>10</integer>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>AssociatedBundleIdentifiers</key>
-    <string>com.github.reportmate</string>
-</dict>
-</plist>
-EOF
-        log_success "App usage watcher LaunchDaemon plist created"
-    fi
+        <key>com.github.reportmate.helper</key>
+        <true/>
+    </dict>" \
+        --helper
+
+    log_success "LaunchDaemon plists created in Contents/Library/LaunchDaemons"
 
     # ═══════════════════════════════════════════════════════════════════════════
     # MODULE SCHEDULES CONFIGURATION
@@ -1206,24 +972,9 @@ EOF
             CODESIGN_ARGS+=(--verbose)
         fi
         
-        # Sign the standalone collector, if bundled (normally a symlink to the
-        # main executable, which the bundle signature covers)
-        if [ -f "$APP_MACOS/${PRODUCT_NAME}" ] && [ ! -L "$APP_MACOS/${PRODUCT_NAME}" ]; then
-            codesign "${CODESIGN_ARGS[@]}" "$APP_MACOS/${PRODUCT_NAME}"
-        fi
-        
-        # Sign the GUI executable (if present)
-        if [ -f "$APP_MACOS/ReportMateApp" ]; then
-            codesign "${CODESIGN_ARGS[@]}" "$APP_MACOS/ReportMateApp"
-            log_success "GUI app binary signed"
-        fi
-        
-        # Sign the helper executable (if present)
-        if [ -f "$APP_MACOS/ReportMateHelper" ]; then
-            codesign "${CODESIGN_ARGS[@]}" "$APP_MACOS/ReportMateHelper"
-            log_success "Helper binary signed"
-        fi
-        
+        # Sign the one executable, then the bundle (which seals the plists)
+        codesign "${CODESIGN_ARGS[@]}" "$APP_MACOS/${PRODUCT_NAME}"
+
         # Sign the app bundle
         codesign "${CODESIGN_ARGS[@]}" --deep "$APP_BUNDLE"
         
@@ -1350,9 +1101,8 @@ else
     log_message "osquery already present at $EXISTING_OSQUERY; leaving it as is"
 fi
 
-# Make extension and watcher executable
+# Make the extension executable
 chmod 755 /usr/local/reportmate/macadmins_extension.ext 2>/dev/null
-chmod 755 /usr/local/reportmate/reportmate-appusage 2>/dev/null
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CLEAN UP OLD APP LOCATION AND DUPLICATE COPIES
@@ -1386,79 +1136,69 @@ unsetopt NULL_GLOB 2>/dev/null
 # Register app bundle at new location
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister "${APP_PATH}"
 
-# LaunchDaemons to install
-DAEMONS=(
-    "com.github.reportmate.hourly.plist"
-    "com.github.reportmate.fourhourly.plist"
-    "com.github.reportmate.daily.plist"
-    "com.github.reportmate.allmodules.plist"
-    "com.github.reportmate.installs.plist"
-    "com.github.reportmate.appusage.plist"
-    "com.github.reportmate.helper.plist"
+# ═══════════════════════════════════════════════════════════════════════════
+# ONE EXECUTABLE, NO SYMLINKS
+# ═══════════════════════════════════════════════════════════════════════════
+# Contents/MacOS/managedreportsrunner is the bundle's only Mach-O. Remove what
+# earlier layouts left behind: the separate GUI and helper binaries (extra files
+# in Contents/MacOS also break the bundle's seal), the PATH symlink and wrapper,
+# and the standalone usage watcher.
+RUNNER="${APP_ROOT}/MacOS/managedreportsrunner"
+for retired in "${APP_ROOT}/MacOS/ReportMateApp" "${APP_ROOT}/MacOS/ReportMateHelper" \
+               /usr/local/bin/managedreportsrunner \
+               /usr/local/reportmate/managedreportsrunner \
+               /usr/local/reportmate/reportmate-appusage; do
+    if [ -e "$retired" ] || [ -L "$retired" ]; then
+        log_message "Removing retired ${retired}"
+        rm -f "$retired"
+    fi
+done
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LAUNCHDAEMONS (registered from the app bundle with SMAppService)
+# ═══════════════════════════════════════════════════════════════════════════
+LABELS=(
+    com.github.reportmate.hourly
+    com.github.reportmate.fourhourly
+    com.github.reportmate.daily
+    com.github.reportmate.allmodules
+    com.github.reportmate.installs
+    com.github.reportmate.appusage
+    com.github.reportmate.helper
 )
 
-# Remove legacy daemons (boot removed 2026.02, 12hourly renamed to allmodules 2026.02)
-for legacy in "com.github.reportmate.plist" "com.github.reportmate.boot.plist" "com.github.reportmate.12hourly.plist"; do
-    if [ -e "${LD_ROOT}/${legacy}" ]; then
-        log_message "Removing legacy daemon: ${legacy}"
-        /bin/launchctl bootout system "${LD_ROOT}/${legacy}" 2>/dev/null
-        rm -f "${LD_ROOT}/${legacy}"
+# Earlier releases copied the plists to /Library/LaunchDaemons. A job loaded
+# from there under the same label would shadow the registered one, so unload
+# and delete every copy (boot removed 2026.02, 12hourly renamed 2026.02).
+for label in com.github.reportmate com.github.reportmate.boot com.github.reportmate.12hourly ${LABELS}; do
+    if [ -e "${LD_ROOT}/${label}.plist" ]; then
+        log_message "Removing legacy daemon: ${label}.plist"
+        /bin/launchctl bootout system "${LD_ROOT}/${label}.plist" 2>/dev/null
+        rm -f "${LD_ROOT}/${label}.plist"
     fi
 done
 
-# Unload existing and install new daemons
-for daemon in ${DAEMONS}; do
-    daemon_path="${LD_ROOT}/${daemon}"
-    if [ -e "${daemon_path}" ]; then
-        /bin/launchctl bootout system "${daemon_path}" 2>/dev/null
-        rm -f "${daemon_path}"
-    fi
+# A `launchctl disable` is recorded in launchd's own override database
+# (/var/db/com.apple.xpc.launchd/disabled.plist), keyed by label, and outlives
+# the plist. Anyone who ever disabled a daemon to chase a performance problem
+# would silently never get it back, so clear the override before registering.
+for label in ${LABELS}; do
+    /bin/launchctl enable "system/${label}" 2>/dev/null
 done
 
-for daemon in ${DAEMONS}; do
-    source_path="${APP_ROOT}/Library/LaunchDaemons/${daemon}"
-    dest_path="${LD_ROOT}/${daemon}"
-    label="${daemon%.plist}"
+# Registration needs approval, which a managed login-items profile for
+# com.github.reportmate grants silently; without one each daemon waits in
+# System Settings > General > Login Items & Extensions. Never fail the install
+# over it, but never swallow it either: a daemon that does not run is a module
+# that silently stops being collected.
+if "$RUNNER" --register-daemons; then
+    log_message "LaunchDaemons registered"
+else
+    log_message "WARNING: one or more LaunchDaemons failed to register - collection they schedule will not run"
+fi
 
-    if [ -e "${source_path}" ]; then
-        log_message "Installing: ${daemon}"
-        cp "${source_path}" "${dest_path}"
-        chmod 644 "${dest_path}"
-        chown root:wheel "${dest_path}"
-
-        # A `launchctl disable` is recorded in launchd's own override database
-        # (/var/db/com.apple.xpc.launchd/disabled.plist), keyed by label. That
-        # record is independent of the plist file, so removing and reinstalling
-        # the plist does not clear it, and bootstrap then fails with EIO for the
-        # life of the machine. Anyone who ever disabled a daemon to chase a
-        # performance problem would silently never get it back. Clear the
-        # override before bootstrapping.
-        /bin/launchctl enable "system/${label}" 2>/dev/null
-
-        if /bin/launchctl bootstrap system "${dest_path}" 2>/dev/null; then
-            log_message "Loaded: ${label}"
-        else
-            # Do not fail the install over one daemon, but never swallow it
-            # either - a daemon that silently fails to load is a module that
-            # silently stops being collected.
-            log_message "WARNING: failed to load ${label} - collection scheduled by this daemon will not run"
-        fi
-    fi
-done
-
-# Make wrapper executable
-chmod 755 /usr/local/reportmate/managedreportsrunner 2>/dev/null
-
-# Create/update symlink in /usr/local/bin to ensure the latest binary is used
-# This handles upgrades where an old binary might exist in /usr/local/bin
-log_message "Creating symlink in /usr/local/bin..."
-mkdir -p /usr/local/bin
-rm -f /usr/local/bin/managedreportsrunner 2>/dev/null
-ln -sf "${APP_PATH}/Contents/MacOS/managedreportsrunner" /usr/local/bin/managedreportsrunner
-log_message "Symlink created: /usr/local/bin/managedreportsrunner -> ${APP_PATH}/Contents/MacOS/managedreportsrunner"
-
-# PATH entry (keep for backward compatibility with wrapper)
-echo "/usr/local/reportmate" > /etc/paths.d/reportmate 2>/dev/null
+# PATH entry: the app's own executable, with no symlink or wrapper in between
+echo "${APP_ROOT}/MacOS" > /etc/paths.d/reportmate 2>/dev/null
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MUNKI POSTFLIGHT INTEGRATION
@@ -1606,7 +1346,6 @@ WRAPPER_EOF
 # that just finished. Invoked by the postflight wrapper with Munki's runtype.
 
 RUNNER="/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner"
-[ -x "$RUNNER" ] || RUNNER="/usr/local/reportmate/managedreportsrunner"
 LOG_DIR="/Library/Managed Reports/logs"
 LOG="${LOG_DIR}/reportmate-postflight.log"
 mkdir -p "$LOG_DIR" 2>/dev/null
@@ -1680,9 +1419,9 @@ POSTINSTALL_SCRIPT
 # The client writes its own log; nothing here needs capturing.
 log_message "Running initial check-in, then a full collection..."
 nohup /bin/sh -c '
-    /usr/local/reportmate/managedreportsrunner --hello
-    exec /usr/local/reportmate/managedreportsrunner --force --storage-mode quick
-' >/dev/null 2>&1 &
+    "$1" --hello
+    exec "$1" --force --storage-mode quick
+' sh "$RUNNER" >/dev/null 2>&1 &
 disown
 
 log_message "ReportMate postinstall complete."
@@ -1706,8 +1445,17 @@ log_message "Starting ReportMate preinstall..."
     rm -f "${LD_ROOT}/com.github.reportmate.plist"
 }
 
-# Current daemons
-for daemon in com.github.reportmate.boot com.github.reportmate.hourly com.github.reportmate.fourhourly com.github.reportmate.daily com.github.reportmate.allmodules com.github.reportmate.appusage; do
+# Daemons this app registered with SMAppService: unregister them through the
+# installed executable while it is still the old one, so launchd stops them and
+# the postinstall registers the new plists. Earlier layouts have a symlink at
+# that path and no registration, so they are skipped.
+RUNNER="/Applications/Utilities/Managed Reports Runner.app/Contents/MacOS/managedreportsrunner"
+if [ -f "$RUNNER" ] && [ ! -L "$RUNNER" ]; then
+    "$RUNNER" --unregister-daemons 2>&1 | while IFS= read -r line; do log_message "$line"; done
+fi
+
+# Daemons earlier releases copied to /Library/LaunchDaemons
+for daemon in com.github.reportmate.boot com.github.reportmate.hourly com.github.reportmate.fourhourly com.github.reportmate.daily com.github.reportmate.allmodules com.github.reportmate.installs com.github.reportmate.appusage com.github.reportmate.helper; do
     daemon_path="${LD_ROOT}/${daemon}.plist"
     [ -e "${daemon_path}" ] && {
         /bin/launchctl bootout system "${daemon_path}" 2>/dev/null

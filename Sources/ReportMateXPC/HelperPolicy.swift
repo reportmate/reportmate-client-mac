@@ -2,27 +2,19 @@
 //  HelperPolicy.swift
 //  ReportMate
 //
-//  What the privileged helper accepts: which client may connect, which
-//  arguments it passes to the CLI, and which preference keys it writes.
+//  What the privileged helper accepts: which arguments it passes to the
+//  collector and which preference keys it writes. The client it accepts is
+//  pinned in the helper itself, to its own designated requirement.
 //  Kept in the shared library so the rules are unit-tested.
 //
 
 import Foundation
 
-/// Signing identifier of the GUI app (the bundle's main executable).
-public let kReportMateGUIIdentifier = "com.github.reportmate"
+/// Bundle and signing identifier of the app.
+public let kReportMateBundleIdentifier = "com.github.reportmate"
 
-/// Path of the helper's LaunchDaemon plist, installed by the package.
-public let kHelperLaunchDaemonPath = "/Library/LaunchDaemons/com.github.reportmate.helper.plist"
 
 public enum HelperPolicy {
-
-    /// Code-signing requirement a client must satisfy: our app, signed by the
-    /// helper's own Team ID. Pinning the identifier keeps the CLI and any other
-    /// binary from the same team from driving the helper.
-    public static func clientRequirement(teamID: String) -> String {
-        "anchor apple generic and identifier \"\(kReportMateGUIIdentifier)\" and certificate leaf[subject.OU] = \"\(teamID)\""
-    }
 
     /// Preference keys the GUI's Prefs tab edits. The helper writes nothing else;
     /// in particular it never writes the client passphrase.
@@ -58,8 +50,11 @@ public enum HelperPolicy {
         return plist[key] != nil
     }
 
-    /// Arguments the helper passes to the CLI: verbosity flags and a module list.
+    /// Arguments the helper passes to the collector: verbosity flags and a
+    /// module list. Never none: the executable opens its window when started
+    /// with no arguments, and the helper runs as root.
     public static func isAllowedRun(arguments: [String]) -> Bool {
+        guard !arguments.isEmpty else { return false }
         var index = 0
         while index < arguments.count {
             let argument = arguments[index]

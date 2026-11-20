@@ -1,8 +1,9 @@
 //
 //  HelperCommandRunner.swift
-//  ReportMateHelper
+//  Helper
 //
-//  Implements the XPC protocol: runs the CLI binary with output streaming
+//  Implements the XPC protocol: runs the collector (the app's own executable)
+//  with output streaming
 //  and manages system-level preferences.
 //
 

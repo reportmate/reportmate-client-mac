@@ -97,7 +97,7 @@ public struct ApplicationUsageSession: Sendable {
 // MARK: - Application Usage Service
 
 /// Service for collecting application usage data from SQLite database.
-/// The database is populated by the reportmate-appusage watcher daemon.
+/// The database is populated by the app usage watcher daemon (`managedreportsrunner --appusage`).
 /// Falls back to ps-based polling if database is unavailable.
 public class ApplicationUsageService: @unchecked Sendable {
     
@@ -171,7 +171,7 @@ public class ApplicationUsageService: @unchecked Sendable {
             snapshot.totalUsageSeconds = sessions.reduce(0) { $0 + $1.durationSeconds }
             
             if !FileManager.default.fileExists(atPath: dbPath) {
-                snapshot.warnings.append("Watcher daemon not running. Install reportmate-appusage for accurate usage tracking.")
+                snapshot.warnings.append("Watcher daemon not running. Register com.github.reportmate.appusage for accurate usage tracking.")
             }
         } catch {
             snapshot.status = "error"

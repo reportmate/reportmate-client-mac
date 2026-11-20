@@ -119,12 +119,14 @@ Sources/
 ├── Models/
 │   ├── DeviceModels.swift       # DeviceInfo, EventMetadata, UnifiedDevicePayload
 │   └── Modules/                 # Data models for each module type
-├── App/                         # SwiftUI GUI app (separate executable target)
-│   ├── ReportMateApp.swift      # @main App entry point
+├── App/                         # The one executable: window, helper, watcher or collector by argv
+│   ├── AppEntry.swift           # @main, picks the role from the arguments
+│   ├── ReportMateApp.swift      # SwiftUI App (the window)
 │   ├── Models/                  # ModuleDefinition etc.
 │   ├── ViewModels/              # SettingsViewModel, RunnerViewModel
 │   └── Views/                   # ContentView, SettingsView, RunnerView
-└── Watcher/                     # Separate executable for app usage tracking
+├── Helper/                      # Privileged XPC helper library (--helper)
+└── Watcher/                     # App usage watcher library (--appusage)
 ```
 
 ### Data Collection Flow
@@ -162,9 +164,9 @@ Available modules: `hardware`, `system`, `network`, `security`, `applications`, 
 - `build.sh` generates `AppVersion.swift` with the version at build time and restores placeholder on exit
 - Signing requires `.env` file with `SIGNING_IDENTITY_APP` and `SIGNING_IDENTITY_INSTALLER`
 - PKG installer creates an app bundle at `/Applications/Utilities/Managed Reports Runner.app`
-- CLI binary and GUI binary both live in `Contents/MacOS/`
-- A wrapper at `/usr/local/reportmate/managedreportsrunner` forwards to the app bundle CLI
-- LaunchDaemons are embedded in the app bundle and installed by postinstall script
+- `Contents/MacOS/managedreportsrunner` is the bundle's only Mach-O and its `CFBundleExecutable`. No arguments opens the window, `--helper` serves the privileged XPC helper, `--appusage` runs the usage watcher, `--register-daemons` / `--unregister-daemons` manage the daemons, anything else is the collector. No symlinks or wrappers
+- `/etc/paths.d/reportmate` puts `Contents/MacOS` on PATH
+- LaunchDaemons live in `Contents/Library/LaunchDaemons` with `BundleProgram`, and postinstall registers them with SMAppService (`managedreportsrunner --register-daemons`). They need a managed login-items profile for `com.github.reportmate` to run without user approval
 
 ## LaunchDaemons
 
