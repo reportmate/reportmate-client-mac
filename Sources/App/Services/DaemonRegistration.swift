@@ -18,9 +18,15 @@ import ReportMateXPC
 import ServiceManagement
 
 enum DaemonRegistration {
-    /// Registers every daemon that is not already enabled. Returns false if
-    /// any registration failed; a daemon left waiting for approval is
-    /// reported but is not a failure, since approval is out of this tool's hands.
+    /// Registers every daemon afresh. A daemon that reports any registration
+    /// is unregistered first and registered again, because the status cannot be
+    /// trusted on an upgrade: a job of the same label loaded from
+    /// /Library/LaunchDaemons by an earlier release reads as `.enabled`, and once
+    /// the postinstall boots that copy out nothing would be loaded at all.
+    /// Re-registering also makes launchd load the plists the new bundle carries.
+    /// Returns false if any registration failed; a daemon left waiting for
+    /// approval is reported but is not a failure, since approval is out of this
+    /// tool's hands.
     static func registerAll(plistNames: [String] = kReportMateDaemonPlistNames) -> Bool {
         guard getuid() == 0 else {
             fputs("ERROR: --register-daemons must run as root\n", stderr)
@@ -29,9 +35,11 @@ enum DaemonRegistration {
         var ok = true
         for name in plistNames {
             let service = SMAppService.daemon(plistName: name)
-            if service.status == .enabled {
-                print("\(name): already registered")
-                continue
+            if service.status != .notRegistered, service.status != .notFound {
+                print("\(name): was \(describe(service.status)), re-registering")
+                if let error = unregister(service) {
+                    print("\(name): unregister before re-register reported: \(error.localizedDescription)")
+                }
             }
             do {
                 try service.register()
@@ -61,21 +69,26 @@ enum DaemonRegistration {
                 print("\(name): not registered")
                 continue
             }
-            let done = DispatchSemaphore(value: 0)
-            nonisolated(unsafe) var failure: Error?
-            service.unregister { error in
-                failure = error
-                done.signal()
-            }
-            done.wait()
-            if let failure {
-                fputs("\(name): unregister failed: \(failure.localizedDescription)\n", stderr)
+            if let error = unregister(service) {
+                fputs("\(name): unregister failed: \(error.localizedDescription)\n", stderr)
                 ok = false
             } else {
                 print("\(name): unregistered")
             }
         }
         return ok
+    }
+
+    /// Unregisters one daemon and waits for launchd to finish; nil on success.
+    private static func unregister(_ service: SMAppService) -> Error? {
+        let done = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var failure: Error?
+        service.unregister { error in
+            failure = error
+            done.signal()
+        }
+        done.wait()
+        return failure
     }
 
     static func describe(_ status: SMAppService.Status) -> String {
