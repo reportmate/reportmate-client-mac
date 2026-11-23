@@ -19,6 +19,60 @@ import Foundation
 ///
 /// NOTE: Displays are NOT collected here - they are part of Hardware module
 public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
+    /// A PPD's text. CUPS commonly stores PPDs gzip-compressed, and vendor PPDs are
+    /// not always UTF-8, so the bytes decide how the file is read. Input, output and
+    /// decompression time are bounded so one bad file cannot stall collection.
+    static func readPPDContent(
+        atPath path: String,
+        maxBytes: Int = 16 * 1024 * 1024,
+        timeout: TimeInterval = 10
+    ) throws -> String {
+        let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              (attributes[.size] as? NSNumber)?.intValue ?? Int.max <= maxBytes else {
+            throw CocoaError(.fileReadTooLarge)
+        }
+
+        var data = try Data(contentsOf: url)
+        if data.starts(with: [0x1F, 0x8B]) {
+            data = try decompressPPD(url, maxBytes: maxBytes, timeout: timeout)
+        }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+    }
+
+    private static func decompressPPD(_ url: URL, maxBytes: Int, timeout: TimeInterval) throws -> Data {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+        process.arguments = ["-dc"]
+        process.standardInput = try FileHandle(forReadingFrom: url)
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+
+        let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: deadline)
+        defer { deadline.cancel() }
+
+        var data = Data()
+        while true {
+            let chunk = output.fileHandleForReading.availableData
+            if chunk.isEmpty { break }
+            data.append(chunk)
+            if data.count > maxBytes {
+                process.terminate()
+                process.waitUntilExit()
+                throw CocoaError(.fileReadTooLarge)
+            }
+        }
+        process.waitUntilExit()
+        guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return data
+    }
+
     
     public init(configuration: ReportMateConfiguration) {
         super.init(moduleId: "peripherals", configuration: configuration)
@@ -881,7 +935,7 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
                 // Parse PPD file if found
                 if !ppdFilePath.isEmpty {
                     do {
-                        let ppdContent = try String(contentsOfFile: ppdFilePath, encoding: .utf8)
+                        let ppdContent = try Self.readPPDContent(atPath: ppdFilePath)
                         
                         // Extract *Manufacturer: "VALUE"
                         if let manufacturerMatch = ppdContent.range(of: #"\*Manufacturer:\s*"([^"]+)""#, options: .regularExpression) {
