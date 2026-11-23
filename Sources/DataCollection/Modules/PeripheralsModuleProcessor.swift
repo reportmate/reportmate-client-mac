@@ -19,6 +19,28 @@ import Foundation
 ///
 /// NOTE: Displays are NOT collected here - they are part of Hardware module
 public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendable {
+    /// A PPD's text. CUPS commonly stores PPDs gzip-compressed, and vendor PPDs are
+    /// not always UTF-8, so the bytes decide how the file is read.
+    static func readPPDContent(atPath path: String) throws -> String {
+        var data = try Data(contentsOf: URL(fileURLWithPath: path))
+        if data.starts(with: [0x1F, 0x8B]) {
+            let process = Process()
+            let output = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+            process.arguments = ["-dc"]
+            process.standardInput = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+        }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+    }
+
     
     public init(configuration: ReportMateConfiguration) {
         super.init(moduleId: "peripherals", configuration: configuration)
@@ -881,7 +903,7 @@ public class PeripheralsModuleProcessor: BaseModuleProcessor, @unchecked Sendabl
                 // Parse PPD file if found
                 if !ppdFilePath.isEmpty {
                     do {
-                        let ppdContent = try String(contentsOfFile: ppdFilePath, encoding: .utf8)
+                        let ppdContent = try Self.readPPDContent(atPath: ppdFilePath)
                         
                         // Extract *Manufacturer: "VALUE"
                         if let manufacturerMatch = ppdContent.range(of: #"\*Manufacturer:\s*"([^"]+)""#, options: .regularExpression) {
