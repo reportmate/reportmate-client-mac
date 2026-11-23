@@ -32,6 +32,18 @@ final class PPDContentTests: XCTestCase {
         XCTAssertEqual(try PeripheralsModuleProcessor.readPPDContent(atPath: path.path), text)
     }
 
+    func testRejectsDecompressedOutputOverTheLimit() throws {
+        let plain = directory.appendingPathComponent("large")
+        try Data(repeating: 0x41, count: 4096).write(to: plain)
+        let gzip = Process()
+        gzip.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+        gzip.arguments = [plain.path]
+        try gzip.run()
+        gzip.waitUntilExit()
+        let path = directory.appendingPathComponent("large.gz")
+        XCTAssertThrowsError(try PeripheralsModuleProcessor.readPPDContent(atPath: path.path, maxBytes: 1024))
+    }
+
     func testReadsLatin1PPD() throws {
         let path = directory.appendingPathComponent("latin.ppd")
         try Data([0x2A, 0x4E, 0xE9]).write(to: path)
