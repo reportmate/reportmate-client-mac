@@ -27,12 +27,20 @@ enum DaemonRegistration {
     /// Returns false if any registration failed; a daemon left waiting for
     /// approval is reported but is not a failure, since approval is out of this
     /// tool's hands.
-    static func registerAll(plistNames: [String] = kReportMateDaemonPlistNames) -> Bool {
+    static func registerAll(
+        plistNames: [String] = kReportMateDaemonPlistNames,
+        attempts: Int = 15,
+        delay: TimeInterval = 1
+    ) -> Bool {
         guard getuid() == 0 else {
             fputs("ERROR: --register-daemons must run as root\n", stderr)
             return false
         }
-        var ok = true
+        // Unregister everything first. launchd finishes tearing a job down a
+        // moment after unregister returns, and a register call in that window
+        // fails with EPERM or ESRCH, which left every daemon unregistered on
+        // upgrade. Doing all unregisters first, then retrying each register,
+        // gives launchd that time without a fixed sleep.
         for name in plistNames {
             let service = SMAppService.daemon(plistName: name)
             if service.status != .notRegistered, service.status != .notFound {
@@ -41,16 +49,26 @@ enum DaemonRegistration {
                     print("\(name): unregister before re-register reported: \(error.localizedDescription)")
                 }
             }
-            do {
-                try service.register()
-                print("\(name): registered (\(describe(service.status)))")
-            } catch {
-                if service.status == .requiresApproval {
-                    print("\(name): registered, waiting for approval in Login Items & Extensions")
-                } else {
-                    fputs("\(name): registration failed: \(error.localizedDescription)\n", stderr)
-                    ok = false
+        }
+        var ok = true
+        for name in plistNames {
+            let service = SMAppService.daemon(plistName: name)
+            let result = Retry.run(attempts: attempts, delay: delay) { () -> Error? in
+                do {
+                    try service.register()
+                    return nil
+                } catch {
+                    return service.status == .requiresApproval ? nil : error
                 }
+            }
+            if let error = result.error {
+                fputs("\(name): registration failed after \(result.tries) attempts: \(error.localizedDescription)\n", stderr)
+                ok = false
+            } else if service.status == .requiresApproval {
+                print("\(name): registered, waiting for approval in Login Items & Extensions")
+            } else {
+                let note = result.tries > 1 ? " after \(result.tries) attempts" : ""
+                print("\(name): registered (\(describe(service.status)))\(note)")
             }
         }
         return ok
@@ -99,5 +117,28 @@ enum DaemonRegistration {
         case .notFound: return "plist not found in the app bundle"
         @unknown default: return "unknown"
         }
+    }
+}
+
+/// Runs an operation until it succeeds or the attempts run out.
+enum Retry {
+    struct Outcome {
+        let error: Error?
+        let tries: Int
+    }
+
+    static func run(
+        attempts: Int,
+        delay: TimeInterval,
+        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+        _ operation: () -> Error?
+    ) -> Outcome {
+        var last: Error?
+        for attempt in 1...max(1, attempts) {
+            last = operation()
+            if last == nil { return Outcome(error: nil, tries: attempt) }
+            if attempt < attempts { sleep(delay) }
+        }
+        return Outcome(error: last, tries: max(1, attempts))
     }
 }
